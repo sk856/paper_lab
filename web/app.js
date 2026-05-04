@@ -18,6 +18,7 @@ const state = {
   paperEditorDirty: false,
   paperRunning: false,
   paperSectionFilter: '',
+  paperPushTargets: {},
   selectedHistoryId: '',
   restoring: false,
 };
@@ -190,6 +191,7 @@ function saveDraft() {
     paperSectionContents: state.paperSectionContents,
     paperSectionContentSources: state.paperSectionContentSources,
     paperReferenceSnapshot: state.paperReferenceSnapshot,
+    paperPushTargets: state.paperPushTargets,
     fields: captureFields(),
     savedAt: new Date().toISOString(),
   });
@@ -204,6 +206,7 @@ function restoreDraft() {
   state.paperSectionContents = draft.paperSectionContents || {};
   state.paperSectionContentSources = draft.paperSectionContentSources || {};
   state.paperReferenceSnapshot = draft.paperReferenceSnapshot || '';
+  state.paperPushTargets = draft.paperPushTargets || {};
   applyFields(draft.fields);
   syncModeSelections();
 }
@@ -709,6 +712,13 @@ function sectionNumberLabel(section, index, numbers = outlineSectionNumbers(stat
   return number ? `${number} ${section.title}` : section.title;
 }
 
+function paperSectionNumberedTitle(title) {
+  const sections = state.paperSections || [];
+  const index = sections.findIndex((section) => section.title === title);
+  if (index < 0) return title;
+  return sectionNumberLabel(sections[index], index, outlineSectionNumbers(sections));
+}
+
 function paperSectionHasChildren(title) {
   return (state.paperSections || []).some((section) => section.parent === title);
 }
@@ -785,13 +795,23 @@ function pushScopeSectionTitles(scopeValue) {
 function paperSectionTextBlock(title) {
   const body = String(state.paperSectionContents[title] || '').trim();
   if (!body) return '';
-  return `${title}\n${body}`;
+  return `${paperSectionNumberedTitle(title)}\n${body}`;
 }
 
 function collectPaperPushText(scopeValue) {
   storeCurrentPaperEditor({ skipEmptyOverwrite: true });
   const titles = pushScopeSectionTitles(scopeValue);
   return titles.map(paperSectionTextBlock).filter(Boolean).join('\n\n').trim();
+}
+
+function collectPaperPushPayload(scopeValue) {
+  storeCurrentPaperEditor({ skipEmptyOverwrite: true });
+  const titles = pushScopeSectionTitles(scopeValue);
+  return {
+    scope: String(scopeValue || 'all'),
+    titles,
+    text: titles.map(paperSectionTextBlock).filter(Boolean).join('\n\n').trim(),
+  };
 }
 
 function renderPaperPushScopes() {
@@ -816,10 +836,10 @@ function renderPaperPushScopes() {
 
 function paperPushTargetConfig(target) {
   return {
-    ai: { page: 'ai', input: '#aiInput', stateScope: 'ai', label: '降 AI 检测' },
-    plagiarism: { page: 'plagiarism', input: '#plagiarismInput', stateScope: 'plagiarism', label: '降查重率' },
-    polish: { page: 'polish', input: '#polishInput', stateScope: 'polish', label: '学术润色' },
-    correction: { page: 'correction', input: '#correctionInput', stateScope: 'correction', label: '智能纠错' },
+    ai: { page: 'ai', input: '#aiInput', output: '#aiOutput', stateScope: 'ai', label: '降 AI 检测' },
+    plagiarism: { page: 'plagiarism', input: '#plagiarismInput', output: '#plagiarismOutput', stateScope: 'plagiarism', label: '降查重率' },
+    polish: { page: 'polish', input: '#polishInput', output: '#polishOutput', stateScope: 'polish', label: '学术润色' },
+    correction: { page: 'correction', input: '#correctionInput', output: '#correctionOutput', stateScope: 'correction', label: '智能纠错' },
   }[target] || null;
 }
 
@@ -828,15 +848,99 @@ function pushPaperSelectionToWorkspace() {
   const target = $('#paperPushTarget')?.value || 'ai';
   const config = paperPushTargetConfig(target);
   if (!config) return;
-  const text = collectPaperPushText(scope);
-  if (!text) {
+  const payload = collectPaperPushPayload(scope);
+  if (!payload.text) {
     setState('paper', '所选范围没有可推送的正文内容。', 'error');
     return;
   }
-  setText(config.input, text);
+  setText(config.input, payload.text);
+  setText(config.output, '');
+  state.paperPushTargets[target] = {
+    scope: payload.scope,
+    titles: payload.titles,
+    pushedAt: new Date().toISOString(),
+  };
   setState('paper', `已推送到${config.label}`, 'done');
   setState(config.stateScope, '已接收论文内容');
   setPage(config.page);
+  saveDraft();
+}
+
+function paperBackfillHeadingTitle(line, titles) {
+  const text = stripOutlineEmphasis(String(line || '').trim());
+  if (!text || text.length > 180) return '';
+  const parsed = analyzeOutlineHeading(text);
+  const candidates = parsed
+    ? [parsed.title, parsed.raw, normalizeOutlineTitle(parsed.raw)]
+    : [text, normalizeOutlineTitle(text)];
+  return titles.find((title) => {
+    const keys = paperSectionTitleKeys(title);
+    return candidates.some((candidate) => keys.has(paperTitleMatchKey(candidate)));
+  }) || '';
+}
+
+function splitPaperBackfillSections(text, titles) {
+  const result = {};
+  const validTitles = new Set(titles);
+  let currentTitle = '';
+  let currentLines = [];
+  const saveCurrent = () => {
+    if (!currentTitle || !validTitles.has(currentTitle)) return;
+    const body = currentLines.join('\n').replace(/^\n+|\n+$/g, '');
+    if (body.trim()) result[currentTitle] = body;
+  };
+
+  String(text || '').replace(/\r\n/g, '\n').replace(/\r/g, '\n').split('\n').forEach((line) => {
+    const matchedTitle = paperBackfillHeadingTitle(line, titles);
+    if (matchedTitle) {
+      saveCurrent();
+      currentTitle = matchedTitle;
+      currentLines = [];
+      return;
+    }
+    if (currentTitle) currentLines.push(line);
+  });
+  saveCurrent();
+  return result;
+}
+
+function backfillProcessedPanel(target) {
+  const config = paperPushTargetConfig(target);
+  if (!config) return;
+  const output = textValue(config.output);
+  if (!output) {
+    setState(config.stateScope, '请先生成处理结果再回填。', 'error');
+    return;
+  }
+
+  const pushed = state.paperPushTargets?.[target];
+  const titles = (pushed?.titles || []).filter((title) => state.paperSectionContents && title in state.paperSectionContents);
+  if (!titles.length) {
+    setState(config.stateScope, '没有找到这次推送对应的论文章节，请先从论文写作页推送章节。', 'error');
+    return;
+  }
+
+  const updates = {};
+  if (titles.length === 1) {
+    updates[titles[0]] = output;
+  } else {
+    Object.assign(updates, splitPaperBackfillSections(output, titles));
+  }
+
+  const updatedTitles = titles.filter((title) => String(updates[title] || '').trim());
+  if (!updatedTitles.length) {
+    setState(config.stateScope, '没有从结果中识别到对应章节标题，无法自动拆分回填。', 'error');
+    return;
+  }
+
+  updatedTitles.forEach((title) => {
+    writePaperContentToSection(title, updates[title], { loadEditor: false });
+  });
+  loadPaperSection(updatedTitles[0]);
+  renderPaperSections();
+  setState(config.stateScope, `已回填 ${updatedTitles.length} 个章节`, 'done');
+  setState('paper', `已从${config.label}回填 ${updatedTitles.length} 个章节`, 'done');
+  setPage('paper');
   saveDraft();
 }
 
@@ -1880,6 +1984,9 @@ function bindActions() {
     const node = document.getElementById(button.dataset.copyFrom);
     const value = readNodeText(node).trim();
     if (value) await navigator.clipboard.writeText(value);
+  }));
+  $$('[data-backfill-panel]').forEach((button) => button.addEventListener('click', () => {
+    backfillProcessedPanel(button.dataset.backfillPanel);
   }));
   $('#refreshStatus').addEventListener('click', () => loadStatus().catch((error) => {
     if ($('#modelStatus')) $('#modelStatus').textContent = error.message;
