@@ -1,0 +1,200 @@
+- generic [ref=e2]:
+  - banner [ref=e3]:
+    - link "Local Paper Studio 纸研社" [ref=e4] [cursor=pointer]:
+      - /url: "#/paper"
+      - generic [ref=e5]: Local Paper Studio
+      - generic [ref=e6]: 纸研社
+    - navigation [ref=e7]:
+      - button "刷新模型" [ref=e8] [cursor=pointer]
+      - button "主题" [ref=e9] [cursor=pointer]
+  - complementary "Web 功能导航" [ref=e10]:
+    - button "论文写作 大纲、章节与编辑器" [ref=e11] [cursor=pointer]:
+      - img [ref=e13]
+      - generic [ref=e16]:
+        - strong [ref=e17]: 论文写作
+        - generic [ref=e18]: 大纲、章节与编辑器
+    - button "降 AI 检测 去痕、核验与差异" [ref=e19] [cursor=pointer]:
+      - img [ref=e21]
+      - generic [ref=e24]:
+        - strong [ref=e25]: 降 AI 检测
+        - generic [ref=e26]: 去痕、核验与差异
+    - button "降查重率 重复源、降重与复核" [ref=e27] [cursor=pointer]:
+      - img [ref=e29]
+      - generic [ref=e32]:
+        - strong [ref=e33]: 降查重率
+        - generic [ref=e34]: 重复源、降重与复核
+    - button "学术润色 任务设置与结果预览" [ref=e35] [cursor=pointer]:
+      - img [ref=e37]
+      - generic [ref=e39]:
+        - strong [ref=e40]: 学术润色
+        - generic [ref=e41]: 任务设置与结果预览
+    - button "智能纠错 统计、预览与问题列表" [ref=e42] [cursor=pointer]:
+      - img [ref=e44]
+      - generic [ref=e46]:
+        - strong [ref=e47]: 智能纠错
+        - generic [ref=e48]: 统计、预览与问题列表
+    - button "配置管理 模式、接口与后端配置" [ref=e49] [cursor=pointer]:
+      - img [ref=e51]
+      - generic [ref=e54]:
+        - strong [ref=e55]: 配置管理
+        - generic [ref=e56]: 模式、接口与后端配置
+    - button "历史记录 版本、草稿与恢复" [ref=e57] [cursor=pointer]:
+      - img [ref=e59]
+      - generic [ref=e63]:
+        - strong [ref=e64]: 历史记录
+        - generic [ref=e65]: 版本、草稿与恢复
+  - main [ref=e66]:
+    - generic [ref=e67]:
+      - generic [ref=e68]:
+        - paragraph [ref=e69]: Paper Writer
+        - heading "论文写作" [level=1] [ref=e70]
+        - paragraph [ref=e71]: 对应桌面端论文写作页：上方是论文设置和生成动作，下方左侧管理大纲，上方右侧编辑当前章节。
+        - generic [ref=e72]: 当前模型：codex / gpt-5.5
+      - generic [ref=e73]:
+        - generic [ref=e74]:
+          - generic [ref=e75]:
+            - paragraph [ref=e76]: Settings
+            - heading "论文设置" [level=3] [ref=e77]
+          - generic [ref=e78]: 待处理
+        - generic [ref=e79]:
+          - generic [ref=e80]:
+            - generic [ref=e81]: 论文题目
+            - textbox "论文题目" [ref=e82]:
+              - /placeholder: 例如：人工智能辅助学术写作的伦理风险与治理路径研究
+              - text: 测试论文
+          - generic [ref=e83]:
+            - generic [ref=e84]: 学科/方向
+            - textbox "学科/方向" [ref=e85]:
+              - /placeholder: 例如：教育技术 / 管理学
+          - generic [ref=e86]:
+            - generic [ref=e87]: 论文类型
+            - combobox "论文类型" [ref=e88]:
+              - option "学术论文" [selected]
+              - option "毕业论文"
+              - option "综述文章"
+              - option "研究报告"
+              - option "实验报告"
+          - generic [ref=e89]:
+            - generic [ref=e90]: 引用格式
+            - combobox "引用格式" [ref=e91]:
+              - option "GB/T 7714" [selected]
+              - option "APA"
+              - option "MLA"
+              - option "Chicago"
+              - option "IEEE"
+          - generic [ref=e92]:
+            - generic [ref=e93]: 当前章节
+            - textbox "当前章节" [ref=e94]:
+              - /placeholder: 例如：第一章 绪论
+              - text: 国外研究
+          - generic [ref=e95]:
+            - generic [ref=e96]: 目标字数
+            - spinbutton "目标字数" [ref=e97]: "120"
+        - generic [ref=e98]:
+          - button "生成大纲" [ref=e99] [cursor=pointer]
+          - button "撰写当前章节" [ref=e100] [cursor=pointer]
+          - button "撰写全部章节" [ref=e101] [cursor=pointer]
+          - button "生成摘要" [ref=e102] [cursor=pointer]
+          - button "整理参考文献" [ref=e103] [cursor=pointer]
+      - generic [ref=e104]:
+        - generic [ref=e105]:
+          - generic [ref=e106]:
+            - generic [ref=e107]:
+              - paragraph [ref=e108]: Outline
+              - heading "论文大纲" [level=3] [ref=e109]
+            - button "刷新章节" [ref=e110] [cursor=pointer]
+          - textbox "生成大纲后会写入这里；也可以粘贴自己的大纲，作为章节写作依据。" [ref=e111]: "# 测试论文 ## 中文摘要 ## 1 绪论 ### 1.1 研究背景 ### 1.2 研究意义 ## 2 文献综述 ### 2.1 国内研究 ### 2.2 国外研究 ## 参考文献"
+          - generic [ref=e112]:
+            - generic [ref=e113]:
+              - generic [ref=e114]: 章节导航
+              - generic [ref=e115]: 9 节
+            - generic [ref=e116]:
+              - combobox "快速跳转章节" [ref=e117]:
+                - option "快速跳转章节"
+                - option "1 测试论文"
+                - option "1.1 中文摘要"
+                - option "1.2 绪论"
+                - option "1.2.1 研究背景"
+                - option "1.2.2 研究意义"
+                - option "1.3 文献综述"
+                - option "1.3.1 国内研究"
+                - option "1.3.2 国外研究" [selected]
+                - option "1.4 参考文献"
+              - searchbox "搜索章节" [ref=e118]
+            - generic [ref=e119]:
+              - 'button "1 测试论文 已写 # 测试论文" [ref=e120] [cursor=pointer]':
+                - generic [ref=e121]:
+                  - strong [ref=e122]:
+                    - emphasis [ref=e123]: "1"
+                    - text: 测试论文
+                  - generic [ref=e124]: 已写
+                - generic [ref=e125]: "# 测试论文"
+              - 'button "1.1 中文摘要 ## 中文摘要" [ref=e126] [cursor=pointer]':
+                - strong [ref=e128]:
+                  - emphasis [ref=e129]: "1.1"
+                  - text: 中文摘要
+                - generic [ref=e130]: "## 中文摘要"
+              - 'button "1.2 绪论 ## 1 绪论" [ref=e131] [cursor=pointer]':
+                - strong [ref=e133]:
+                  - emphasis [ref=e134]: "1.2"
+                  - text: 绪论
+                - generic [ref=e135]: "## 1 绪论"
+              - 'button "1.2.1 研究背景 已写 ### 1.1 研究背景" [ref=e136] [cursor=pointer]':
+                - generic [ref=e137]:
+                  - strong [ref=e138]:
+                    - emphasis [ref=e139]: 1.2.1
+                    - text: 研究背景
+                  - generic [ref=e140]: 已写
+                - generic [ref=e141]: "### 1.1 研究背景"
+              - 'button "1.2.2 研究意义 ### 1.2 研究意义" [ref=e142] [cursor=pointer]':
+                - strong [ref=e144]:
+                  - emphasis [ref=e145]: 1.2.2
+                  - text: 研究意义
+                - generic [ref=e146]: "### 1.2 研究意义"
+              - 'button "1.3 文献综述 ## 2 文献综述" [ref=e147] [cursor=pointer]':
+                - strong [ref=e149]:
+                  - emphasis [ref=e150]: "1.3"
+                  - text: 文献综述
+                - generic [ref=e151]: "## 2 文献综述"
+              - 'button "1.3.1 国内研究 ### 2.1 国内研究" [ref=e152] [cursor=pointer]':
+                - strong [ref=e154]:
+                  - emphasis [ref=e155]: 1.3.1
+                  - text: 国内研究
+                - generic [ref=e156]: "### 2.1 国内研究"
+              - 'button "1.3.2 国外研究 ### 2.2 国外研究" [ref=e157] [cursor=pointer]':
+                - strong [ref=e159]:
+                  - emphasis [ref=e160]: 1.3.2
+                  - text: 国外研究
+                - generic [ref=e161]: "### 2.2 国外研究"
+              - 'button "1.4 参考文献 ## 参考文献" [ref=e162] [cursor=pointer]':
+                - strong [ref=e164]:
+                  - emphasis [ref=e165]: "1.4"
+                  - text: 参考文献
+                - generic [ref=e166]: "## 参考文献"
+        - generic [ref=e167]:
+          - generic [ref=e168]:
+            - generic [ref=e169]:
+              - paragraph [ref=e170]: Editor
+              - heading "当前章节编辑器" [level=3] [ref=e171]
+            - button "复制" [ref=e172] [cursor=pointer]
+          - generic [ref=e173]:
+            - button "↶" [ref=e174] [cursor=pointer]
+            - button "↷" [ref=e175] [cursor=pointer]
+            - button "A" [ref=e176] [cursor=pointer]
+            - button "■" [ref=e177] [cursor=pointer]
+            - button "B" [ref=e178] [cursor=pointer]:
+              - strong [ref=e179]: B
+            - button "I" [ref=e180] [cursor=pointer]:
+              - emphasis [ref=e181]: I
+            - button "U" [ref=e182] [cursor=pointer]:
+              - generic [ref=e183]: U
+            - button "S" [ref=e184] [cursor=pointer]:
+              - generic [ref=e185]: S
+            - button "X²" [ref=e186] [cursor=pointer]
+            - button "X₂" [ref=e187] [cursor=pointer]
+            - button "→" [ref=e188] [cursor=pointer]
+            - button "●" [ref=e189] [cursor=pointer]
+            - button "1." [ref=e190] [cursor=pointer]
+            - button "[?]" [ref=e191] [cursor=pointer]
+            - button "🔍" [ref=e192] [cursor=pointer]
+          - generic [ref=e193]: 这里对应桌面端右侧正文编辑区，可放已有章节上下文、全文正文或参考文献。生成结果也会直接写回这里。

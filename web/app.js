@@ -14,10 +14,16 @@ const state = {
   paperEditorSection: '',
   paperSectionContents: {},
   paperSectionContentSources: {},
+  paperReferenceSnapshot: '',
   paperEditorDirty: false,
+  paperRunning: false,
+  paperSectionFilter: '',
   selectedHistoryId: '',
   restoring: false,
 };
+
+const DEFAULT_REQUEST_TIMEOUT_MS = 120000;
+const PAPER_REQUEST_TIMEOUT_MS = 210000;
 
 const STORAGE_KEYS = {
   draft: 'paperlab-web-draft-v3',
@@ -55,12 +61,86 @@ const $$ = (selector) => Array.from(document.querySelectorAll(selector));
 
 function textValue(selector) {
   const node = $(selector);
-  return node ? node.value.trim() : '';
+  return readNodeText(node).trim();
 }
 
 function setText(selector, value) {
   const node = $(selector);
-  if (node) node.value = value || '';
+  writeNodeText(node, value);
+}
+
+function readNodeText(node) {
+  if (!node) return '';
+  if (isPaperEditorNode(node)) return readPaperEditorText(node);
+  if (node.isContentEditable) {
+    return (node.innerText || node.textContent || '').replace(/\u00a0/g, ' ');
+  }
+  return 'value' in node ? (node.value || '') : (node.textContent || '');
+}
+
+function writeNodeText(node, value) {
+  if (!node) return;
+  if (isPaperEditorNode(node)) {
+    writePaperEditorText(node, value);
+    return;
+  }
+  if (node.isContentEditable) node.textContent = value || '';
+  else if ('value' in node) node.value = value || '';
+  else node.textContent = value || '';
+}
+
+function isPaperEditorNode(node) {
+  return Boolean(node && node.id === 'paperContext' && node.isContentEditable);
+}
+
+function normalizeEditorPlainText(value) {
+  return String(value || '').replace(/\r\n/g, '\n').replace(/\r/g, '\n').replace(/\u00a0/g, ' ');
+}
+
+function readPaperEditorText(editor) {
+  const blockSelector = 'p, div, h1, h2, h3, h4, h5, h6, blockquote, li';
+  const blocks = Array.from(editor.children || []).filter((child) => child.matches(blockSelector));
+  if (!blocks.length) return normalizeEditorPlainText(editor.innerText || editor.textContent || '');
+
+  return blocks
+    .map((block) => normalizeEditorPlainText(block.innerText || block.textContent || '').trim())
+    .filter(Boolean)
+    .join('\n\n');
+}
+
+function appendTextWithLineBreaks(parent, text) {
+  String(text || '').split('\n').forEach((line, index) => {
+    if (index > 0) parent.appendChild(document.createElement('br'));
+    parent.appendChild(document.createTextNode(line));
+  });
+}
+
+function updatePaperEditorFormatMode(title = state.paperEditorSection) {
+  const editor = $('#paperContext');
+  if (!editor) return;
+  const isReference = paperSpecialKind(title) === 'reference';
+  editor.classList.toggle('reference-editor-text', isReference);
+  editor.classList.toggle('article-editor-text', !isReference);
+}
+
+function writePaperEditorText(editor, value) {
+  updatePaperEditorFormatMode();
+  const normalized = normalizeEditorPlainText(value).replace(/^\n+|\n+$/g, '');
+  editor.replaceChildren();
+  if (!normalized.trim()) return;
+
+  const isReference = paperSpecialKind(state.paperEditorSection) === 'reference';
+  const parts = isReference
+    ? normalized.split('\n').map((line) => line.trim()).filter(Boolean)
+    : normalized.split(/\n+/).map((paragraph) => paragraph.trim()).filter(Boolean);
+  const blocks = parts.length ? parts : [normalized.trim()];
+
+  blocks.forEach((part) => {
+    const block = document.createElement(isReference ? 'div' : 'p');
+    block.className = isReference ? 'chapter-editor-reference-line' : 'chapter-editor-paragraph';
+    appendTextWithLineBreaks(block, part);
+    editor.appendChild(block);
+  });
 }
 
 function readStoredJson(key, fallback) {
@@ -84,7 +164,7 @@ function captureFields() {
   const fields = {};
   FIELD_SELECTORS.forEach((selector) => {
     const node = $(selector);
-    if (node) fields[selector] = 'value' in node ? node.value : (node.textContent || '');
+    if (node) fields[selector] = readNodeText(node);
   });
   return fields;
 }
@@ -94,8 +174,7 @@ function applyFields(fields = {}) {
   Object.entries(fields).forEach(([selector, value]) => {
     const node = $(selector);
     if (!node) return;
-    if ('value' in node) node.value = value || '';
-    else node.textContent = value || '';
+    writeNodeText(node, value);
   });
   refreshPaperSections(false);
   state.restoring = false;
@@ -110,6 +189,7 @@ function saveDraft() {
     paperEditorSection: state.paperEditorSection,
     paperSectionContents: state.paperSectionContents,
     paperSectionContentSources: state.paperSectionContentSources,
+    paperReferenceSnapshot: state.paperReferenceSnapshot,
     fields: captureFields(),
     savedAt: new Date().toISOString(),
   });
@@ -123,6 +203,7 @@ function restoreDraft() {
   state.paperEditorSection = draft.paperEditorSection || state.selectedPaperSection || '';
   state.paperSectionContents = draft.paperSectionContents || {};
   state.paperSectionContentSources = draft.paperSectionContentSources || {};
+  state.paperReferenceSnapshot = draft.paperReferenceSnapshot || '';
   applyFields(draft.fields);
   syncModeSelections();
 }
@@ -161,6 +242,7 @@ function createHistoryRecord(page, operation, data = {}) {
     paperEditorSection: state.paperEditorSection,
     paperSectionContents: { ...state.paperSectionContents },
     paperSectionContentSources: { ...state.paperSectionContentSources },
+    paperReferenceSnapshot: state.paperReferenceSnapshot,
     analysis: data.analysis || state.lastAnalysis || null,
   };
 }
@@ -197,11 +279,68 @@ function escapeHtml(value) {
     .replaceAll("'", '&#039;');
 }
 
-async function requestJson(url, options = {}) {
-  const response = await fetch(url, options);
-  const payload = await response.json();
-  if (!payload.ok) throw new Error(payload.error || '请求失败');
-  return payload.data;
+function requestTimeoutMessage(timeoutMs) {
+  const seconds = Math.max(1, Math.round(Number(timeoutMs || 0) / 1000));
+  return `请求超过 ${seconds} 秒仍未返回。请检查网络状态，或到「配置管理」切换接口/模型后重试。`;
+}
+
+async function requestJson(url, options = {}, requestOptions = {}) {
+  const timeoutMs = Number(requestOptions.timeoutMs ?? DEFAULT_REQUEST_TIMEOUT_MS);
+  const timeoutMessage = requestOptions.timeoutMessage || requestTimeoutMessage(timeoutMs);
+  const fetchOptions = { ...options };
+  const controller = timeoutMs > 0 ? new AbortController() : null;
+  let timeoutId = null;
+
+  if (controller) {
+    if (options.signal) {
+      options.signal.addEventListener('abort', () => controller.abort(), { once: true });
+    }
+    fetchOptions.signal = controller.signal;
+    timeoutId = window.setTimeout(() => controller.abort(), timeoutMs);
+  }
+
+  try {
+    const response = await fetch(url, fetchOptions);
+    const raw = await response.text();
+    let payload = {};
+    try {
+      payload = raw ? JSON.parse(raw) : {};
+    } catch (error) {
+      throw new Error(raw ? `服务返回内容不是有效 JSON：${raw.slice(0, 160)}` : '服务没有返回内容');
+    }
+    if (!response.ok || !payload.ok) throw new Error(payload.error || `请求失败 (${response.status})`);
+    return payload.data;
+  } catch (error) {
+    if (error?.name === 'AbortError') throw new Error(timeoutMessage);
+    throw error;
+  } finally {
+    if (timeoutId) window.clearTimeout(timeoutId);
+  }
+}
+
+function startRunningStateTimer(scope, baseText) {
+  const startedAt = Date.now();
+  return window.setInterval(() => {
+    const elapsed = Math.max(1, Math.round((Date.now() - startedAt) / 1000));
+    setState(scope, `${baseText}（已等待 ${elapsed} 秒，模型仍在处理）`, 'running');
+  }, 15000);
+}
+
+async function withRunningState(scope, baseText, work) {
+  setState(scope, baseText, 'running');
+  const timer = startRunningStateTimer(scope, baseText);
+  try {
+    return await work();
+  } finally {
+    window.clearInterval(timer);
+  }
+}
+
+function setPaperActionsDisabled(disabled, activeAction = '') {
+  $$('[data-paper-action]').forEach((button) => {
+    button.disabled = Boolean(disabled);
+    button.dataset.running = disabled && button.dataset.paperAction === activeAction ? 'true' : 'false';
+  });
 }
 
 function setPage(page) {
@@ -519,20 +658,226 @@ function buildPaperOutlineStructure(text) {
   return { sections, order, levels, parents, raws };
 }
 
+function sectionDisplayText(section) {
+  return [section?.title, section?.raw, section?.parent].filter(Boolean).join(' ');
+}
+
+function sectionSearchKey(section) {
+  return sectionDisplayText(section).replace(/\s+/g, '').toLowerCase();
+}
+
+function outlineSectionNumbers(sections) {
+  const counters = [];
+  return sections.map((section) => {
+    const kind = paperSpecialKind(section?.title);
+    if (['cn_abstract', 'en_abstract', 'intro', 'reference'].includes(kind)) return '';
+    const level = Math.min(Math.max(Number(section?.level || 1), 1), 4);
+    for (let index = 0; index < level - 1; index += 1) {
+      if (!counters[index]) counters[index] = 1;
+    }
+    counters[level - 1] = (counters[level - 1] || 0) + 1;
+    counters.length = level;
+    return counters.slice(0, level).join('.');
+  });
+}
+
+function formatOutlineSectionNumber(number) {
+  const value = String(number || '').trim();
+  if (!value) return '';
+  return value.includes('.') ? value : `${value}.`;
+}
+
+function renderPaperSectionJump(sections) {
+  const jump = $('#paperSectionJump');
+  if (!jump) return;
+  const selectedTitle = state.selectedPaperSection || state.paperEditorSection || '';
+  const numbers = outlineSectionNumbers(sections);
+  jump.innerHTML = [
+    '<option value="">快速跳转章节</option>',
+    ...sections.map((section, index) => {
+      const level = Math.min(Math.max(Number(section.level || 1), 1), 4);
+      const indent = '\u00a0'.repeat(Math.max(0, level - 1) * 3);
+      const number = formatOutlineSectionNumber(numbers[index] ?? String(index + 1));
+      const label = number ? `${indent}${number} ${section.title}` : `${indent}${section.title}`;
+      return `<option value="${escapeHtml(section.title)}" ${section.title === selectedTitle ? 'selected' : ''}>${escapeHtml(label)}</option>`;
+    }),
+  ].join('');
+}
+
+function sectionNumberLabel(section, index, numbers = outlineSectionNumbers(state.paperSections || [])) {
+  const number = formatOutlineSectionNumber(numbers[index] ?? String(index + 1));
+  return number ? `${number} ${section.title}` : section.title;
+}
+
+function paperSectionHasChildren(title) {
+  return (state.paperSections || []).some((section) => section.parent === title);
+}
+
+function isPaperSectionWritable(title) {
+  if (!title) return false;
+  return !paperSectionHasChildren(title);
+}
+
+function firstWritableDescendantTitle(title) {
+  const children = (state.paperSections || []).filter((section) => section.parent === title);
+  for (const child of children) {
+    if (isPaperSectionWritable(child.title)) return child.title;
+    const nested = firstWritableDescendantTitle(child.title);
+    if (nested) return nested;
+  }
+  return '';
+}
+
+function nearestWritablePaperSection(title) {
+  if (isPaperSectionWritable(title)) return title;
+  return firstWritableDescendantTitle(title);
+}
+
+function descendantPaperSectionTitles(title) {
+  const result = [];
+  const visit = (parentTitle) => {
+    (state.paperSections || []).forEach((section) => {
+      if (section.parent !== parentTitle) return;
+      result.push(section.title);
+      visit(section.title);
+    });
+  };
+  visit(title);
+  return result;
+}
+
+function descendantPaperSectionIndexes(parentIndex) {
+  const sections = state.paperSections || [];
+  const parent = sections[Number(parentIndex)];
+  if (!parent) return [];
+  const result = [];
+  const visit = (parentTitle) => {
+    sections.forEach((section, index) => {
+      if (section.parent !== parentTitle) return;
+      result.push(index);
+      visit(section.title);
+    });
+  };
+  visit(parent.title);
+  return result;
+}
+
+function pushScopeSectionTitles(scopeValue) {
+  const value = String(scopeValue || 'all');
+  if (value === 'all') {
+    return (state.paperSections || [])
+      .map((section) => section.title)
+      .filter((title) => isPaperSectionWritable(title) && paperSpecialKind(title) !== 'reference');
+  }
+  if (!value.startsWith('section-index:')) return [];
+  const sections = state.paperSections || [];
+  const sectionIndex = Number(value.slice('section-index:'.length));
+  const section = sections[sectionIndex];
+  if (!section) return [];
+  const indexes = isPaperSectionWritable(section.title)
+    ? [sectionIndex]
+    : descendantPaperSectionIndexes(sectionIndex);
+  return indexes
+    .map((index) => sections[index]?.title || '')
+    .filter((title) => title && isPaperSectionWritable(title) && paperSpecialKind(title) !== 'reference');
+}
+
+function paperSectionTextBlock(title) {
+  const body = String(state.paperSectionContents[title] || '').trim();
+  if (!body) return '';
+  return `${title}\n${body}`;
+}
+
+function collectPaperPushText(scopeValue) {
+  storeCurrentPaperEditor({ skipEmptyOverwrite: true });
+  const titles = pushScopeSectionTitles(scopeValue);
+  return titles.map(paperSectionTextBlock).filter(Boolean).join('\n\n').trim();
+}
+
+function renderPaperPushScopes() {
+  const select = $('#paperPushScope');
+  if (!select) return;
+  const currentValue = select.value || 'all';
+  const sections = state.paperSections || [];
+  const numbers = outlineSectionNumbers(sections);
+  const options = ['<option value="all">整篇文章</option>'];
+  sections.forEach((section, index) => {
+    if (paperSpecialKind(section.title) === 'reference') return;
+    const level = Math.min(Math.max(Number(section.level || 1), 1), 4);
+    const indent = '\u00a0'.repeat(Math.max(0, level - 1) * 3);
+    const label = `${indent}${sectionNumberLabel(section, index, numbers)}`;
+    options.push(`<option value="section-index:${index}">${escapeHtml(label)}</option>`);
+  });
+  select.innerHTML = options.join('');
+  if (Array.from(select.options).some((option) => option.value === currentValue)) {
+    select.value = currentValue;
+  }
+}
+
+function paperPushTargetConfig(target) {
+  return {
+    ai: { page: 'ai', input: '#aiInput', stateScope: 'ai', label: '降 AI 检测' },
+    plagiarism: { page: 'plagiarism', input: '#plagiarismInput', stateScope: 'plagiarism', label: '降查重率' },
+    polish: { page: 'polish', input: '#polishInput', stateScope: 'polish', label: '学术润色' },
+    correction: { page: 'correction', input: '#correctionInput', stateScope: 'correction', label: '智能纠错' },
+  }[target] || null;
+}
+
+function pushPaperSelectionToWorkspace() {
+  const scope = $('#paperPushScope')?.value || 'all';
+  const target = $('#paperPushTarget')?.value || 'ai';
+  const config = paperPushTargetConfig(target);
+  if (!config) return;
+  const text = collectPaperPushText(scope);
+  if (!text) {
+    setState('paper', '所选范围没有可推送的正文内容。', 'error');
+    return;
+  }
+  setText(config.input, text);
+  setState('paper', `已推送到${config.label}`, 'done');
+  setState(config.stateScope, '已接收论文内容');
+  setPage(config.page);
+  saveDraft();
+}
+
 function renderPaperSections() {
   const list = $('#paperSectionList');
   if (!list) return;
   const sections = state.paperSections;
+  const count = $('#paperSectionCount');
+  if (count) count.textContent = sections.length ? `${sections.length} 节` : '0 节';
+  renderPaperSectionJump(sections);
+  renderPaperPushScopes();
   if (!sections.length) {
     list.textContent = '暂未解析到章节。建议大纲使用“第一章 绪论”或“1.1 研究背景”这样的标题格式。';
     return;
   }
-  list.innerHTML = sections.map((section, index) => `
-    <button class="outline-section-item ${section.title === state.selectedPaperSection ? 'selected' : ''}" data-section-index="${index}" type="button">
-      <strong>${escapeHtml(section.title)}</strong>
-      <span>${escapeHtml(section.raw || section.title)}</span>
+  const numbers = outlineSectionNumbers(sections);
+  const filter = String(state.paperSectionFilter || '').replace(/\s+/g, '').toLowerCase();
+  const visibleSections = filter
+    ? sections.map((section, index) => ({ section, index })).filter(({ section }) => sectionSearchKey(section).includes(filter))
+    : sections.map((section, index) => ({ section, index }));
+  if (!visibleSections.length) {
+    list.innerHTML = '<div class="outline-section-empty">没有匹配的章节。</div>';
+    return;
+  }
+  list.innerHTML = visibleSections.map(({ section, index }) => {
+    const level = Math.min(Math.max(Number(section.level || 1), 1), 4);
+    const kind = paperSpecialKind(section.title) || 'body';
+    const writable = isPaperSectionWritable(section.title);
+    const hasContent = Boolean(String(state.paperSectionContents[section.title] || '').trim());
+    const number = formatOutlineSectionNumber(numbers[index] ?? String(index + 1));
+    const titleText = number ? `<em>${escapeHtml(number)}</em>${escapeHtml(section.title)}` : escapeHtml(section.title);
+    return `
+    <button class="outline-section-item ${section.title === state.selectedPaperSection ? 'selected' : ''}" data-section-index="${index}" data-level="${level}" data-kind="${escapeHtml(kind)}" data-writable="${writable ? 'true' : 'false'}" type="button">
+      <span class="outline-section-main">
+        <strong>${titleText}</strong>
+        ${writable && hasContent ? '<small>已写</small>' : ''}
+        ${!writable ? '<small class="outline-section-label-muted">标题</small>' : ''}
+      </span>
     </button>
-  `).join('');
+  `;
+  }).join('');
   $$('.outline-section-item').forEach((button) => {
     button.addEventListener('click', () => {
       const section = state.paperSections[Number(button.dataset.sectionIndex)];
@@ -546,12 +891,28 @@ function getCurrentPaperContent() {
   return textValue('#paperContext');
 }
 
+function updatePaperReferenceSnapshot(title, content) {
+  if (paperSpecialKind(title) !== 'reference') return;
+  state.paperReferenceSnapshot = String(content || '').trim();
+}
+
+function hydratePaperReferenceSnapshotFromSections() {
+  for (const section of state.paperSections || []) {
+    if (paperSpecialKind(section.title) !== 'reference') continue;
+    updatePaperReferenceSnapshot(section.title, state.paperSectionContents?.[section.title] || '');
+    return;
+  }
+  state.paperReferenceSnapshot = '';
+}
+
 function storeCurrentPaperEditor(options = {}) {
   const title = state.paperEditorSection || textValue('#sectionTitle');
   if (!title || !state.paperSectionContents || !(title in state.paperSectionContents)) return;
+  if (!isPaperSectionWritable(title)) return;
   const content = getCurrentPaperContent();
   if (options.skipEmptyOverwrite && !content && state.paperSectionContents[title]) return;
   state.paperSectionContents[title] = content;
+  updatePaperReferenceSnapshot(title, content);
   if (state.restoring) return;
   if (options.markUser !== false) state.paperSectionContentSources[title] = 'user';
   state.paperEditorDirty = false;
@@ -561,22 +922,56 @@ function loadPaperSection(title) {
   const content = state.paperSectionContents[title] || '';
   state.paperEditorSection = title;
   state.selectedPaperSection = title;
+  updatePaperEditorFormatMode(title);
   setText('#sectionTitle', title);
   setText('#paperContext', content);
   setText('#paperResult', content);
+  const editor = $('#paperContext');
+  if (editor) {
+    const writable = isPaperSectionWritable(title);
+    editor.contentEditable = writable ? 'true' : 'false';
+    editor.classList.toggle('chapter-editor-locked', !writable);
+    editor.dataset.placeholder = writable
+      ? '这里对应桌面端右侧正文编辑区，可放已有章节上下文、全文正文或参考文献。生成结果也会直接写回这里。'
+      : '这是章节标题节点，请选择下面的具体小节后再撰写正文。';
+  }
   state.paperEditorDirty = false;
 }
 
 function selectPaperSection(title, options = {}) {
   if (!title) return;
+  const targetTitle = options.allowTitleNode ? title : (nearestWritablePaperSection(title) || title);
   if (options.storeCurrent !== false) storeCurrentPaperEditor();
-  loadPaperSection(title);
+  loadPaperSection(targetTitle);
   renderPaperSections();
   saveDraft();
 }
 
 function findPaperSectionByKind(kind) {
   return (state.paperSections || []).find((section) => paperSpecialKind(section.title) === kind)?.title || '';
+}
+
+function findPaperSectionByTitle(title) {
+  return (state.paperSections || []).find((section) => section.title === title);
+}
+
+function paperSectionContentByTitle(title) {
+  const key = String(title || '').trim();
+  if (!key) return '';
+  if (Object.prototype.hasOwnProperty.call(state.paperSectionContents || {}, key)) {
+    return state.paperSectionContents[key] || '';
+  }
+  const matchKey = paperTitleMatchKey(key);
+  const section = (state.paperSections || []).find((item) => paperTitleMatchKey(item.title) === matchKey);
+  return section ? (state.paperSectionContents[section.title] || '') : '';
+}
+
+function appendPaperReferences(refTitle, appendContent, options = {}) {
+  const extra = String(appendContent || '').trim();
+  if (!extra) return refTitle;
+  const existingContent = String(paperSectionContentByTitle(refTitle) || '').trim();
+  const newContent = existingContent ? `${existingContent}\n${extra}` : extra;
+  return writePaperContentToSection(refTitle, newContent, options) || refTitle;
 }
 
 function ensurePaperSection(title, kind = '') {
@@ -657,12 +1052,14 @@ function looksLikeOutlineOnlySectionContent(title, content, source = '') {
 
 function refreshPaperSections(selectFirst = false, options = {}) {
   const preserveExisting = options.preserveExisting !== false;
+  if (!preserveExisting) state.paperReferenceSnapshot = '';
   if (preserveExisting) {
     storeCurrentPaperEditor({ skipEmptyOverwrite: true, markUser: state.paperEditorDirty });
   }
   const previousContents = preserveExisting ? { ...(state.paperSectionContents || {}) } : {};
   const previousSources = preserveExisting ? { ...(state.paperSectionContentSources || {}) } : {};
   const previousEditor = preserveExisting ? state.paperEditorSection : '';
+  const requestedTitle = textValue('#sectionTitle') || state.selectedPaperSection || previousEditor;
   const structure = buildPaperOutlineStructure(textValue('#paperOutline'));
   state.paperSections = structure.order.map((title) => ({
     title,
@@ -683,12 +1080,23 @@ function refreshPaperSections(selectFirst = false, options = {}) {
     state.paperSectionContents[title] = keepPrevious ? previousBody : parsedBody;
     state.paperSectionContentSources[title] = keepPrevious ? 'user' : (parsedBody ? 'outline' : 'outline');
   });
-  const nextTitle = selectFirst
-    ? state.paperSections[0]?.title
-    : (previousEditor && state.paperSectionContents[previousEditor] !== undefined ? previousEditor : textValue('#sectionTitle'));
+  hydratePaperReferenceSnapshotFromSections();
+  const requestedKey = requestedTitle ? paperTitleMatchKey(requestedTitle) : '';
+  const requestedMatch = requestedKey
+    ? state.paperSections.find((section) => paperTitleMatchKey(section.title) === requestedKey || paperTitleMatchKey(section.raw) === requestedKey)?.title
+    : '';
+  const nextTitle = requestedMatch
+    || (previousEditor && state.paperSectionContents[previousEditor] !== undefined ? previousEditor : '')
+    || (selectFirst ? state.paperSections[0]?.title : '');
   if (nextTitle && state.paperSectionContents[nextTitle] !== undefined) {
     loadPaperSection(nextTitle);
   } else if (!state.paperSections.length) {
+    state.paperEditorSection = '';
+    state.selectedPaperSection = '';
+    setText('#sectionTitle', '');
+    setText('#paperContext', '');
+    setText('#paperResult', '');
+  } else {
     state.paperEditorSection = '';
     state.selectedPaperSection = '';
     setText('#sectionTitle', '');
@@ -701,7 +1109,9 @@ function refreshPaperSections(selectFirst = false, options = {}) {
 function paperTargetSectionForAction(action) {
   if (action === 'abstract') return ensurePaperSection('中文摘要', 'cn_abstract');
   if (action === 'references') return ensurePaperSection('参考文献', 'reference');
-  return ensurePaperSection(textValue('#sectionTitle') || state.selectedPaperSection || state.paperEditorSection);
+  const requestedTitle = textValue('#sectionTitle') || state.selectedPaperSection || state.paperEditorSection;
+  const targetTitle = nearestWritablePaperSection(requestedTitle) || requestedTitle;
+  return ensurePaperSection(targetTitle);
 }
 
 function paperTitleMatchKey(title) {
@@ -755,6 +1165,7 @@ function writePaperContentToSection(title, content, options = {}) {
   if (!target) return;
   const normalizedContent = normalizeGeneratedSectionBody(target, content);
   state.paperSectionContents[target] = normalizedContent;
+  updatePaperReferenceSnapshot(target, normalizedContent);
   state.paperSectionContentSources[target] = 'user';
   if (options.loadEditor === false) {
     if (state.paperEditorSection === target) {
@@ -885,6 +1296,8 @@ function collectBatchWriteTargets(emptyOnly = false) {
 
     const existingContent = String(state.paperSectionContents[title] || '').trim();
 
+    if (!isPaperSectionWritable(title)) return;
+
     // 如果是"只写空白"模式，跳过已有内容的章节
     if (emptyOnly && existingContent) return;
 
@@ -897,7 +1310,18 @@ function collectBatchWriteTargets(emptyOnly = false) {
   return targets;
 }
 
+function paperSectionsForReferenceSync() {
+  return state.paperSections.map((section) => {
+    const content = state.paperSectionContents[section.title] || '';
+    return { title: section.title, content };
+  });
+}
+
 async function runBatchWriteAllSections() {
+  if (state.paperRunning) {
+    setState('paper', '已有论文生成任务正在运行，请等待完成后再试。', 'running');
+    return;
+  }
   const outline = textValue('#paperOutline');
   if (!outline) {
     setState('paper', '请先生成或输入论文大纲', 'error');
@@ -931,6 +1355,9 @@ async function runBatchWriteAllSections() {
     }
   }
 
+  state.paperRunning = true;
+  setPaperActionsDisabled(true, 'batch-write');
+  const runningTimer = startRunningStateTimer('paper', `准备批量写作 ${targets.length} 个章节...`);
   setState('paper', `准备批量写作 ${targets.length} 个章节...`, 'running');
 
   const referenceStyle = $('#referenceStyle').value;
@@ -953,29 +1380,33 @@ async function runBatchWriteAllSections() {
           context: target.context,
           wordCount,
           referenceStyle,
-          allSections: state.paperSections.map(section => ({
-            title: section.title,
-            content: state.paperSectionContents[section.title] || ''
-          })),
+          allSections: paperSectionsForReferenceSync(),
+          referenceSnapshot: state.paperReferenceSnapshot || '',
         };
 
         const data = await requestPaperRun(payload);
 
-        if (data.result) {
-          writePaperContentToSection(target.title, data.result, { loadEditor: false });
+        if (data.content || data.result) {
+          writePaperContentToSection(target.title, data.content || data.result, { loadEditor: false });
           completedSections.push(target.title);
 
-          if (data.references && data.references.content) {
-            referenceTitle = writePaperContentToSection(
-              data.references.title || referenceTitle || '# 参考文献',
-              data.references.content,
-              { loadEditor: false }
-            ) || referenceTitle;
+          // Handle references
+          if (data.references) {
+            const refTitle = data.references.title || referenceTitle || '# 参考文献';
+            const mode = data.references.mode;
+
+            if (mode === 'append' && data.references.append) {
+              referenceTitle = appendPaperReferences(refTitle, data.references.append, { loadEditor: false }) || referenceTitle;
+            } else if (mode === 'reorder' && data.references.content) {
+              // Reorder mode: replace entire reference section
+              referenceTitle = writePaperContentToSection(refTitle, data.references.content, { loadEditor: false }) || referenceTitle;
+            }
           }
 
+          // Handle updated sections (citation renumbering)
           if (data.updatedSections && Array.isArray(data.updatedSections)) {
             for (const section of data.updatedSections) {
-              if (section.title && section.content) {
+              if (section.title) {
                 writePaperContentToSection(section.title, section.content, { loadEditor: false });
               }
             }
@@ -1015,6 +1446,10 @@ async function runBatchWriteAllSections() {
     }
   } catch (error) {
     setState('paper', `批量写作失败：${error.message}`, 'error');
+  } finally {
+    window.clearInterval(runningTimer);
+    state.paperRunning = false;
+    setPaperActionsDisabled(false);
   }
 }
 
@@ -1035,10 +1470,8 @@ function paperRequestPayload(action, payloadText, targetSection, topic, outline,
 
   // Include all sections for reference management
   if (action === 'section') {
-    payload.allSections = state.paperSections.map(section => ({
-      title: section.title,
-      content: state.paperSectionContents[section.title] || ''
-    }));
+    payload.allSections = paperSectionsForReferenceSync();
+    payload.referenceSnapshot = state.paperReferenceSnapshot || '';
   }
 
   return payload;
@@ -1049,6 +1482,9 @@ async function requestPaperRun(payload) {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(payload),
+  }, {
+    timeoutMs: PAPER_REQUEST_TIMEOUT_MS,
+    timeoutMessage: '论文生成请求等待超过 210 秒仍未返回。请检查网络状态，或到「配置管理」切换接口/模型后重试。',
   });
 }
 
@@ -1064,6 +1500,10 @@ async function runPaperAbstract(payload) {
 }
 
 async function runPaperAction(action) {
+  if (state.paperRunning) {
+    setState('paper', '已有论文生成任务正在运行，请等待完成后再试。', 'running');
+    return;
+  }
   if (action === 'batch-write') {
     await runBatchWriteAllSections();
     return;
@@ -1081,34 +1521,50 @@ async function runPaperAction(action) {
     setState('paper', action === 'abstract' ? '请先完善论文正文内容' : '请先填写内容', 'error');
     return;
   }
+  if (action === 'section' && !isPaperSectionWritable(targetSection)) {
+    const childTitle = nearestWritablePaperSection(targetSection);
+    setState('paper', childTitle ? `该章节是标题节点，请选择具体小节：${childTitle}` : '该章节是标题节点，不能写入正文。', 'error');
+    if (childTitle) selectPaperSection(childTitle, { storeCurrent: false });
+    return;
+  }
 
-  setState('paper', '论文生成中...', 'running');
+  state.paperRunning = true;
+  setPaperActionsDisabled(true, action);
+  const runningText = action === 'section' ? `正在撰写章节：${targetSection}` : '论文生成中...';
   try {
-    const payload = paperRequestPayload(action, payloadText, targetSection, topic, outline, context);
-    const data = action === 'abstract'
-      ? await runPaperAbstract(payload)
-      : await requestPaperRun(payload);
+    const data = await withRunningState('paper', runningText, async () => {
+      const payload = paperRequestPayload(action, payloadText, targetSection, topic, outline, context);
+      return action === 'abstract'
+        ? await runPaperAbstract(payload)
+        : await requestPaperRun(payload);
+    });
     if (action === 'outline' && data.result) {
       setText('#paperOutline', data.result);
-      refreshPaperSections(true, { preserveExisting: false });
+      refreshPaperSections(false, { preserveExisting: false });
     } else if (action === 'abstract') {
       loadPaperSection(findPaperSectionByKind('cn_abstract') || targetSection);
     } else {
-      writePaperContentToSection(targetSection, data.result || '');
+      writePaperContentToSection(targetSection, data.content || data.result || '');
 
       // Handle references if returned
-      if (data.references && data.references.content) {
+      if (data.references) {
         const refTitle = data.references.title || '# 参考文献';
-        writePaperContentToSection(refTitle, data.references.content, { loadEditor: false });
-        if (data.references.content.trim()) {
-          setState('paper', `章节写作完成，参考文献已写入 ${refTitle}`, 'done');
+        const mode = data.references.mode;
+
+        if (mode === 'append' && data.references.append) {
+          appendPaperReferences(refTitle, data.references.append, { loadEditor: false });
+          setState('paper', `章节写作完成，参考文献已追加到 ${refTitle}`, 'done');
+        } else if (mode === 'reorder' && data.references.content) {
+          // Reorder mode: replace entire reference section
+          writePaperContentToSection(refTitle, data.references.content, { loadEditor: false });
+          setState('paper', `章节写作完成，参考文献已重新排序`, 'done');
         }
       }
 
       // Handle updated sections (citation renumbering)
       if (data.updatedSections && Array.isArray(data.updatedSections)) {
         for (const section of data.updatedSections) {
-          if (section.title && section.content) {
+          if (section.title) {
             writePaperContentToSection(section.title, section.content, { loadEditor: false });
           }
         }
@@ -1128,11 +1584,13 @@ async function runPaperAction(action) {
       setState('paper', data.failed || '论文生成完成', data.failed ? 'error' : 'done');
     }
   } catch (error) {
-    setState('paper', '论文生成失败', 'error');
+    setState('paper', `论文生成失败：${error.message}`, 'error');
     if (action !== 'abstract') {
       setText('#paperResult', error.message);
-      setText('#paperContext', error.message);
     }
+  } finally {
+    state.paperRunning = false;
+    setPaperActionsDisabled(false);
   }
 }
 
@@ -1387,6 +1845,15 @@ function bindActions() {
   $$('[data-paper-action]').forEach((button) => button.addEventListener('click', () => runPaperAction(button.dataset.paperAction)));
   $('#refreshOutlineSections').addEventListener('click', () => refreshPaperSections(true));
   $('#paperOutline').addEventListener('input', () => refreshPaperSections(false));
+  $('#paperSectionJump')?.addEventListener('change', (event) => {
+    const title = event.target.value;
+    if (title) selectPaperSection(title);
+  });
+  $('#paperSectionSearch')?.addEventListener('input', (event) => {
+    state.paperSectionFilter = event.target.value || '';
+    renderPaperSections();
+  });
+  $('#paperPushButton')?.addEventListener('click', pushPaperSelectionToWorkspace);
   $('#sectionTitle').addEventListener('input', () => {
     const title = textValue('#sectionTitle');
     if (title) {
@@ -1411,7 +1878,8 @@ function bindActions() {
   });
   $$('[data-copy-from]').forEach((button) => button.addEventListener('click', async () => {
     const node = document.getElementById(button.dataset.copyFrom);
-    if (node && node.value) await navigator.clipboard.writeText(node.value);
+    const value = readNodeText(node).trim();
+    if (value) await navigator.clipboard.writeText(value);
   }));
   $('#refreshStatus').addEventListener('click', () => loadStatus().catch((error) => {
     if ($('#modelStatus')) $('#modelStatus').textContent = error.message;
@@ -1505,6 +1973,348 @@ loadStatus().catch((error) => {
   if ($('#modelStatus')) $('#modelStatus').textContent = error.message;
   renderProviders(null);
 });
+
+// Rich text editor functionality
+function initRichTextEditor() {
+  const editor = $('#paperContext');
+  if (!editor || !editor.hasAttribute('contenteditable')) return;
+
+  // Handle toolbar button clicks
+  $$('.toolbar-btn').forEach((btn) => {
+    btn.addEventListener('click', (e) => {
+      e.preventDefault();
+      const format = btn.dataset.format;
+      const action = btn.dataset.action;
+
+      if (format) {
+        // Handle format commands
+        if (format === 'undo' || format === 'redo') {
+          document.execCommand(format, false, null);
+        } else if (format === 'indent') {
+          document.execCommand('indent', false, null);
+        } else {
+          document.execCommand(format, false, null);
+        }
+      } else if (action) {
+        // Handle special actions
+        if (action === 'foreColor') {
+          const color = prompt('请输入颜色（如 #ff0000 或 red）：', '#000000');
+          if (color) {
+            document.execCommand('foreColor', false, color);
+          }
+        } else if (action === 'hiliteColor') {
+          const color = prompt('请输入背景色（如 #ffff00 或 yellow）：', '#ffff00');
+          if (color) {
+            document.execCommand('hiliteColor', false, color);
+          }
+        } else if (action === 'citation') {
+          // Insert citation template
+          const selection = window.getSelection();
+          if (selection.rangeCount > 0) {
+            const range = selection.getRangeAt(0);
+            const citationNode = document.createTextNode('[?]');
+            range.insertNode(citationNode);
+            range.setStartAfter(citationNode);
+            range.collapse(true);
+            selection.removeAllRanges();
+            selection.addRange(range);
+          }
+        } else if (action === 'find') {
+          // Open find/replace dialog
+          openFindReplaceDialog();
+        }
+      }
+
+      editor.focus();
+      updateToolbarState();
+    });
+  });
+
+  // Update toolbar button states based on current selection
+  function updateToolbarState() {
+    $$('.toolbar-btn').forEach((btn) => {
+      const format = btn.dataset.format;
+      if (format === 'undo' || format === 'redo' || format === 'indent') {
+        return; // 这些命令不需要状态高亮
+      }
+      const isActive = document.queryCommandState(format);
+      btn.classList.toggle('active', isActive);
+    });
+  }
+
+  // Update toolbar state on selection change
+  editor.addEventListener('mouseup', updateToolbarState);
+  editor.addEventListener('keyup', updateToolbarState);
+  editor.addEventListener('focus', updateToolbarState);
+
+  // Handle keyboard shortcuts
+  editor.addEventListener('keydown', (e) => {
+    if (e.ctrlKey || e.metaKey) {
+      switch(e.key.toLowerCase()) {
+        case 'b':
+          e.preventDefault();
+          document.execCommand('bold', false, null);
+          updateToolbarState();
+          break;
+        case 'i':
+          e.preventDefault();
+          document.execCommand('italic', false, null);
+          updateToolbarState();
+          break;
+        case 'u':
+          e.preventDefault();
+          document.execCommand('underline', false, null);
+          updateToolbarState();
+          break;
+        case 'f':
+          e.preventDefault();
+          openFindReplaceDialog();
+          break;
+        case 'z':
+          if (e.shiftKey) {
+            e.preventDefault();
+            document.execCommand('redo', false, null);
+          } else {
+            e.preventDefault();
+            document.execCommand('undo', false, null);
+          }
+          break;
+        case 'y':
+          e.preventDefault();
+          document.execCommand('redo', false, null);
+          break;
+      }
+    }
+  });
+
+  // Save draft on content change
+  editor.addEventListener('input', saveDraft);
+}
+
+initRichTextEditor();
 loadConfig().catch((error) => {
   if ($('#providerList')) $('#providerList').textContent = error.message;
 });
+
+// Find and Replace functionality
+let findReplaceState = {
+  searchText: '',
+  matches: [],
+  currentIndex: -1,
+  originalRanges: []
+};
+
+function openFindReplaceDialog() {
+  const dialog = $('#findReplaceDialog');
+  if (dialog) {
+    dialog.style.display = 'flex';
+    const findInput = $('#findInput');
+    if (findInput) {
+      findInput.focus();
+      findInput.value = findReplaceState.searchText;
+    }
+  }
+}
+
+function closeFindReplaceDialog() {
+  const dialog = $('#findReplaceDialog');
+  if (dialog) dialog.style.display = 'none';
+  // Keep highlights visible after closing dialog
+  // User can manually clear them by opening dialog again and searching for something else
+}
+
+function clearHighlights() {
+  const editor = $('#paperContext');
+  if (!editor) return;
+
+  // Remove all highlight spans
+  const highlights = editor.querySelectorAll('.find-highlight, .find-current');
+  highlights.forEach(span => {
+    const parent = span.parentNode;
+    while (span.firstChild) {
+      parent.insertBefore(span.firstChild, span);
+    }
+    parent.removeChild(span);
+  });
+
+  // Normalize text nodes
+  editor.normalize();
+  findReplaceState.matches = [];
+  findReplaceState.currentIndex = -1;
+}
+
+function highlightMatches(searchText) {
+  const editor = $('#paperContext');
+  if (!editor || !searchText) return;
+
+  clearHighlights();
+  findReplaceState.searchText = searchText;
+
+  const text = editor.textContent;
+  const regex = new RegExp(searchText.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'gi');
+  let match;
+  const matches = [];
+
+  while ((match = regex.exec(text)) !== null) {
+    matches.push({ start: match.index, end: match.index + match[0].length });
+  }
+
+  if (matches.length === 0) {
+    alert('未找到匹配项');
+    return;
+  }
+
+  // Highlight all matches
+  const walker = document.createTreeWalker(editor, NodeFilter.SHOW_TEXT, null, false);
+  const textNodes = [];
+  let node;
+  while (node = walker.nextNode()) {
+    textNodes.push(node);
+  }
+
+  let offset = 0;
+  textNodes.forEach(textNode => {
+    const nodeStart = offset;
+    const nodeEnd = offset + textNode.textContent.length;
+
+    const nodeMatches = matches.filter(m => m.start < nodeEnd && m.end > nodeStart);
+
+    if (nodeMatches.length > 0) {
+      const parent = textNode.parentNode;
+      const frag = document.createDocumentFragment();
+      let lastIndex = 0;
+
+      nodeMatches.forEach(match => {
+        const matchStart = Math.max(0, match.start - nodeStart);
+        const matchEnd = Math.min(textNode.textContent.length, match.end - nodeStart);
+
+        // Add text before match
+        if (matchStart > lastIndex) {
+          frag.appendChild(document.createTextNode(textNode.textContent.substring(lastIndex, matchStart)));
+        }
+
+        // Add highlighted match
+        const span = document.createElement('span');
+        span.className = 'find-highlight';
+        span.textContent = textNode.textContent.substring(matchStart, matchEnd);
+        frag.appendChild(span);
+        findReplaceState.matches.push(span);
+
+        lastIndex = matchEnd;
+      });
+
+      // Add remaining text
+      if (lastIndex < textNode.textContent.length) {
+        frag.appendChild(document.createTextNode(textNode.textContent.substring(lastIndex)));
+      }
+
+      parent.replaceChild(frag, textNode);
+    }
+
+    offset = nodeEnd;
+  });
+
+  if (findReplaceState.matches.length > 0) {
+    findReplaceState.currentIndex = 0;
+    updateCurrentHighlight();
+  }
+}
+
+function updateCurrentHighlight() {
+  findReplaceState.matches.forEach((span, index) => {
+    if (index === findReplaceState.currentIndex) {
+      span.className = 'find-current';
+      span.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    } else {
+      span.className = 'find-highlight';
+    }
+  });
+}
+
+function findNext() {
+  const searchText = $('#findInput')?.value;
+  if (!searchText) return;
+
+  if (searchText !== findReplaceState.searchText) {
+    highlightMatches(searchText);
+    return;
+  }
+
+  if (findReplaceState.matches.length === 0) {
+    highlightMatches(searchText);
+    return;
+  }
+
+  findReplaceState.currentIndex = (findReplaceState.currentIndex + 1) % findReplaceState.matches.length;
+  updateCurrentHighlight();
+}
+
+function findPrevious() {
+  const searchText = $('#findInput')?.value;
+  if (!searchText) return;
+
+  if (searchText !== findReplaceState.searchText) {
+    highlightMatches(searchText);
+    return;
+  }
+
+  if (findReplaceState.matches.length === 0) {
+    highlightMatches(searchText);
+    return;
+  }
+
+  findReplaceState.currentIndex = (findReplaceState.currentIndex - 1 + findReplaceState.matches.length) % findReplaceState.matches.length;
+  updateCurrentHighlight();
+}
+
+function replaceOne() {
+  const replaceText = $('#replaceInput')?.value || '';
+
+  if (findReplaceState.currentIndex < 0 || findReplaceState.currentIndex >= findReplaceState.matches.length) {
+    return;
+  }
+
+  const currentSpan = findReplaceState.matches[findReplaceState.currentIndex];
+  const textNode = document.createTextNode(replaceText);
+  currentSpan.parentNode.replaceChild(textNode, currentSpan);
+
+  // Remove from matches array
+  findReplaceState.matches.splice(findReplaceState.currentIndex, 1);
+
+  if (findReplaceState.matches.length === 0) {
+    clearHighlights();
+    alert('已完成所有替换');
+  } else {
+    if (findReplaceState.currentIndex >= findReplaceState.matches.length) {
+      findReplaceState.currentIndex = 0;
+    }
+    updateCurrentHighlight();
+  }
+
+  saveDraft();
+}
+
+function replaceAll() {
+  const replaceText = $('#replaceInput')?.value || '';
+  const count = findReplaceState.matches.length;
+
+  if (count === 0) return;
+
+  findReplaceState.matches.forEach(span => {
+    const textNode = document.createTextNode(replaceText);
+    span.parentNode.replaceChild(textNode, span);
+  });
+
+  clearHighlights();
+  alert(`已替换 ${count} 处`);
+  saveDraft();
+}
+
+// Make functions global for onclick handlers
+window.openFindReplaceDialog = openFindReplaceDialog;
+window.closeFindReplaceDialog = closeFindReplaceDialog;
+window.findNext = findNext;
+window.findPrevious = findPrevious;
+window.replaceOne = replaceOne;
+window.replaceAll = replaceAll;
+window.clearHighlights = clearHighlights;

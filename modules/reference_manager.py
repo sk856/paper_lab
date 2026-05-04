@@ -404,7 +404,7 @@ def build_reference_body_from_entries(entries):
     """
     从参考文献条目列表生成参考文献章节内容
 
-    输入: [{'text': '...', 'key': '...', 'new_number': 1}, ...]
+    输入: [{'text': '...', 'key': '...', 'number': 1}, ...] 或 [{'text': '...', 'key': '...', 'new_number': 1}, ...]
     输出: "[1] ...\n[2] ...\n[3] ..."
     """
     lines = []
@@ -412,7 +412,9 @@ def build_reference_body_from_entries(entries):
         entry_text = normalize_reference_entry_text(entry.get('text', ''))
         if not entry_text:
             continue
-        lines.append(f'[{index}] {entry_text}')
+        # 优先使用条目中的编号，如果没有则使用索引
+        entry_number = entry.get('number') or entry.get('new_number') or index
+        lines.append(f'[{entry_number}] {entry_text}')
     return '\n'.join(lines).strip()
 
 
@@ -743,3 +745,351 @@ def collect_citation_reference_keys(text, number_to_entry):
             keys.append(key)
 
     return keys
+
+
+def find_max_reference_number(sections, before_position):
+    """
+    查找指定位置之前所有章节的最大参考文献编号
+
+    参数:
+        sections: 章节列表 [{'title': '...', 'content': '...'}, ...]
+        before_position: 位置索引（不包含该位置）
+
+    返回:
+        最大编号（int），如果没有找到则返回0
+    """
+    max_number = 0
+
+    for i in range(before_position):
+        if i >= len(sections):
+            break
+
+        section = sections[i]
+        content = section.get('content', '')
+        if not content:
+            continue
+
+        # 查找所有引用编号
+        for match in re.finditer(r'\[([^\[\]]+)\]', content):
+            citation_text = match.group(1)
+            numbers = parse_citation_numbers(citation_text)
+            if numbers:
+                max_number = max(max_number, max(numbers))
+
+    return max_number
+
+
+def collect_references_from_sections(sections, start_position, end_position=None):
+    """
+    收集指定范围内章节的所有参考文献引用
+
+    参数:
+        sections: 章节列表
+        start_position: 起始位置（包含）
+        end_position: 结束位置（不包含），None表示到末尾
+
+    返回:
+        按引用顺序排列的参考文献key列表
+    """
+    if end_position is None:
+        end_position = len(sections)
+
+    all_keys = []
+    seen = set()
+
+    for i in range(start_position, end_position):
+        if i >= len(sections):
+            break
+
+        section = sections[i]
+        content = section.get('content', '')
+        if not content:
+            continue
+
+        # 提取参考文献
+        _, references_text = extract_references_from_section_result(content)
+        if references_text:
+            entries = parse_reference_entries(references_text)
+            number_to_entry = build_reference_number_map(entries)
+
+            # 收集该章节引用的参考文献key
+            keys = collect_citation_reference_keys(content, number_to_entry)
+            for key in keys:
+                if key not in seen:
+                    seen.add(key)
+                    all_keys.append(key)
+
+    return all_keys
+
+
+def renumber_references(content, old_to_new_map):
+    """
+    根据编号映射更新章节中的引用编号
+
+    参数:
+        content: 章节内容
+        old_to_new_map: 旧编号到新编号的映射 {1: 3, 2: 4, ...}
+
+    返回:
+        更新后的内容
+    """
+    if not content or not old_to_new_map:
+        return content
+
+    def replace_citation(match):
+        citation_text = match.group(1)
+        numbers = parse_citation_numbers(citation_text)
+
+        # 映射到新编号
+        new_numbers = []
+        for num in numbers:
+            new_num = old_to_new_map.get(num, num)
+            new_numbers.append(new_num)
+
+        # 格式化新编号
+        return '[' + format_citation_numbers(new_numbers) + ']'
+
+    # 替换所有引用
+    updated = re.sub(r'\[([^\[\]]+)\]', replace_citation, content)
+    return updated
+
+
+def determine_reference_mode(section_title, all_sections):
+    """
+    判断参考文献处理模式
+
+    参数:
+        section_title: 当前章节标题
+        all_sections: 所有章节列表 [{'title': '...', 'content': '...'}, ...]
+
+    返回:
+        'append': 新增章节，追加参考文献
+        'reorder': 修改章节，重新排序参考文献
+    """
+    for section in all_sections:
+        if section.get('title') == section_title:
+            content = section.get('content', '').strip()
+            if content:
+                return 'reorder'  # 已有内容，是修改操作
+    return 'append'  # 无内容，是新增操作
+
+
+def is_reference_section(section_title):
+    """
+    判断是否是参考文献章节
+
+    参数:
+        section_title: 章节标题
+
+    返回:
+        True: 是参考文献章节
+        False: 不是参考文献章节
+    """
+    if not section_title:
+        return False
+
+    title_lower = section_title.lower().strip().strip('#').strip()
+    return title_lower in {'参考文献', 'references', 'bibliography', 'reference'}
+
+
+def process_references_append_mode(section_title, new_content, all_sections, reference_style):
+    """
+    追加模式：新增章节时续写参考文献编号
+
+    参数:
+        section_title: 当前章节标题
+        new_content: AI生成的新内容
+        all_sections: 所有章节列表
+        reference_style: 引用格式（如 'GB/T 7714'）
+
+    返回:
+        {
+            'cleaned_content': 清理后的章节内容,
+            'references_to_append': 需要追加的参考文献条目列表,
+            'updated_sections': []  # 追加模式不更新其他章节
+        }
+    """
+    # 找到当前章节的位置
+    current_position = None
+    for i, section in enumerate(all_sections):
+        if section.get('title') == section_title:
+            current_position = i
+            break
+
+    if current_position is None:
+        current_position = len(all_sections)
+
+    # 查找之前章节的最大参考文献编号
+    max_number = find_max_reference_number(all_sections, current_position)
+
+    # 提取新章节的参考文献
+    clean_content, references_text = extract_references_from_section_result(new_content)
+    clean_content = normalize_section_body(clean_content)
+
+    if not references_text:
+        return {
+            'cleaned_content': clean_content,
+            'references_to_append': [],
+            'updated_sections': []
+        }
+
+    # 解析新参考文献条目
+    new_entries = parse_reference_entries(references_text)
+
+    # 重新编号：从 max_number + 1 开始
+    old_to_new_map = {}
+    renumbered_entries = []
+    next_number = max_number + 1
+
+    for entry in new_entries:
+        old_number = entry.get('number', 0)
+        entry_text = normalize_reference_entry_text(entry.get('text', ''))
+        entry_key = reference_entry_key(entry_text)
+
+        if not entry_key:
+            continue
+
+        old_to_new_map[old_number] = next_number
+        renumbered_entries.append({
+            'number': next_number,
+            'text': entry_text,
+            'key': entry_key
+        })
+        next_number += 1
+
+    # 更新章节内容中的引用编号
+    updated_content = renumber_references(clean_content, old_to_new_map)
+
+    return {
+        'cleaned_content': updated_content,
+        'references_to_append': renumbered_entries,
+        'updated_sections': []
+    }
+
+
+def process_references_reorder_mode(section_title, new_content, all_sections, reference_style):
+    """
+    重排模式：修改章节时重新排序参考文献
+
+    参数:
+        section_title: 当前章节标题
+        new_content: AI生成的新内容
+        all_sections: 所有章节列表
+        reference_style: 引用格式
+
+    返回:
+        {
+            'cleaned_content': 清理后的章节内容,
+            'full_references': 完整的参考文献条目列表,
+            'updated_sections': 需要更新的其他章节列表
+        }
+    """
+    # 找到当前章节的位置
+    current_position = None
+    for i, section in enumerate(all_sections):
+        if section.get('title') == section_title:
+            current_position = i
+            break
+
+    if current_position is None:
+        current_position = len(all_sections)
+
+    # 提取新章节的参考文献
+    clean_content, references_text = extract_references_from_section_result(new_content)
+    clean_content = normalize_section_body(clean_content)
+
+    # 1. 从统一的"参考文献"章节读取所有现有参考文献
+    existing_ref_entries = []
+    for section in all_sections:
+        title = section.get('title', '')
+        if is_reference_section(title):
+            content = section.get('content', '')
+            if content:
+                existing_ref_entries = parse_reference_entries(content)
+            break
+
+    # 构建现有参考文献映射。正文中的旧编号只能通过集中参考文献章节解释。
+    old_number_map = build_reference_number_map(existing_ref_entries)
+    key_to_entry = {}
+    for entry in existing_ref_entries:
+        entry_text = normalize_reference_entry_text(entry.get('text', ''))
+        entry_key = reference_entry_key(entry_text)
+        if entry_key:
+            key_to_entry[entry_key] = {
+                'text': entry_text,
+                'key': entry_key,
+                'number': entry.get('number', 0)
+            }
+
+    local_reference_entries = parse_reference_entries(references_text) if references_text else []
+    local_number_map = build_reference_number_map(local_reference_entries)
+    for entry in local_reference_entries:
+        entry_text = normalize_reference_entry_text(entry.get('text', ''))
+        entry_key = reference_entry_key(entry_text)
+        if entry_key:
+            key_to_entry[entry_key] = {'text': entry_text, 'key': entry_key, 'number': 0}
+
+    ordered_keys = []
+    seen_keys = set()
+
+    def append_keys(keys):
+        for key in keys:
+            if not key or key in seen_keys:
+                continue
+            if key not in key_to_entry:
+                continue
+            seen_keys.add(key)
+            ordered_keys.append(key)
+
+    # 2. 按整篇文章顺序重新收集实际引用：前文旧引用 -> 当前新引用 -> 后文旧引用。
+    for i, section in enumerate(all_sections):
+        title = section.get('title', '')
+        if is_reference_section(title):
+            continue
+        if i == current_position:
+            append_keys(collect_citation_reference_keys(clean_content, local_number_map))
+            continue
+        content = normalize_section_body(section.get('content', ''))
+        append_keys(collect_citation_reference_keys(content, old_number_map))
+
+    # 3. 当前章节生成了参考文献但正文没显式引用时，也保留这些新条目。
+    for entry in local_reference_entries:
+        entry_key = entry.get('key') or reference_entry_key(entry.get('text', ''))
+        if entry_key and entry_key not in seen_keys:
+            seen_keys.add(entry_key)
+            ordered_keys.append(entry_key)
+
+    full_entries = []
+    new_number_by_key = {}
+    for key in ordered_keys:
+        entry = key_to_entry.get(key)
+        if not entry:
+            continue
+        new_number = len(full_entries) + 1
+        new_number_by_key[key] = new_number
+        full_entries.append({'text': entry['text'], 'key': key, 'number': new_number})
+
+    # 4. 将旧编号映射到新编号，用于重写当前及后续章节正文引用。
+    for number_map in (old_number_map, local_number_map):
+        for entry in number_map.values():
+            entry['new_number'] = new_number_by_key.get(entry.get('key'))
+
+    updated_content = rewrite_citations_with_entry_map(clean_content, local_number_map)
+
+    updated_sections = []
+    for i, section in enumerate(all_sections):
+        if i == current_position:
+            continue
+        title = section.get('title', '')
+        if is_reference_section(title):
+            continue
+        content = normalize_section_body(section.get('content', ''))
+        rewritten_content = rewrite_citations_with_entry_map(content, old_number_map)
+        if rewritten_content != content:
+            updated_sections.append({'title': title, 'content': rewritten_content})
+
+    return {
+        'cleaned_content': updated_content,
+        'full_references': full_entries,
+        'updated_sections': updated_sections
+    }

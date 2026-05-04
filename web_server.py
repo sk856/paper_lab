@@ -7,6 +7,7 @@ import argparse
 import json
 import mimetypes
 import os
+import re
 import threading
 import webbrowser
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -30,12 +31,67 @@ from modules.reference_manager import (
     normalize_section_body,
     parse_reference_entries,
     collect_citation_reference_keys,
-    reference_entry_key
+    reference_entry_key,
+    determine_reference_mode,
+    process_references_append_mode,
+    process_references_reorder_mode,
+    is_reference_section
 )
 from pages.api_config_support import merge_with_preset_defaults
 
 PROJECT_DIR = os.path.dirname(os.path.abspath(__file__))
 WEB_DIR = os.path.join(PROJECT_DIR, 'web')
+
+
+def _strip_outline_title_markup(title):
+    text = str(title or '').strip()
+    if not text:
+        return ''
+    markers = ('***', '___', '**', '__', '*', '_')
+    changed = True
+    while changed and text:
+        changed = False
+        for marker in markers:
+            if text.startswith(marker) and text.endswith(marker) and len(text) > len(marker) * 2:
+                inner = text[len(marker):-len(marker)].strip()
+                if inner:
+                    text = inner
+                    changed = True
+                    break
+    text = re.sub(r'^\s*[-*•]\s+', '', text)
+    original = text.strip()
+    patterns = (
+        r'^\s{0,8}#{1,6}\s+(.+)$',
+        r'^\s{0,8}\d+(?:\.\d+)*[、.．]?\s+(.+)$',
+        r'^\s{0,8}[一二三四五六七八九十]+[、.．]\s*(.+)$',
+        r'^\s{0,8}第[一二三四五六七八九十百千万\d]+[章节篇部分]\s*[:：]?\s+(.+)$',
+        r'^\s{0,8}（[一二三四五六七八九十百千万]+）\s*(.+)$',
+        r'^\s{0,8}\(\d+\)\s*(.+)$',
+    )
+    for pattern in patterns:
+        match = re.match(pattern, original)
+        if match and match.group(1).strip():
+            return match.group(1).strip('：:').strip()
+    return original.strip('：:').strip()
+
+
+def _section_match_key(title):
+    return re.sub(r'\s+', '', _strip_outline_title_markup(title)).lower()
+
+
+def _is_reference_section_title(title):
+    return _section_match_key(title) in {'参考文献', 'references', 'bibliography'}
+
+
+def _is_reference_linkable_section_title(title):
+    key = _section_match_key(title)
+    return bool(key) and key not in {
+        '摘要', '中文摘要', '内容摘要', '摘要与关键词',
+        'abstract', 'abstractandkeywords',
+        '关键词', '关键字', '中文关键词', '中文关键字',
+        'keywords', 'keywords', 'key words'.replace(' ', ''),
+        '参考文献', 'references', 'bibliography',
+    }
 
 
 class WebWorkbench:
@@ -270,126 +326,63 @@ class WebWorkbench:
             # Generate section content
             raw_result = self.paper_writer.write_section(outline, section_title, context=context, word_count=word_count, reference_style=reference_style)
 
-            # Extract references from the generated content
-            from modules.reference_manager import (
-                parse_reference_entries,
-                build_reference_body_from_entries,
-                collect_citation_reference_keys,
-                normalize_reference_entry_text,
-                reference_entry_key
-            )
-            clean_content, references_text = extract_references_from_section_result(raw_result)
+            # Determine reference processing mode
+            mode = determine_reference_mode(section_title, all_sections)
 
-            # Normalize section body - remove all outline-style headings
-            clean_content = normalize_section_body(clean_content)
+            if mode == 'append':
+                # Append mode: new section, continue numbering from previous sections
+                result = process_references_append_mode(section_title, raw_result, all_sections, reference_style)
 
-            # Parse references from the new section
-            local_reference_entries = parse_reference_entries(references_text) if references_text else []
+                # Build reference section content from appended entries
+                ref_entries_to_append = result['references_to_append']
+                appended_refs_text = ''
+                if ref_entries_to_append:
+                    appended_refs_text = build_reference_body_from_entries(ref_entries_to_append)
 
-            # Build local reference number map (original numbering from AI)
-            local_number_map = build_reference_number_map(local_reference_entries)
+                # Find reference section title
+                ref_section_title = '# 参考文献'
+                for section in all_sections:
+                    title = section.get('title', '')
+                    if '参考文献' in title.lower() or 'reference' in title.lower():
+                        ref_section_title = title
+                        break
 
-            # Get existing references from reference section
-            ref_section_title = None
-            old_reference_entries = []
-            for section in all_sections:
-                title = section.get('title', '')
-                if '参考文献' in title or 'References' in title or 'REFERENCES' in title:
-                    ref_section_title = title
-                    content = section.get('content', '')
-                    if content:
-                        old_reference_entries = parse_reference_entries(content)
-                    break
+                return {
+                    'content': result['cleaned_content'],
+                    'result': result['cleaned_content'],
+                    'references': {
+                        'mode': 'append',
+                        'title': ref_section_title,
+                        'append': appended_refs_text
+                    },
+                    'updatedSections': []
+                }
 
-            # Build old reference number map
-            old_number_map = build_reference_number_map(old_reference_entries)
+            else:
+                # Reorder mode: existing section modified, reorder all references
+                result = process_references_reorder_mode(section_title, raw_result, all_sections, reference_style)
 
-            # Build entry_by_key dictionary (deduplicate by key)
-            entry_by_key = {}
-            for entry in list(old_reference_entries) + list(local_reference_entries):
-                entry_text = normalize_reference_entry_text(entry.get('text', ''))
-                entry_key = reference_entry_key(entry_text)
-                if entry_key and entry_key not in entry_by_key:
-                    entry_by_key[entry_key] = {'text': entry_text, 'key': entry_key}
+                # Build complete reference section content
+                full_refs_text = build_reference_body_from_entries(result['full_references'])
 
-            ordered_keys = []
-            seen_keys = set()
+                # Find reference section title
+                ref_section_title = '# 参考文献'
+                for section in all_sections:
+                    title = section.get('title', '')
+                    if '参考文献' in title.lower() or 'reference' in title.lower():
+                        ref_section_title = title
+                        break
 
-            def append_keys(keys):
-                for key in keys:
-                    if not key or key in seen_keys:
-                        continue
-                    seen_keys.add(key)
-                    ordered_keys.append(key)
-
-            target_seen = False
-            for section in all_sections:
-                title = section.get('title', '')
-                if '参考文献' in title or 'References' in title or 'REFERENCES' in title:
-                    continue
-                if title == section_title:
-                    target_seen = True
-                    append_keys(collect_citation_reference_keys(clean_content, local_number_map))
-                    continue
-                section_body = normalize_section_body(section.get('content', ''))
-                append_keys(collect_citation_reference_keys(section_body, old_number_map))
-
-            if not target_seen:
-                append_keys(collect_citation_reference_keys(clean_content, local_number_map))
-
-            # Replace mode follows the desktop writer: stale references that only
-            # belonged to the old version of this section are dropped, while other
-            # sections are remapped against the rebuilt reference list.
-            for entry in local_reference_entries:
-                entry_key = entry.get('key') or reference_entry_key(entry.get('text', ''))
-                if entry_key and entry_key not in seen_keys:
-                    seen_keys.add(entry_key)
-                    ordered_keys.append(entry_key)
-
-            final_entries = []
-            new_number_by_key = {}
-            for entry_key in ordered_keys:
-                entry = entry_by_key.get(entry_key)
-                if not entry:
-                    continue
-                new_number = len(final_entries) + 1
-                new_number_by_key[entry_key] = new_number
-                final_entries.append({'text': entry['text'], 'key': entry_key, 'new_number': new_number})
-
-            # Update number maps with new numbering
-            for number_map in (old_number_map, local_number_map):
-                for entry in number_map.values():
-                    entry['new_number'] = new_number_by_key.get(entry.get('key'))
-
-            # Rewrite citations in the new section content
-            final_content = rewrite_citations_with_entry_map(clean_content, local_number_map)
-
-            # Generate updated references section content
-            updated_refs_content = build_reference_body_from_entries(final_entries)
-
-            # Also need to return updated content for other sections
-            updated_sections = []
-            for section in all_sections:
-                title = section.get('title', '')
-                if '参考文献' in title or 'References' in title or 'REFERENCES' in title:
-                    continue
-                if title == section_title:
-                    continue
-
-                current_body = normalize_section_body(section.get('content', ''))
-                rewritten_body = rewrite_citations_with_entry_map(current_body, old_number_map)
-                if rewritten_body != current_body:
-                    updated_sections.append({'title': title, 'content': rewritten_body})
-
-            return {
-                'result': final_content,
-                'analysis': self.analyze(raw_result),
-                'references': {
-                    'title': ref_section_title or '# 参考文献',
-                    'content': updated_refs_content
-                },
-                'updatedSections': updated_sections  # Other sections that need citation updates
-            }
+                return {
+                    'content': result['cleaned_content'],
+                    'result': result['cleaned_content'],
+                    'references': {
+                        'mode': 'reorder',
+                        'title': ref_section_title,
+                        'content': full_refs_text
+                    },
+                    'updatedSections': result['updated_sections']
+                }
         if action == 'abstract':
             language = str(payload.get('language', '中文') or '中文')
             result = self.paper_writer.write_abstract(text, language=language)
@@ -475,7 +468,6 @@ class WebWorkbench:
                     result['content'] = rewrite_citations_with_entry_map(result['content'], ref_map)
 
             # Generate reference section content
-            from modules.reference_manager import build_reference_body_from_entries
             final_entries = []
             for idx, entry in enumerate(all_references, start=1):
                 final_entries.append({

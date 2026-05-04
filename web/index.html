@@ -4,7 +4,7 @@
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>纸研社 Web 工作台</title>
-  <link rel="stylesheet" href="/styles.css" />
+  <link rel="stylesheet" href="/styles.css?v=20260504-editor-paragraphs" />
 </head>
 <body>
   <div class="app-shell">
@@ -79,6 +79,24 @@
             <button class="secondary-button" data-paper-action="abstract" type="button">生成摘要</button>
             <button class="secondary-button" data-paper-action="references" type="button">整理参考文献</button>
           </div>
+          <div class="paper-push-panel">
+            <div class="paper-push-copy">
+              <strong>推送章节到功能区</strong>
+              <span>把整篇文章、某章/某节或单个小节送到降 AI、降重、润色、纠错页面。</span>
+            </div>
+            <div class="paper-push-controls">
+              <select id="paperPushScope" class="input-box" aria-label="推送范围">
+                <option value="all">整篇文章</option>
+              </select>
+              <select id="paperPushTarget" class="input-box" aria-label="目标功能区">
+                <option value="ai">降 AI 检测</option>
+                <option value="plagiarism">降查重率</option>
+                <option value="polish">学术润色</option>
+                <option value="correction">智能纠错</option>
+              </select>
+              <button id="paperPushButton" class="secondary-button" type="button">推送</button>
+            </div>
+          </div>
         </section>
 
         <section class="workbench-grid outline-grid">
@@ -89,17 +107,74 @@
             </div>
             <textarea id="paperOutline" class="text-box outline-text" placeholder="生成大纲后会写入这里；也可以粘贴自己的大纲，作为章节写作依据。"></textarea>
             <div class="outline-section-box">
-              <div class="outline-section-title">章节选择</div>
+              <div class="outline-section-title-row">
+                <div class="outline-section-title">章节导航</div>
+                <span id="paperSectionCount" class="outline-section-count">0 节</span>
+              </div>
+              <div class="outline-section-tools">
+                <select id="paperSectionJump" class="input-box outline-section-jump" aria-label="快速跳转章节">
+                  <option value="">快速跳转章节</option>
+                </select>
+                <input id="paperSectionSearch" class="input-box outline-section-search" type="search" placeholder="搜索章节名或编号" aria-label="搜索章节" />
+              </div>
               <div class="outline-section-list" id="paperSectionList">生成或粘贴大纲后，这里会显示可点击章节。</div>
             </div>
           </div>
           <div class="panel editor-panel">
             <div class="panel-header-row"><div><p class="eyebrow">Editor</p><h3>当前章节编辑器</h3></div><button class="secondary-button compact" data-copy-from="paperContext" type="button">复制</button></div>
-            <textarea id="paperContext" class="text-box chapter-editor-text" placeholder="这里对应桌面端右侧正文编辑区，可放已有章节上下文、全文正文或参考文献。生成结果也会直接写回这里。"></textarea>
+            <div class="editor-toolbar">
+              <button class="toolbar-btn" data-format="undo" title="撤回 (Ctrl+Z)">↶</button>
+              <button class="toolbar-btn" data-format="redo" title="重做 (Ctrl+Y)">↷</button>
+              <span class="toolbar-separator"></span>
+              <button class="toolbar-btn" data-action="foreColor" title="字色">A</button>
+              <button class="toolbar-btn" data-action="hiliteColor" title="底色">■</button>
+              <span class="toolbar-separator"></span>
+              <button class="toolbar-btn" data-format="bold" title="加粗 (Ctrl+B)"><strong>B</strong></button>
+              <button class="toolbar-btn" data-format="italic" title="斜体 (Ctrl+I)"><em>I</em></button>
+              <button class="toolbar-btn" data-format="underline" title="下划线 (Ctrl+U)"><u>U</u></button>
+              <button class="toolbar-btn" data-format="strikeThrough" title="删除线"><s>S</s></button>
+              <button class="toolbar-btn" data-format="superscript" title="上标">X²</button>
+              <button class="toolbar-btn" data-format="subscript" title="下标">X₂</button>
+              <span class="toolbar-separator"></span>
+              <button class="toolbar-btn" data-format="indent" title="缩进">→</button>
+              <button class="toolbar-btn" data-format="insertUnorderedList" title="项目符号">●</button>
+              <button class="toolbar-btn" data-format="insertOrderedList" title="编号">1.</button>
+              <span class="toolbar-separator"></span>
+              <button class="toolbar-btn" data-action="citation" title="引用">[?]</button>
+              <button class="toolbar-btn" data-action="find" title="查找替换 (Ctrl+F)">🔍</button>
+            </div>
+            <div id="paperContext" class="text-box chapter-editor-text" contenteditable="true" data-placeholder="这里对应桌面端右侧正文编辑区，可放已有章节上下文、全文正文或参考文献。生成结果也会直接写回这里。"></div>
             <textarea id="paperResult" hidden></textarea>
           </div>
         </section>
       </section>
+
+      <!-- 查找替换对话框 -->
+      <div id="findReplaceDialog" class="dialog-overlay" style="display: none;">
+        <div class="dialog-box">
+          <div class="dialog-header">
+            <h3>查找和替换</h3>
+            <button class="dialog-close" onclick="closeFindReplaceDialog()">×</button>
+          </div>
+          <div class="dialog-body">
+            <label class="field-block">
+              <span>查找内容</span>
+              <input id="findInput" class="input-box" type="text" placeholder="输入要查找的文本" />
+            </label>
+            <label class="field-block">
+              <span>替换为</span>
+              <input id="replaceInput" class="input-box" type="text" placeholder="输入替换文本" />
+            </label>
+            <div class="dialog-actions">
+              <button class="secondary-button" onclick="findNext()">查找下一个</button>
+              <button class="secondary-button" onclick="findPrevious()">查找上一个</button>
+              <button class="secondary-button" onclick="replaceOne()">替换</button>
+              <button class="secondary-button" onclick="replaceAll()">全部替换</button>
+              <button class="secondary-button" onclick="clearHighlights()">清除高亮</button>
+            </div>
+          </div>
+        </div>
+      </div>
 
       <section class="page-view" data-page-view="ai">
         <div class="page-hero compact-hero">
@@ -269,6 +344,6 @@
     </main>
   </div>
 
-  <script src="/app.js?v=20260504-reference-resync"></script>
+  <script src="/app.js?v=20260504-editor-paragraphs"></script>
 </body>
 </html>
