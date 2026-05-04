@@ -195,9 +195,22 @@
           <div class="panel editor-panel"><div class="panel-header-row"><div><p class="eyebrow">Input</p><h3>待处理原文</h3></div><button class="secondary-button compact" data-clear-panel="ai" type="button">清空</button></div><textarea id="aiInput" class="text-box" placeholder="请粘贴需要消除 AI 痕迹的论文段落/全文。"></textarea></div>
           <div class="panel editor-panel"><div class="panel-header-row"><div><p class="eyebrow">Output</p><h3>去痕处理结果</h3></div><button class="secondary-button compact" data-backfill-panel="ai" type="button">回填</button></div><textarea id="aiOutput" class="text-box" readonly placeholder="处理完成后，结果将显示在此处。"></textarea></div>
         </section>
-        <section class="workbench-grid review-grid">
-          <div class="panel"><div class="panel-header-row"><div><p class="eyebrow">Review</p><h3>检测结果摘要</h3></div></div><pre id="aiReview" class="analysis-detail">完成去痕效果复核后，此处将展示 AI 生成概率、去痕效果评估与核心问题汇总。</pre></div>
-          <div class="panel"><div class="panel-header-row"><div><p class="eyebrow">Diff</p><h3>差异预览</h3></div></div><pre id="aiDiff" class="analysis-detail">点击“刷新差异”，即可查看原文与处理结果的逐句差异对比。</pre></div>
+        <section class="workbench-grid review-grid ai-review-grid">
+          <div class="panel">
+            <div class="panel-header-row">
+              <div><p class="eyebrow">Review</p><h3>检测结果摘要</h3></div>
+              <button class="secondary-button compact" data-review-panel="ai" type="button">结果复核</button>
+            </div>
+            <pre id="aiReview" class="analysis-detail ai-summary-detail">完成去痕效果复核后，此处将展示 AI 生成概率、去痕效果评估与核心问题汇总。</pre>
+          </div>
+          <div class="panel">
+            <div class="panel-header-row">
+              <div><p class="eyebrow">Diff</p><h3>差异预览</h3></div>
+              <span class="mini-hint">红色为删除，绿色为新增</span>
+            </div>
+            <p id="aiDiffStatus" class="muted-copy compact-copy">点击“刷新差异”，即可查看原文与处理结果的逐句差异对比。</p>
+            <div id="aiDiff" class="analysis-detail ai-diff-detail">差异预览会显示在这里。</div>
+          </div>
         </section>
       </section>
 

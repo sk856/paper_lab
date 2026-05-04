@@ -487,8 +487,31 @@ async function loadStatus() {
   }
 }
 
-function renderAnalysisSummary(analysis) {
+function renderAnalysisSummary(analysis, scope = '') {
   if (!analysis) return '暂无分析数据。';
+  if (analysis.ai && scope === 'ai') {
+    const ai = analysis.ai;
+    const score = Number(ai.score ?? 0);
+    const features = ai.features || [];
+    const flagged = ai.sentences_flagged || [];
+    const currentProbability = estimateAiProbability(score);
+    const currentRisk = ai.risk_level || '未完成核验';
+    return [
+      '检测对象：去痕处理结果',
+      '差异基准：原文输入',
+      `基准 AI 风险分：${state.lastBaseAiScore ?? '未提供基准'}`,
+      `当前结果 AI 风险分：${score}/100`,
+      `风险分变化值：${formatAiDelta(state.lastBaseAiScore, score)}`,
+      `当前结果估算 AI 生成概率：${currentProbability}%`,
+      `当前风险等级：${currentRisk}`,
+      `去痕效果评估：${describeAiImprovement(state.lastBaseAiScore, score)}`,
+      `原文字数与结果字数：${textValue('#aiInput').length || '未提供原文'} / ${textValue('#aiOutput').length || '未生成结果'}`,
+      `保留 / 新增 / 删除字符数：${formatDiffCounts(textValue('#aiInput'), textValue('#aiOutput'))}`,
+      `命中 AI 痕迹数量：${features.length}`,
+      `重点句段数量：${flagged.length}`,
+      `简短处理建议：${buildAiSummaryRecommendation(ai, state.lastBaseAiScore)}`,
+    ].join('\n');
+  }
   const lines = [];
   if (analysis.ai) {
     lines.push(`AI 风险：${analysis.ai.risk_level || '-'} / 特征分 ${analysis.ai.score ?? '-'}`);
@@ -506,7 +529,72 @@ function renderAnalysisSummary(analysis) {
   return lines.join('\n') || '暂无分析数据。';
 }
 
+function estimateAiProbability(score) {
+  return Math.max(6, Math.min(98, Math.round(Number(score || 0) * 2.6)));
+}
+
+function formatAiDelta(baseScore, currentScore) {
+  if (baseScore === undefined || baseScore === null || Number.isNaN(Number(baseScore))) return '未提供基准';
+  const delta = Number(baseScore) - Number(currentScore || 0);
+  if (delta > 0) return `下降 ${delta} 分`;
+  if (delta < 0) return `上升 ${Math.abs(delta)} 分`;
+  return '无变化';
+}
+
+function describeAiImprovement(baseScore, currentScore) {
+  if (baseScore === undefined || baseScore === null || Number.isNaN(Number(baseScore))) return '已生成结果，但缺少基准对比。';
+  const delta = Number(baseScore) - Number(currentScore || 0);
+  if (delta >= 12) return '去痕效果明显';
+  if (delta >= 5) return '去痕效果较好';
+  if (delta >= 1) return '去痕效果有限';
+  if (delta === 0) return '风险分无变化';
+  return '风险分反而上升';
+}
+
+function buildAiSummaryRecommendation(ai, baseScore) {
+  const score = Number(ai.score || 0);
+  if (score >= 30) return '风险仍高，建议改用更高强度模式并重写重点句段。';
+  if (baseScore !== undefined && baseScore !== null && score >= Number(baseScore)) {
+    return '风险未下降，建议切换更高强度模式后重新处理。';
+  }
+  if (score >= 15) return '风险已有下降，建议继续人工打散模板化表达。';
+  return '风险已降至可控范围，建议通读校正术语和引用。';
+}
+
+function formatDiffCounts(before, after) {
+  const counts = calculateDiffCounts(before || '', after || '');
+  return `${counts.equal} / ${counts.insert} / ${counts.delete}`;
+}
+
+function calculateDiffCounts(before, after) {
+  const oldText = before || '';
+  const newText = after || '';
+  const oldChars = Array.from(oldText);
+  const newChars = Array.from(newText);
+  const oldCounts = new Map();
+  const newCounts = new Map();
+  oldChars.forEach((char) => oldCounts.set(char, (oldCounts.get(char) || 0) + 1));
+  newChars.forEach((char) => newCounts.set(char, (newCounts.get(char) || 0) + 1));
+  let equal = 0;
+  new Set([...oldCounts.keys(), ...newCounts.keys()]).forEach((char) => {
+    equal += Math.min(oldCounts.get(char) || 0, newCounts.get(char) || 0);
+  });
+  return {
+    equal,
+    insert: Math.max(0, newChars.length - equal),
+    delete: Math.max(0, oldChars.length - equal),
+  };
+}
+
 function diffText(before, after) {
+  const oldText = before || '';
+  const newText = after || '';
+  if (!oldText || !newText) return '请先准备原文与处理结果。';
+  if (oldText === newText) return '原文与结果暂未检测到差异。';
+  return diffTextBySegments(oldText, newText);
+}
+
+function plainDiffText(before, after) {
   const oldText = before || '';
   const newText = after || '';
   if (!oldText || !newText) return '请先准备原文与处理结果。';
@@ -522,6 +610,197 @@ function diffText(before, after) {
     '结果片段：',
     newText.slice(0, 420),
   ].join('\n');
+}
+
+function diffTextBySegments(oldText, newText) {
+  const oldSegments = splitDiffSegments(oldText);
+  const newSegments = splitDiffSegments(newText);
+  if (oldSegments.length * newSegments.length > 250000) {
+    return diffTextByParagraphs(oldText, newText);
+  }
+  const chunks = diffSequence(oldSegments, newSegments);
+  return renderSegmentDiffChunks(chunks);
+}
+
+function splitDiffSegments(text) {
+  const parts = String(text || '').match(/[\s\S]*?(?:[。！？!?；;，,\n]+|$)/g) || [];
+  return parts.filter((part) => part.length > 0);
+}
+
+function diffTextByParagraphs(oldText, newText) {
+  const oldParagraphs = splitParagraphUnits(oldText);
+  const newParagraphs = splitParagraphUnits(newText);
+  const chunks = diffSequence(oldParagraphs, newParagraphs);
+  return renderSegmentDiffChunks(chunks);
+}
+
+function splitParagraphUnits(text) {
+  return String(text || '').split(/(\n{2,})/).filter((part) => part.length > 0);
+}
+
+function diffSequence(oldParts, newParts) {
+  const width = newParts.length + 1;
+  const maxCellValue = Math.max(oldParts.length, newParts.length);
+  const TableType = maxCellValue > 65535 ? Uint32Array : Uint16Array;
+  const table = new TableType((oldParts.length + 1) * width);
+  for (let i = oldParts.length - 1; i >= 0; i -= 1) {
+    for (let j = newParts.length - 1; j >= 0; j -= 1) {
+      const offset = i * width + j;
+      table[offset] = oldParts[i] === newParts[j]
+        ? table[(i + 1) * width + j + 1] + 1
+        : Math.max(table[(i + 1) * width + j], table[i * width + j + 1]);
+    }
+  }
+  const chunks = [];
+  let i = 0;
+  let j = 0;
+  while (i < oldParts.length && j < newParts.length) {
+    if (oldParts[i] === newParts[j]) {
+      chunks.push({ type: 'equal', text: oldParts[i] });
+      i += 1;
+      j += 1;
+    } else if (table[(i + 1) * width + j] >= table[i * width + j + 1]) {
+      chunks.push({ type: 'delete', text: oldParts[i] });
+      i += 1;
+    } else {
+      chunks.push({ type: 'insert', text: newParts[j] });
+      j += 1;
+    }
+  }
+  while (i < oldParts.length) {
+    chunks.push({ type: 'delete', text: oldParts[i] });
+    i += 1;
+  }
+  while (j < newParts.length) {
+    chunks.push({ type: 'insert', text: newParts[j] });
+    j += 1;
+  }
+  return chunks;
+}
+
+function renderSegmentDiffChunks(chunks) {
+  const merged = mergeDiffChunks(chunks);
+  const rendered = [];
+  for (let index = 0; index < merged.length; index += 1) {
+    const chunk = merged[index];
+    const next = merged[index + 1];
+    if (chunk.type === 'delete' && next?.type === 'insert') {
+      rendered.push(renderChangedSegmentPair(chunk.text, next.text));
+      index += 1;
+    } else if (chunk.type === 'insert') {
+      rendered.push(`<span class="diff-added">${escapeHtml(chunk.text)}</span>`);
+    } else if (chunk.type === 'delete') {
+      rendered.push(`<span class="diff-removed">${escapeHtml(chunk.text)}</span>`);
+    } else {
+      rendered.push(escapeHtml(chunk.text));
+    }
+  }
+  return rendered.join('');
+}
+
+function renderChangedSegmentPair(removedText, addedText) {
+  if ((removedText.length + addedText.length) <= 4500) {
+    return diffTextByLcs(removedText, addedText);
+  }
+  return diffTextBySharedEdges(removedText, addedText);
+}
+
+function diffTextBySharedEdges(oldText, newText) {
+  const oldParts = splitDiffUnits(oldText);
+  const newParts = splitDiffUnits(newText);
+  const commonPrefix = sharedPrefixLength(oldParts, newParts);
+  const commonSuffix = sharedSuffixLength(oldParts, newParts, commonPrefix);
+  const prefix = oldParts.slice(0, commonPrefix).join('');
+  const suffix = oldParts.slice(oldParts.length - commonSuffix).join('');
+  const removed = oldParts.slice(commonPrefix, oldParts.length - commonSuffix).join('');
+  const added = newParts.slice(commonPrefix, newParts.length - commonSuffix).join('');
+  return [
+    escapeHtml(prefix),
+    removed ? `<span class="diff-removed">${escapeHtml(removed)}</span>` : '',
+    added ? `<span class="diff-added">${escapeHtml(added)}</span>` : '',
+    escapeHtml(suffix),
+  ].join('');
+}
+
+function diffTextByLcs(oldText, newText) {
+  const oldParts = splitDiffUnits(oldText);
+  const newParts = splitDiffUnits(newText);
+  const width = newParts.length + 1;
+  const table = new Uint16Array((oldParts.length + 1) * width);
+  for (let i = oldParts.length - 1; i >= 0; i -= 1) {
+    for (let j = newParts.length - 1; j >= 0; j -= 1) {
+      const offset = i * width + j;
+      table[offset] = oldParts[i] === newParts[j]
+        ? table[(i + 1) * width + j + 1] + 1
+        : Math.max(table[(i + 1) * width + j], table[i * width + j + 1]);
+    }
+  }
+  const chunks = [];
+  let i = 0;
+  let j = 0;
+  while (i < oldParts.length && j < newParts.length) {
+    if (oldParts[i] === newParts[j]) {
+      chunks.push({ type: 'equal', text: oldParts[i] });
+      i += 1;
+      j += 1;
+    } else if (table[(i + 1) * width + j] >= table[i * width + j + 1]) {
+      chunks.push({ type: 'delete', text: oldParts[i] });
+      i += 1;
+    } else {
+      chunks.push({ type: 'insert', text: newParts[j] });
+      j += 1;
+    }
+  }
+  while (i < oldParts.length) {
+    chunks.push({ type: 'delete', text: oldParts[i] });
+    i += 1;
+  }
+  while (j < newParts.length) {
+    chunks.push({ type: 'insert', text: newParts[j] });
+    j += 1;
+  }
+  return renderDiffChunks(chunks);
+}
+
+function renderDiffChunks(chunks) {
+  const merged = mergeDiffChunks(chunks);
+  return merged.map((chunk) => {
+    if (chunk.type === 'delete') return `<span class="diff-removed">${escapeHtml(chunk.text)}</span>`;
+    if (chunk.type === 'insert') return `<span class="diff-added">${escapeHtml(chunk.text)}</span>`;
+    return escapeHtml(chunk.text);
+  }).join('');
+}
+
+function mergeDiffChunks(chunks) {
+  const merged = [];
+  chunks.forEach((chunk) => {
+    const last = merged[merged.length - 1];
+    if (last && last.type === chunk.type) last.text += chunk.text;
+    else merged.push({ ...chunk });
+  });
+  return merged;
+}
+
+function splitDiffUnits(text) {
+  return Array.from(String(text || ''));
+}
+
+function sharedPrefixLength(left, right) {
+  const max = Math.min(left.length, right.length);
+  let index = 0;
+  while (index < max && left[index] === right[index]) {
+    index += 1;
+  }
+  return index;
+}
+
+function sharedSuffixLength(left, right, prefixLength) {
+  const max = Math.min(left.length, right.length) - prefixLength;
+  let index = 0;
+  while (index < max && left[left.length - 1 - index] === right[right.length - 1 - index]) {
+    index += 1;
+  }
+  return index;
 }
 
 function selectedAction(group) {
@@ -1706,6 +1985,14 @@ async function runTransformPanel(scope, inputSelector, outputSelector, extra = {
   }
   setState(scope, '处理中...', 'running');
   try {
+    if (scope === 'ai') {
+      const baseData = await requestJson('/api/run', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ action: 'analyze', text }),
+      });
+      state.lastBaseAiScore = baseData.analysis?.ai?.score;
+    }
     const data = await requestJson('/api/run', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -1729,13 +2016,21 @@ async function reviewText(inputSelector, outputSelector, reviewSelector, sourceT
     $(reviewSelector).textContent = '请先输入原文或生成处理结果。';
     return;
   }
+  if (reviewSelector === '#aiReview' && textValue(inputSelector)) {
+    const baseData = await requestJson('/api/run', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ action: 'analyze', text: textValue(inputSelector) }),
+    });
+    state.lastBaseAiScore = baseData.analysis?.ai?.score;
+  }
   const data = await requestJson('/api/run', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ action: 'analyze', text: target, sourceText }),
   });
   state.lastAnalysis = data.analysis;
-  $(reviewSelector).textContent = renderAnalysisSummary(data.analysis);
+  $(reviewSelector).textContent = renderAnalysisSummary(data.analysis, reviewSelector === '#aiReview' ? 'ai' : '');
   saveDraft();
 }
 
@@ -1743,7 +2038,9 @@ async function runPanel(kind) {
   if (kind === 'ai') {
     const data = await runTransformPanel('ai', '#aiInput', '#aiOutput', { action: selectedAction('ai') });
     if (data) {
-      $('#aiReview').textContent = renderAnalysisSummary(data.analysis);
+      $('#aiReview').textContent = renderAnalysisSummary(data.analysis, 'ai');
+      $('#aiDiffStatus').textContent = '差异视图已刷新。';
+      $('#aiDiff').innerHTML = diffText(textValue('#aiInput'), textValue('#aiOutput'));
       addHistoryRecord('ai', 'AI 痕迹消除', { inputSelector: '#aiInput', outputSelector: '#aiOutput', analysis: data.analysis });
       saveDraft();
     }
@@ -1973,8 +2270,11 @@ function bindActions() {
   $$('[data-run-panel]').forEach((button) => button.addEventListener('click', () => runPanel(button.dataset.runPanel)));
   $$('[data-review-panel="ai"]').forEach((button) => button.addEventListener('click', () => reviewText('#aiInput', '#aiOutput', '#aiReview')));
   $$('[data-review-panel="plagiarism"]').forEach((button) => button.addEventListener('click', () => reviewText('#plagiarismInput', '#plagiarismOutput', '#plagiarismReview', textValue('#plagiarismSource'))));
-  $$('[data-diff-panel="ai"]').forEach((button) => button.addEventListener('click', () => { $('#aiDiff').textContent = diffText(textValue('#aiInput'), textValue('#aiOutput')); }));
-  $$('[data-diff-panel="plagiarism"]').forEach((button) => button.addEventListener('click', () => { $('#plagiarismDiff').textContent = diffText(textValue('#plagiarismInput'), textValue('#plagiarismOutput')); }));
+  $$('[data-diff-panel="ai"]').forEach((button) => button.addEventListener('click', () => {
+    $('#aiDiffStatus').textContent = '差异视图已刷新。';
+    $('#aiDiff').innerHTML = diffText(textValue('#aiInput'), textValue('#aiOutput'));
+  }));
+  $$('[data-diff-panel="plagiarism"]').forEach((button) => button.addEventListener('click', () => { $('#plagiarismDiff').textContent = plainDiffText(textValue('#plagiarismInput'), textValue('#plagiarismOutput')); }));
   $$('[data-clear-panel]').forEach((button) => button.addEventListener('click', () => clearPanel(button.dataset.clearPanel)));
   FIELD_SELECTORS.forEach((selector) => {
     const node = $(selector);
