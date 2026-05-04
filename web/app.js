@@ -21,6 +21,9 @@ const state = {
   paperPushTargets: {},
   paperTemplate: null,
   selectedHistoryId: '',
+  currentCorrectionIssues: [],
+  currentCorrectionLabels: {},
+  selectedCorrectionIssueId: '',
   restoring: false,
 };
 
@@ -37,9 +40,9 @@ const STORAGE_KEYS = {
 const FIELD_SELECTORS = [
   '#paperTopic', '#paperSubject', '#paperStyle', '#referenceStyle', '#sectionTitle', '#totalWordCountAuto', '#totalWordCount', '#wordCountAuto', '#wordCount', '#paperOutline', '#paperContext', '#paperResult',
   '#aiInput', '#aiOutput', '#aiReview', '#aiDiff',
-  '#plagiarismInput', '#plagiarismOutput', '#plagiarismSource', '#plagiarismReview', '#plagiarismDiff',
-  '#polishTaskType', '#polishExecutionMode', '#polishTopic', '#polishNotes', '#polishInput', '#polishOutput', '#polishReview',
-  '#correctionCitationStyle', '#correctionInput', '#correctionOutput', '#correctionReport',
+  '#plagiarismInput', '#plagiarismOutput', '#plagiarismOutputEditor', '#plagiarismSource', '#plagiarismReview', '#plagiarismDiff',
+  '#polishTaskType', '#polishExecutionMode', '#polishTopic', '#polishNotes', '#polishInput', '#polishOutput', '#polishOutputEditor', '#polishReview', '#polishDiff',
+  '#correctionCitationStyle', '#correctionInput', '#correctionOutput', '#correctionDiff', '#correctionReport',
 ];
 
 const PAGE_LABELS = {
@@ -868,6 +871,96 @@ function plainDiffText(before, after) {
   ].join('\n');
 }
 
+function panelDiffConfig(scope) {
+  return {
+    ai: { input: '#aiInput', output: '#aiOutput', diff: '#aiDiff', status: '#aiDiffStatus' },
+    plagiarism: { input: '#plagiarismInput', output: '#plagiarismOutput', diff: '#plagiarismDiff', status: '#plagiarismDiffStatus', editor: '#plagiarismOutputEditor' },
+    polish: { input: '#polishInput', output: '#polishOutput', diff: '#polishDiff', status: '#polishDiffStatus', editor: '#polishOutputEditor' },
+    correction: { input: '#correctionInput', output: '#correctionOutput', diff: '#correctionDiff', status: '#correctionDiffStatus' },
+  }[scope] || null;
+}
+
+function refreshPanelDiff(scope) {
+  const config = panelDiffConfig(scope);
+  if (!config) return;
+  syncResultEditorToOutput(scope);
+  const diffNode = $(config.diff);
+  if (!diffNode) return;
+  const statusNode = $(config.status);
+  if (statusNode) statusNode.textContent = '差异视图已刷新。';
+  diffNode.innerHTML = diffText(textValue(config.input), textValue(config.output));
+}
+
+function editableResultConfig(scope) {
+  const config = panelDiffConfig(scope);
+  if (!config || !config.editor) return null;
+  return {
+    ...config,
+    editButton: `[data-result-edit="${scope}"]`,
+    doneButton: `[data-result-done="${scope}"]`,
+  };
+}
+
+function syncResultOutputToEditor(scope) {
+  const config = editableResultConfig(scope);
+  if (!config) return;
+  const editor = $(config.editor);
+  if (!editor) return;
+  const output = textValue(config.output);
+  if (editor.value !== output) editor.value = output;
+}
+
+function syncResultEditorToOutput(scope) {
+  const config = editableResultConfig(scope);
+  if (!config) return;
+  const editor = $(config.editor);
+  if (!editor || editor.hidden) return;
+  setText(config.output, readNodeText(editor));
+}
+
+function setResultEditMode(scope, editing) {
+  const config = editableResultConfig(scope);
+  if (!config) return;
+  const editor = $(config.editor);
+  const diffNode = $(config.diff);
+  const editButton = $(config.editButton);
+  const doneButton = $(config.doneButton);
+  const statusNode = $(config.status);
+  if (!editor || !diffNode) return;
+
+  if (editing) {
+    syncResultOutputToEditor(scope);
+    editor.hidden = false;
+    diffNode.hidden = true;
+    if (editButton) editButton.hidden = true;
+    if (doneButton) doneButton.hidden = false;
+    if (statusNode) statusNode.textContent = '正在编辑处理结果；完成后会刷新差异预览。';
+    editor.focus();
+    return;
+  }
+
+  setText(config.output, readNodeText(editor));
+  editor.hidden = true;
+  diffNode.hidden = false;
+  if (editButton) editButton.hidden = false;
+  if (doneButton) doneButton.hidden = true;
+  refreshPanelDiff(scope);
+  saveDraft();
+}
+
+function resetResultEditMode(scope) {
+  const config = editableResultConfig(scope);
+  if (!config) return;
+  const editor = $(config.editor);
+  const diffNode = $(config.diff);
+  const editButton = $(config.editButton);
+  const doneButton = $(config.doneButton);
+  if (editor) editor.hidden = true;
+  if (diffNode) diffNode.hidden = false;
+  if (editButton) editButton.hidden = false;
+  if (doneButton) doneButton.hidden = true;
+}
+
 function diffTextBySegments(oldText, newText) {
   const oldSegments = splitDiffSegments(oldText);
   const newSegments = splitDiffSegments(newText);
@@ -1390,6 +1483,7 @@ function pushPaperSelectionToWorkspace() {
   }
   setText(config.input, payload.text);
   setText(config.output, '');
+  resetPushedTargetResults(target);
   state.paperPushTargets[target] = {
     scope: payload.scope,
     titles: payload.titles,
@@ -1399,6 +1493,62 @@ function pushPaperSelectionToWorkspace() {
   setState(config.stateScope, '已接收论文内容');
   setPage(config.page);
   saveDraft();
+}
+
+function resetPushedTargetResults(target) {
+  ({
+    ai: resetAiResultsForNewInput,
+    plagiarism: resetPlagiarismResultsForNewInput,
+    polish: resetPolishResultsForNewInput,
+    correction: resetCorrectionResultsForNewInput,
+  }[target] || (() => {}))();
+}
+
+function resetAiResultsForNewInput() {
+  setText('#aiOutput', '');
+  setText('#aiReview', '完成去痕效果复核后，此处将展示 AI 生成概率、去痕效果评估与核心问题汇总。');
+  setText('#aiDiff', '差异预览会显示在这里。');
+  const status = $('#aiDiffStatus');
+  if (status) status.textContent = '点击“刷新差异”，即可查看原文与处理结果的逐句差异对比。';
+}
+
+function resetPlagiarismResultsForNewInput() {
+  setText('#plagiarismOutput', '');
+  setText('#plagiarismOutputEditor', '');
+  setText('#plagiarismSource', '');
+  setText('#plagiarismReview', '');
+  setText('#plagiarismDiff', '降重处理结果会显示在这里。');
+  resetResultEditMode('plagiarism');
+  const status = $('#plagiarismDiffStatus');
+  if (status) status.textContent = '红色为删除，绿色为新增。降重完成后，这里会直接显示处理差异。';
+}
+
+function resetPolishResultsForNewInput() {
+  setText('#polishOutput', '');
+  setText('#polishOutputEditor', '');
+  setText('#polishReview', '');
+  setText('#polishDiff', '润色处理结果会显示在这里。');
+  resetResultEditMode('polish');
+  const status = $('#polishDiffStatus');
+  if (status) status.textContent = '红色为删除，绿色为新增。润色完成后，这里会直接显示处理差异。';
+}
+
+function resetCorrectionResultsForNewInput() {
+  setText('#correctionOutput', '');
+  const stats = $('#correctionStats');
+  if (stats) stats.textContent = '';
+  const issues = $('#correctionIssues');
+  if (issues) issues.textContent = '运行智能纠错后，这里会列出问题。';
+  const report = $('#correctionReport');
+  if (report) report.textContent = '请选择问题或运行智能纠错查看详情。';
+  const diff = $('#correctionDiff');
+  if (diff) diff.textContent = '修正预览会显示在这里。';
+  const status = $('#correctionDiffStatus');
+  if (status) status.textContent = '红色为删除，绿色为新增。运行智能纠错后，这里会直接显示修正差异。';
+  state.currentCorrectionIssues = [];
+  state.currentCorrectionLabels = {};
+  state.selectedCorrectionIssueId = '';
+  syncCorrectionAutoFixButton();
 }
 
 function paperBackfillHeadingTitle(line, titles) {
@@ -2532,8 +2682,7 @@ async function runPanel(kind) {
     const data = await runTransformPanel('ai', '#aiInput', '#aiOutput', { action: selectedAction('ai') });
     if (data) {
       $('#aiReview').textContent = renderAnalysisSummary(data.analysis, 'ai');
-      $('#aiDiffStatus').textContent = '差异视图已刷新。';
-      $('#aiDiff').innerHTML = diffText(textValue('#aiInput'), textValue('#aiOutput'));
+      refreshPanelDiff('ai');
       addHistoryRecord('ai', 'AI 痕迹消除', { inputSelector: '#aiInput', outputSelector: '#aiOutput', analysis: data.analysis });
       saveDraft();
     }
@@ -2545,7 +2694,9 @@ async function runPanel(kind) {
       sourceText,
     });
     if (data) {
-      $('#plagiarismReview').textContent = renderAnalysisSummary(data.analysis);
+      setText('#plagiarismReview', '');
+      syncResultOutputToEditor('plagiarism');
+      refreshPanelDiff('plagiarism');
       addHistoryRecord('plagiarism', '降查重率', { inputSelector: '#plagiarismInput', outputSelector: '#plagiarismOutput', analysis: data.analysis });
       saveDraft();
     }
@@ -2560,7 +2711,9 @@ async function runPanel(kind) {
       notes: textValue('#polishNotes'),
     });
     if (data) {
-      $('#polishReview').textContent = renderAnalysisSummary(data.analysis);
+      setText('#polishReview', '');
+      syncResultOutputToEditor('polish');
+      refreshPanelDiff('polish');
       addHistoryRecord('polish', '学术润色', { inputSelector: '#polishInput', outputSelector: '#polishOutput', analysis: data.analysis });
       saveDraft();
     }
@@ -2568,7 +2721,9 @@ async function runPanel(kind) {
   if (kind === 'translate') {
     const data = await runTransformPanel('polish', '#polishInput', '#polishOutput', { action: 'polish', polishMode: 'full' });
     if (data) {
-      $('#polishReview').textContent = '翻译润色入口已对应到润色工作台；当前 Web 后端暂使用综合润色能力。\n\n' + renderAnalysisSummary(data.analysis);
+      setText('#polishReview', '');
+      syncResultOutputToEditor('polish');
+      refreshPanelDiff('polish');
       addHistoryRecord('polish', '翻译润色', { inputSelector: '#polishInput', outputSelector: '#polishOutput', analysis: data.analysis });
       saveDraft();
     }
@@ -2580,6 +2735,7 @@ async function runPanel(kind) {
     });
     if (data) {
       renderCorrection(data.analysis && data.analysis.correction);
+      refreshPanelDiff('correction');
       addHistoryRecord('correction', '智能纠错', { inputSelector: '#correctionInput', outputSelector: '#correctionOutput', analysis: data.analysis });
       saveDraft();
     }
@@ -2622,33 +2778,170 @@ function renderCorrection(correction) {
     </article>
   `).join('');
   const issues = correction.issues || [];
+  state.currentCorrectionIssues = issues;
+  state.currentCorrectionLabels = labels;
+  state.selectedCorrectionIssueId = '';
   $('#correctionIssues').innerHTML = issues.length ? issues.slice(0, 40).map((issue) => `
     <button class="issue-item" type="button" data-issue-id="${escapeHtml(issue.id)}">
       <strong>${escapeHtml(issue.title || '未命名问题')}</strong>
-      <span>${escapeHtml((labels[issue.category] || issue.category || '-') + ' / ' + (issue.severity || '-'))}</span>
+      <span data-issue-status>${escapeHtml(correctionIssueStatusText(issue, labels))}</span>
     </button>
   `).join('') : '暂未发现待处理问题。';
   $('#correctionReport').textContent = correction.report || '暂无报告。';
-  $$('.issue-item').forEach((button) => {
+  syncCorrectionAutoFixButton();
+  $$('#correctionIssues .issue-item[data-issue-id]').forEach((button) => {
     button.addEventListener('click', () => {
       const issue = issues.find((item) => item.id === button.dataset.issueId);
       if (!issue) return;
-      $('#correctionReport').textContent = [
-        `问题：${issue.title || '未命名问题'}`,
-        `分类：${labels[issue.category] || issue.category || '-'}`,
-        `级别：${issue.severity || '-'}`,
-        '',
-        `说明：${issue.message || ''}`,
-        issue.original ? `原文片段：${issue.original}` : '',
-        issue.suggestion ? `修改建议：${issue.suggestion}` : '',
-        issue.replacement ? `自动修复：${issue.replacement}` : '',
-      ].filter(Boolean).join('\n');
+      state.selectedCorrectionIssueId = issue.id;
+      updateCorrectionIssueListState(issues, labels, state.selectedCorrectionIssueId);
+      syncCorrectionAutoFixButton();
+      renderCorrectionIssueReport(issue, labels);
     });
   });
 }
 
+function correctionIssueStatusText(issue, labels = {}) {
+  const status = issue?.status === 'fixed' ? ' / 已修复' : '';
+  return `${labels[issue?.category] || issue?.category || '-'} / ${issue?.severity || '-'}${status}`;
+}
+
+function issueHasReplacement(issue) {
+  return Boolean(issue) && Object.prototype.hasOwnProperty.call(issue, 'replacement') && issue.replacement !== null && issue.replacement !== undefined;
+}
+
+function issueCanAutoFix(issue) {
+  if (!issue || issue.status === 'fixed' || !issue.auto_fixable || !issueHasReplacement(issue)) return false;
+  const start = Number(issue.start);
+  const end = Number(issue.end);
+  const hasUsableSpan = Number.isFinite(start) && Number.isFinite(end) && start >= 0 && end >= start;
+  return hasUsableSpan || Boolean(issue.original);
+}
+
+function currentCorrectionOutputText() {
+  const outputText = readNodeText($('#correctionOutput'));
+  return outputText || textValue('#correctionInput');
+}
+
+function findCorrectionIssueSpan(text, issue) {
+  const content = String(text || '');
+  const original = String(issue?.original || '');
+  const start = Number(issue?.start);
+  const end = Number(issue?.end);
+  if (Number.isFinite(start) && Number.isFinite(end) && start >= 0 && end >= start && end <= content.length) {
+    if (!original || content.slice(start, end) === original) {
+      return { start, end };
+    }
+  }
+  if (!original) return null;
+
+  const matches = [];
+  let cursor = content.indexOf(original);
+  while (cursor >= 0) {
+    matches.push({ start: cursor, end: cursor + original.length });
+    cursor = content.indexOf(original, cursor + Math.max(original.length, 1));
+  }
+  if (!matches.length) return null;
+  const preferredStart = Number.isFinite(start) && start >= 0 ? start : 0;
+  return matches.sort((left, right) => Math.abs(left.start - preferredStart) - Math.abs(right.start - preferredStart))[0];
+}
+
+function applySingleCorrectionIssue(issue) {
+  if (!issueCanAutoFix(issue)) {
+    return { ok: false, message: issue?.status === 'fixed' ? '该问题已经修复过。' : '该问题没有可直接应用的自动修复内容。' };
+  }
+  const currentText = currentCorrectionOutputText();
+  if (!currentText) return { ok: false, message: '请先输入原文或运行智能纠错。' };
+  const span = findCorrectionIssueSpan(currentText, issue);
+  if (!span) {
+    return { ok: false, message: '没有在当前修正内容中找到对应原文片段，可能已经被手动改过。' };
+  }
+  const replacement = String(issue.replacement ?? '');
+  const nextText = currentText.slice(0, span.start) + replacement + currentText.slice(span.end);
+  setText('#correctionOutput', nextText);
+  issue.status = 'fixed';
+  issue.appliedStart = span.start;
+  issue.appliedEnd = span.start + replacement.length;
+  refreshPanelDiff('correction');
+  setState('correction', '已自动修复 1 处问题', 'done');
+  saveDraft();
+  return { ok: true, message: '已写入修正预览；回填时会使用修正后的纯文本内容。' };
+}
+
+function selectedCorrectionIssue() {
+  return (state.currentCorrectionIssues || []).find((issue) => issue.id === state.selectedCorrectionIssueId) || null;
+}
+
+function syncCorrectionAutoFixButton() {
+  const button = $('#correctionAutoFixButton');
+  if (!button) return;
+  const issue = selectedCorrectionIssue();
+  const hasSelection = Boolean(issue);
+  button.hidden = !hasSelection;
+  button.disabled = !issueCanAutoFix(issue);
+  button.textContent = issue?.status === 'fixed' ? '已修复' : '自动修复';
+}
+
+function handleSelectedCorrectionAutoFix() {
+  const issue = selectedCorrectionIssue();
+  if (!issue) return;
+  const labels = state.currentCorrectionLabels || {};
+  const result = applySingleCorrectionIssue(issue);
+  updateCorrectionIssueListState(state.currentCorrectionIssues, labels, issue.id);
+  syncCorrectionAutoFixButton();
+  renderCorrectionIssueReport(issue, labels, result);
+}
+
+function updateCorrectionIssueListState(issues, labels = {}, selectedId = '') {
+  $$('#correctionIssues .issue-item[data-issue-id]').forEach((button) => {
+    const issue = issues.find((item) => item.id === button.dataset.issueId);
+    button.classList.toggle('selected', button.dataset.issueId === selectedId);
+    button.classList.toggle('fixed', issue?.status === 'fixed');
+    const statusNode = button.querySelector('[data-issue-status]');
+    if (statusNode && issue) statusNode.textContent = correctionIssueStatusText(issue, labels);
+  });
+}
+
+function correctionReportRow(label, value) {
+  if (!value) return '';
+  return `
+    <div class="correction-report-row">
+      <strong>${escapeHtml(label)}</strong>
+      <span>${escapeHtml(value)}</span>
+    </div>
+  `;
+}
+
+function renderCorrectionIssueReport(issue, labels = {}, feedback = null) {
+  const report = $('#correctionReport');
+  if (!report) return;
+  const fixed = issue.status === 'fixed';
+  const canFix = issueCanAutoFix(issue);
+  const replacementText = issueHasReplacement(issue) ? String(issue.replacement ?? '') : '';
+  const fixPreview = replacementText ? replacementText : (issueHasReplacement(issue) ? '删除该片段' : '');
+  report.innerHTML = `
+    <div class="correction-report">
+      ${correctionReportRow('问题', issue.title || '未命名问题')}
+      ${correctionReportRow('分类', labels[issue.category] || issue.category || '-')}
+      ${correctionReportRow('级别', issue.severity || '-')}
+      ${correctionReportRow('说明', issue.message || '')}
+      ${correctionReportRow('原文片段', issue.original || '')}
+      ${correctionReportRow('修改建议', issue.suggestion || '')}
+      ${correctionReportRow('自动修复', fixPreview)}
+      ${fixed ? '<p class="correction-report-hint">该问题已修复。</p>' : ''}
+      ${!fixed && !canFix ? '<p class="correction-report-hint">该问题需要人工确认后修改。</p>' : ''}
+      ${feedback ? `<p class="correction-report-feedback ${feedback.ok ? 'is-done' : 'is-error'}">${escapeHtml(feedback.message)}</p>` : ''}
+    </div>
+  `;
+  syncCorrectionAutoFixButton();
+}
+
 function renderCorrectionReviewAsIssues(analysis, title) {
   $('#correctionStats').innerHTML = '';
+  state.currentCorrectionIssues = [];
+  state.currentCorrectionLabels = {};
+  state.selectedCorrectionIssueId = '';
+  syncCorrectionAutoFixButton();
   $('#correctionIssues').innerHTML = `<article class="issue-item"><strong>${escapeHtml(title)}</strong><span>专项核验结果</span></article>`;
 }
 
@@ -2766,6 +3059,7 @@ function bindActions() {
     renderPaperSections();
   });
   $('#paperPushButton')?.addEventListener('click', pushPaperSelectionToWorkspace);
+  $('#correctionAutoFixButton')?.addEventListener('click', handleSelectedCorrectionAutoFix);
   $('#sectionTitle').addEventListener('input', () => {
     const title = textValue('#sectionTitle');
     if (title) {
@@ -2781,11 +3075,10 @@ function bindActions() {
   $$('[data-run-panel]').forEach((button) => button.addEventListener('click', () => runPanel(button.dataset.runPanel)));
   $$('[data-review-panel="ai"]').forEach((button) => button.addEventListener('click', () => reviewText('#aiInput', '#aiOutput', '#aiReview')));
   $$('[data-review-panel="plagiarism"]').forEach((button) => button.addEventListener('click', () => reviewText('#plagiarismInput', '#plagiarismOutput', '#plagiarismReview', textValue('#plagiarismSource'))));
-  $$('[data-diff-panel="ai"]').forEach((button) => button.addEventListener('click', () => {
-    $('#aiDiffStatus').textContent = '差异视图已刷新。';
-    $('#aiDiff').innerHTML = diffText(textValue('#aiInput'), textValue('#aiOutput'));
-  }));
-  $$('[data-diff-panel="plagiarism"]').forEach((button) => button.addEventListener('click', () => { $('#plagiarismDiff').textContent = plainDiffText(textValue('#plagiarismInput'), textValue('#plagiarismOutput')); }));
+  $$('[data-review-panel="polish"]').forEach((button) => button.addEventListener('click', () => reviewText('#polishInput', '#polishOutput', '#polishReview')));
+  $$('[data-diff-panel]').forEach((button) => button.addEventListener('click', () => refreshPanelDiff(button.dataset.diffPanel)));
+  $$('[data-result-edit]').forEach((button) => button.addEventListener('click', () => setResultEditMode(button.dataset.resultEdit, true)));
+  $$('[data-result-done]').forEach((button) => button.addEventListener('click', () => setResultEditMode(button.dataset.resultDone, false)));
   $$('[data-clear-panel]').forEach((button) => button.addEventListener('click', () => clearPanel(button.dataset.clearPanel)));
   FIELD_SELECTORS.forEach((selector) => {
     const node = $(selector);
@@ -2867,12 +3160,13 @@ function bindActions() {
 
 function clearPanel(scope) {
   const fields = {
-    ai: ['#aiInput', '#aiOutput'],
-    plagiarism: ['#plagiarismInput', '#plagiarismOutput', '#plagiarismSource'],
-    polish: ['#polishInput', '#polishOutput', '#polishNotes'],
-    correction: ['#correctionInput', '#correctionOutput'],
+    ai: ['#aiInput'],
+    plagiarism: ['#plagiarismInput', '#plagiarismSource'],
+    polish: ['#polishInput', '#polishNotes'],
+    correction: ['#correctionInput'],
   }[scope] || [];
   fields.forEach((selector) => setText(selector, ''));
+  resetPushedTargetResults(scope);
   setState(scope, '待处理');
   saveDraft();
 }

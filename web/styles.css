@@ -728,18 +728,23 @@ svg { width: 22px; height: 22px; fill: none; stroke: currentColor; stroke-width:
   overflow: auto;
 }
 
-.ai-review-grid {
+.ai-review-grid,
+.result-review-grid {
   grid-template-columns: minmax(280px, 0.7fr) minmax(0, 1.3fr);
 }
 .ai-summary-detail,
-.ai-diff-detail {
+.ai-diff-detail,
+.result-summary-detail,
+.result-diff-detail {
   min-height: 260px;
   max-height: 420px;
 }
-.ai-summary-detail {
+.ai-summary-detail,
+.result-summary-detail {
   color: var(--text);
 }
-.ai-diff-detail {
+.ai-diff-detail,
+.result-diff-detail {
   color: var(--text);
   word-break: break-word;
 }
@@ -752,18 +757,47 @@ svg { width: 22px; height: 22px; fill: none; stroke: currentColor; stroke-width:
   font-size: 0.82rem;
   white-space: nowrap;
 }
-.ai-diff-detail .diff-removed {
+.ai-diff-detail .diff-removed,
+.result-diff-detail .diff-removed {
   color: #dc2626;
   text-decoration: line-through;
   text-decoration-thickness: 1px;
   background: rgba(220, 38, 38, 0.08);
   border-radius: 4px;
 }
-.ai-diff-detail .diff-added {
+.ai-diff-detail .diff-added,
+.result-diff-detail .diff-added {
   color: #16a34a;
   background: rgba(22, 163, 74, 0.1);
   border-radius: 4px;
   font-weight: 600;
+}
+.correction-preview-panel {
+  gap: 0.75rem;
+}
+.result-preview-panel {
+  gap: 0.75rem;
+}
+.result-output-diff {
+  flex: 1;
+  min-height: 430px;
+  max-height: none;
+}
+.result-output-editor {
+  flex: 1;
+  min-height: 430px;
+  resize: vertical;
+}
+.correction-diff-detail {
+  flex: 1;
+  min-height: 430px;
+  max-height: none;
+}
+.button-row.compact-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.45rem;
+  justify-content: flex-end;
 }
 .provider-list {
   display: grid;
@@ -810,6 +844,56 @@ svg { width: 22px; height: 22px; fill: none; stroke: currentColor; stroke-width:
   padding: 0.85rem;
 }
 .issue-item span { color: var(--muted); font-size: 0.86rem; }
+.issue-item.selected {
+  border-color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 10%, var(--surface-soft));
+}
+.issue-item.fixed {
+  border-color: color-mix(in srgb, var(--success) 42%, var(--line));
+}
+.issue-item.fixed strong {
+  color: var(--success);
+}
+.correction-report-detail {
+  white-space: normal;
+  font-family: inherit;
+  color: var(--text);
+}
+.correction-report {
+  display: grid;
+  gap: 0.72rem;
+}
+.correction-report-row {
+  display: grid;
+  gap: 0.28rem;
+}
+.correction-report-row strong {
+  color: var(--muted);
+  font-size: 0.84rem;
+}
+.correction-report-row span {
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+.correction-report-actions {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 0.55rem;
+  padding-top: 0.15rem;
+}
+.correction-report-hint,
+.correction-report-feedback {
+  margin: 0;
+  color: var(--muted);
+  font-size: 0.9rem;
+}
+.correction-report-feedback.is-done {
+  color: var(--success);
+}
+.correction-report-feedback.is-error {
+  color: var(--danger);
+}
 .outline-section-box {
   margin-top: 0.85rem;
   border: 1px solid var(--line);

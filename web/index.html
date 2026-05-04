@@ -250,15 +250,30 @@
             <button class="mode-card" data-mode-group="plagiarism" data-action="repeat-medium" type="button"><strong>中度降重</strong><span>句式重组、表述重构，规避连续重复语句。</span></button>
             <button class="mode-card" data-mode-group="plagiarism" data-action="repeat-deep" type="button"><strong>深度降重</strong><span>段落逻辑重构，适合大面积标红内容。</span></button>
           </div>
-          <div class="paper-actions"><button class="primary-button" data-run-panel="plagiarism" type="button">开始降重</button><button class="secondary-button" data-review-panel="plagiarism" type="button">效果复核</button><button class="secondary-button" data-diff-panel="plagiarism" type="button">刷新差异</button></div>
+          <div class="paper-actions"><button class="primary-button" data-run-panel="plagiarism" type="button">开始降重</button></div>
         </section>
         <section class="workbench-grid">
           <div class="panel editor-panel"><div class="panel-header-row"><div><p class="eyebrow">Input</p><h3>待降重原文</h3></div><button class="secondary-button compact" data-clear-panel="plagiarism" type="button">清空</button></div><textarea id="plagiarismInput" class="text-box" placeholder="请粘贴需要降重的论文段落/全文。"></textarea></div>
-          <div class="panel editor-panel"><div class="panel-header-row"><div><p class="eyebrow">Output</p><h3>降重处理结果</h3></div><button class="secondary-button compact" data-backfill-panel="plagiarism" type="button">回填</button></div><textarea id="plagiarismOutput" class="text-box" readonly placeholder="降重完成后，结果将显示在此处。"></textarea></div>
+          <div class="panel editor-panel result-preview-panel">
+            <div class="panel-header-row">
+              <div><p class="eyebrow">Output</p><h3>降重处理结果</h3></div>
+              <div class="button-row compact-row">
+                <button class="secondary-button compact" data-result-edit="plagiarism" type="button">编辑结果</button>
+                <button class="secondary-button compact" data-result-done="plagiarism" type="button" hidden>完成编辑</button>
+                <button class="secondary-button compact" data-diff-panel="plagiarism" type="button">刷新差异</button>
+                <button class="secondary-button compact" data-backfill-panel="plagiarism" type="button">回填</button>
+              </div>
+            </div>
+            <textarea id="plagiarismOutput" hidden></textarea>
+            <textarea id="plagiarismReview" hidden></textarea>
+            <textarea id="plagiarismOutputEditor" class="text-box result-output-editor" hidden placeholder="降重处理结果会显示在这里，可直接修改后回填。"></textarea>
+            <p id="plagiarismDiffStatus" class="muted-copy compact-copy">红色为删除，绿色为新增。降重完成后，这里会直接显示处理差异。</p>
+            <div id="plagiarismDiff" class="analysis-detail result-diff-detail result-output-diff">降重处理结果会显示在这里。</div>
+          </div>
         </section>
-        <section class="workbench-grid review-grid">
-          <div class="panel"><div class="panel-header-row"><div><p class="eyebrow">Source</p><h3>查重报告 / 重复源文本</h3></div></div><textarea id="plagiarismSource" class="text-box medium" placeholder="请粘贴查重标红内容、重复源文献全文/片段，提升降重精准度。"></textarea></div>
-          <div class="panel"><div class="panel-header-row"><div><p class="eyebrow">Review</p><h3>检测结果摘要</h3></div></div><pre id="plagiarismReview" class="analysis-detail">完成降重效果复核后，此处将展示模拟重复率、标红片段数量、降重效果评估。</pre><pre id="plagiarismDiff" class="analysis-detail">差异预览会显示在这里。</pre></div>
+        <section class="panel">
+          <div class="panel-header-row"><div><p class="eyebrow">Source</p><h3>查重报告 / 重复源文本</h3></div></div>
+          <textarea id="plagiarismSource" class="text-box medium" placeholder="请粘贴查重标红内容、重复源文献全文/片段，提升降重精准度。"></textarea>
         </section>
       </section>
 
@@ -285,7 +300,22 @@
         </section>
         <section class="workbench-grid">
           <div class="panel editor-panel"><div class="panel-header-row"><div><p class="eyebrow">Input</p><h3>原文输入</h3></div><button class="secondary-button compact" data-clear-panel="polish" type="button">清空</button></div><textarea id="polishInput" class="text-box" placeholder="请输入需要润色的段落、章节或摘要。"></textarea></div>
-          <div class="panel editor-panel"><div class="panel-header-row"><div><p class="eyebrow">Preview</p><h3>结果预览</h3></div><button class="secondary-button compact" data-backfill-panel="polish" type="button">回填</button></div><textarea id="polishOutput" class="text-box" readonly placeholder="润色结果会显示在这里。"></textarea><pre id="polishReview" class="analysis-detail">执行任务后会在这里显示结果摘要。</pre></div>
+          <div class="panel editor-panel result-preview-panel">
+            <div class="panel-header-row">
+              <div><p class="eyebrow">Output</p><h3>润色处理结果</h3></div>
+              <div class="button-row compact-row">
+                <button class="secondary-button compact" data-result-edit="polish" type="button">编辑结果</button>
+                <button class="secondary-button compact" data-result-done="polish" type="button" hidden>完成编辑</button>
+                <button class="secondary-button compact" data-diff-panel="polish" type="button">刷新差异</button>
+                <button class="secondary-button compact" data-backfill-panel="polish" type="button">回填</button>
+              </div>
+            </div>
+            <textarea id="polishOutput" hidden></textarea>
+            <textarea id="polishReview" hidden></textarea>
+            <textarea id="polishOutputEditor" class="text-box result-output-editor" hidden placeholder="润色处理结果会显示在这里，可直接修改后回填。"></textarea>
+            <p id="polishDiffStatus" class="muted-copy compact-copy">红色为删除，绿色为新增。润色完成后，这里会直接显示处理差异。</p>
+            <div id="polishDiff" class="analysis-detail result-diff-detail result-output-diff">润色处理结果会显示在这里。</div>
+          </div>
         </section>
       </section>
 
@@ -308,11 +338,28 @@
         </section>
         <section class="workbench-grid">
           <div class="panel editor-panel"><div class="panel-header-row"><div><p class="eyebrow">Input</p><h3>原文 / 导入文稿</h3></div><button class="secondary-button compact" data-clear-panel="correction" type="button">清空</button></div><textarea id="correctionInput" class="text-box" placeholder="请输入或粘贴待纠错论文内容。"></textarea></div>
-          <div class="panel editor-panel"><div class="panel-header-row"><div><p class="eyebrow">Preview</p><h3>修正预览</h3></div><button class="secondary-button compact" data-backfill-panel="correction" type="button">回填</button></div><textarea id="correctionOutput" class="text-box" readonly placeholder="修正预览会显示在这里。"></textarea></div>
+          <div class="panel editor-panel correction-preview-panel">
+            <div class="panel-header-row">
+              <div><p class="eyebrow">Preview</p><h3>修正预览</h3></div>
+              <div class="button-row compact-row">
+                <button class="secondary-button compact" data-diff-panel="correction" type="button">刷新差异</button>
+                <button class="secondary-button compact" data-backfill-panel="correction" type="button">回填</button>
+              </div>
+            </div>
+            <textarea id="correctionOutput" hidden></textarea>
+            <p id="correctionDiffStatus" class="muted-copy compact-copy">红色为删除，绿色为新增。运行智能纠错后，这里会直接显示修正差异。</p>
+            <div id="correctionDiff" class="analysis-detail result-diff-detail correction-diff-detail">修正预览会显示在这里。</div>
+          </div>
         </section>
         <section class="workbench-grid review-grid">
           <div class="panel"><div class="panel-header-row"><div><p class="eyebrow">Issues</p><h3>问题列表</h3></div></div><div class="issue-list" id="correctionIssues">运行智能纠错后，这里会列出问题。</div></div>
-          <div class="panel"><div class="panel-header-row"><div><p class="eyebrow">Report</p><h3>问题详情 / 报告</h3></div></div><pre id="correctionReport" class="analysis-detail">请选择问题或运行智能纠错查看详情。</pre></div>
+          <div class="panel">
+            <div class="panel-header-row">
+              <div><p class="eyebrow">Report</p><h3>问题详情 / 报告</h3></div>
+              <button id="correctionAutoFixButton" class="primary-button compact" type="button" hidden disabled>自动修复</button>
+            </div>
+            <div id="correctionReport" class="analysis-detail correction-report-detail">请选择问题或运行智能纠错查看详情。</div>
+          </div>
         </section>
       </section>
 
