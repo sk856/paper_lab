@@ -99,20 +99,42 @@ function writeNodeText(node, value) {
 }
 
 function isPaperEditorNode(node) {
-  return Boolean(node && node.id === 'paperContext' && node.isContentEditable);
+  return Boolean(node && node.id === 'paperContext');
 }
 
 function normalizeEditorPlainText(value) {
   return String(value || '').replace(/\r\n/g, '\n').replace(/\r/g, '\n').replace(/\u00a0/g, ' ');
 }
 
+let mathJaxLoader = null;
+let paperMathRenderSeq = 0;
+const PAPER_MATH_RENDERED_STATES = new Set(['true', 'pending', 'fallback']);
+const PAPER_DISPLAY_MATH_BEGIN_RE = /\\begin\{(equation\*?|align\*?|alignat\*?|gather\*?|multline\*?|flalign\*?)\}/;
+const PAPER_DISPLAY_MATH_ENV_RE = /\\begin\{(?:equation\*?|align\*?|alignat\*?|gather\*?|multline\*?|flalign\*?)\}[\s\S]*?\\end\{(?:equation\*?|align\*?|alignat\*?|gather\*?|multline\*?|flalign\*?)\}/;
+
+function escapeRegExpLiteral(value) {
+  return String(value || '').replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+function paperEditorUsesStoredMathSource(editor) {
+  return PAPER_MATH_RENDERED_STATES.has(editor?.dataset?.mathRendered || '');
+}
+
+function paperEditorBlockSource(block, options = {}) {
+  const source = block?.dataset?.sourceText;
+  if (options.preferStored && source !== undefined) return normalizeEditorPlainText(source).trim();
+  return normalizeEditorPlainText(block?.innerText || block?.textContent || '').trim();
+}
+
 function readPaperEditorText(editor) {
+  if (!editor) return '';
   const blockSelector = 'p, div, h1, h2, h3, h4, h5, h6, blockquote, li';
   const blocks = Array.from(editor.children || []).filter((child) => child.matches(blockSelector));
   if (!blocks.length) return normalizeEditorPlainText(editor.innerText || editor.textContent || '');
 
+  const preferStored = paperEditorUsesStoredMathSource(editor);
   return blocks
-    .map((block) => normalizeEditorPlainText(block.innerText || block.textContent || '').trim())
+    .map((block) => paperEditorBlockSource(block, { preferStored }))
     .filter(Boolean)
     .join('\n\n');
 }
@@ -132,24 +154,226 @@ function updatePaperEditorFormatMode(title = state.paperEditorSection) {
   editor.classList.toggle('article-editor-text', !isReference);
 }
 
-function writePaperEditorText(editor, value) {
+function containsLatexMath(text) {
+  const value = String(text || '');
+  return /\$\$[\s\S]+?\$\$|\\\[[\s\S]+?\\\]|\\\([\s\S]+?\\\)/.test(value)
+    || PAPER_DISPLAY_MATH_ENV_RE.test(value)
+    || /(^|[^\\])\$[^$\n]*?[^\\\s$]\$/.test(value);
+}
+
+function containsDisplayLatexMath(text) {
+  const value = String(text || '');
+  return /\$\$[\s\S]+?\$\$|\\\[[\s\S]+?\\\]/.test(value) || PAPER_DISPLAY_MATH_ENV_RE.test(value);
+}
+
+function isDisplayLatexMathOnly(text) {
+  const value = String(text || '').trim();
+  if (!value) return false;
+  const displayPatterns = [
+    /\$\$[\s\S]+?\$\$/,
+    /\\\[[\s\S]+?\\\]/,
+    PAPER_DISPLAY_MATH_ENV_RE,
+  ];
+  const withoutMath = displayPatterns
+    .reduce((current, pattern) => current.replace(pattern, ''), value)
+    .replace(/^[（(]\d+[）)]$/g, '')
+    .trim();
+  return !withoutMath;
+}
+
+function countUnescapedToken(text, token) {
+  const value = String(text || '');
+  let count = 0;
+  let index = 0;
+  while ((index = value.indexOf(token, index)) !== -1) {
+    let slashCount = 0;
+    for (let pos = index - 1; pos >= 0 && value[pos] === '\\'; pos -= 1) slashCount += 1;
+    if (slashCount % 2 === 0) count += 1;
+    index += token.length;
+  }
+  return count;
+}
+
+function findOpenDisplayMathFence(line) {
+  const value = String(line || '');
+  const bracketOpen = value.indexOf('\\[');
+  if (bracketOpen >= 0 && value.indexOf('\\]', bracketOpen + 2) < 0) return { type: 'bracket' };
+  if (countUnescapedToken(value, '$$') % 2 === 1) return { type: 'dollar' };
+  const envMatch = value.match(PAPER_DISPLAY_MATH_BEGIN_RE);
+  if (envMatch) {
+    const envName = envMatch[1];
+    const endRe = new RegExp(`\\\\end\\{${escapeRegExpLiteral(envName)}\\}`);
+    if (!endRe.test(value.slice(envMatch.index + envMatch[0].length))) return { type: 'env', name: envName };
+  }
+  return null;
+}
+
+function lineClosesDisplayMathFence(line, fence) {
+  const value = String(line || '');
+  if (!fence) return false;
+  if (fence.type === 'bracket') return value.includes('\\]');
+  if (fence.type === 'dollar') return countUnescapedToken(value, '$$') > 0;
+  if (fence.type === 'env') {
+    return new RegExp(`\\\\end\\{${escapeRegExpLiteral(fence.name)}\\}`).test(value);
+  }
+  return false;
+}
+
+function splitPaperArticleBlocks(text) {
+  const blocks = [];
+  const lines = String(text || '').split('\n');
+  let buffer = [];
+  let displayFence = null;
+
+  const flush = () => {
+    const part = buffer.join('\n').trim();
+    if (part) blocks.push(part);
+    buffer = [];
+  };
+
+  lines.forEach((line) => {
+    if (!line.trim() && !displayFence) {
+      flush();
+      return;
+    }
+    buffer.push(line);
+    if (displayFence) {
+      if (lineClosesDisplayMathFence(line, displayFence)) {
+        displayFence = null;
+        flush();
+      }
+      return;
+    }
+    displayFence = findOpenDisplayMathFence(line);
+    if (!displayFence) flush();
+  });
+  flush();
+  return blocks;
+}
+
+function setPaperEditorBlockMathFlags(block, source) {
+  const hasMath = containsLatexMath(source);
+  const hasDisplayMath = hasMath && containsDisplayLatexMath(source);
+  block.toggleAttribute('data-has-math', hasMath);
+  block.toggleAttribute('data-has-display-math', hasDisplayMath);
+  block.toggleAttribute('data-display-math-only', hasDisplayMath && isDisplayLatexMathOnly(source));
+  return hasMath;
+}
+
+function invalidatePaperEditorMathRender(editor = $('#paperContext')) {
+  paperMathRenderSeq += 1;
+  if (!editor) return String(paperMathRenderSeq);
+  editor.dataset.mathRenderId = String(paperMathRenderSeq);
+  editor.dataset.mathRendered = 'false';
+  return editor.dataset.mathRenderId;
+}
+
+function syncPaperEditorSourcesFromDom(editor = $('#paperContext')) {
+  if (!editor) return;
+  const isReference = paperSpecialKind(state.paperEditorSection) === 'reference';
+  const blockSelector = 'p, div, h1, h2, h3, h4, h5, h6, blockquote, li';
+  Array.from(editor.children || []).filter((child) => child.matches(blockSelector)).forEach((block) => {
+    if (isReference) block.classList.add('chapter-editor-reference-line');
+    else block.classList.add('chapter-editor-paragraph');
+    const source = normalizeEditorPlainText(block.innerText || block.textContent || '').trim();
+    if (source) block.dataset.sourceText = source;
+    else delete block.dataset.sourceText;
+    if (!isReference) setPaperEditorBlockMathFlags(block, source);
+  });
+}
+
+function ensureMathJax() {
+  if (window.MathJax?.typesetPromise) return Promise.resolve(window.MathJax);
+  if (mathJaxLoader) return mathJaxLoader;
+
+  window.MathJax = window.MathJax || {
+    tex: {
+      inlineMath: [['\\(', '\\)'], ['$', '$']],
+      displayMath: [['\\[', '\\]'], ['$$', '$$']],
+      processEscapes: true,
+      tags: 'ams',
+    },
+    options: {
+      skipHtmlTags: ['script', 'noscript', 'style', 'textarea', 'pre', 'code'],
+    },
+  };
+
+  mathJaxLoader = new Promise((resolve, reject) => {
+    const script = document.createElement('script');
+    script.src = 'https://cdn.jsdelivr.net/npm/mathjax@3/es5/tex-chtml.js';
+    script.async = true;
+    script.onload = () => {
+      const ready = window.MathJax?.startup?.promise || Promise.resolve();
+      ready.then(() => resolve(window.MathJax)).catch(reject);
+    };
+    script.onerror = () => reject(new Error('MathJax 加载失败'));
+    document.head.appendChild(script);
+  });
+  return mathJaxLoader;
+}
+
+function renderPaperEditorMath(editor = $('#paperContext')) {
+  if (!editor || paperSpecialKind(state.paperEditorSection) === 'reference') return;
+  const mathBlocks = Array.from(editor.querySelectorAll('.chapter-editor-paragraph')).filter((block) => {
+    const source = paperEditorBlockSource(block, { preferStored: true });
+    return setPaperEditorBlockMathFlags(block, source);
+  });
+  if (!mathBlocks.length) {
+    invalidatePaperEditorMathRender(editor);
+    return;
+  }
+  const renderId = String(++paperMathRenderSeq);
+  editor.dataset.mathRenderId = renderId;
+  editor.dataset.mathRendered = 'pending';
+  ensureMathJax()
+    .then((mathJax) => {
+      if (editor.dataset.mathRenderId !== renderId) return;
+      if (!mathJax?.typesetPromise) return;
+      mathJax.typesetClear?.(mathBlocks);
+      return mathJax.typesetPromise(mathBlocks);
+    })
+    .then(() => {
+      if (editor.dataset.mathRenderId !== renderId) return;
+      editor.dataset.mathRendered = 'true';
+    })
+    .catch(() => {
+      if (editor.dataset.mathRenderId !== renderId) return;
+      editor.dataset.mathRendered = 'fallback';
+    });
+}
+
+function restorePaperEditorMathSource(editor = $('#paperContext')) {
+  if (!editor || !paperEditorUsesStoredMathSource(editor)) return;
+  const source = readPaperEditorText(editor);
+  invalidatePaperEditorMathRender(editor);
+  writePaperEditorText(editor, source, { renderMath: false });
+}
+
+function writePaperEditorText(editor, value, options = {}) {
   updatePaperEditorFormatMode();
   const normalized = normalizeEditorPlainText(value).replace(/^\n+|\n+$/g, '');
   editor.replaceChildren();
+  invalidatePaperEditorMathRender(editor);
   if (!normalized.trim()) return;
 
   const isReference = paperSpecialKind(state.paperEditorSection) === 'reference';
   const parts = isReference
     ? normalized.split('\n').map((line) => line.trim()).filter(Boolean)
-    : normalized.split(/\n+/).map((paragraph) => paragraph.trim()).filter(Boolean);
+    : splitPaperArticleBlocks(normalized);
   const blocks = parts.length ? parts : [normalized.trim()];
 
   blocks.forEach((part) => {
     const block = document.createElement(isReference ? 'div' : 'p');
     block.className = isReference ? 'chapter-editor-reference-line' : 'chapter-editor-paragraph';
+    block.dataset.sourceText = part;
+    if (!isReference) setPaperEditorBlockMathFlags(block, part);
     appendTextWithLineBreaks(block, part);
     editor.appendChild(block);
   });
+
+  if (!isReference && options.renderMath !== false) {
+    renderPaperEditorMath(editor);
+  }
 }
 
 function readStoredJson(key, fallback) {
@@ -2673,11 +2897,24 @@ loadStatus().catch((error) => {
 function initRichTextEditor() {
   const editor = $('#paperContext');
   if (!editor || !editor.hasAttribute('contenteditable')) return;
+  let mathRenderTimer = null;
+  const restoreMathForEditing = () => restorePaperEditorMathSource(editor);
+  const syncEditorAfterInput = () => {
+    invalidatePaperEditorMathRender(editor);
+    syncPaperEditorSourcesFromDom(editor);
+  };
+  const scheduleMathRender = () => {
+    window.clearTimeout(mathRenderTimer);
+    mathRenderTimer = window.setTimeout(() => {
+      if (document.activeElement !== editor) renderPaperEditorMath(editor);
+    }, 250);
+  };
 
   // Handle toolbar button clicks
   $$('.toolbar-btn').forEach((btn) => {
     btn.addEventListener('click', (e) => {
       e.preventDefault();
+      restoreMathForEditing();
       const format = btn.dataset.format;
       const action = btn.dataset.action;
 
@@ -2741,9 +2978,16 @@ function initRichTextEditor() {
   editor.addEventListener('mouseup', updateToolbarState);
   editor.addEventListener('keyup', updateToolbarState);
   editor.addEventListener('focus', updateToolbarState);
+  editor.addEventListener('beforeinput', restoreMathForEditing);
+  editor.addEventListener('paste', restoreMathForEditing);
+  editor.addEventListener('blur', () => renderPaperEditorMath(editor));
 
   // Handle keyboard shortcuts
   editor.addEventListener('keydown', (e) => {
+    const key = e.key || '';
+    if (key.length === 1 || ['Backspace', 'Delete', 'Enter'].includes(key)) {
+      restoreMathForEditing();
+    }
     if (e.ctrlKey || e.metaKey) {
       switch(e.key.toLowerCase()) {
         case 'b':
@@ -2783,7 +3027,11 @@ function initRichTextEditor() {
   });
 
   // Save draft on content change
-  editor.addEventListener('input', saveDraft);
+  editor.addEventListener('input', () => {
+    syncEditorAfterInput();
+    scheduleMathRender();
+    saveDraft();
+  });
 }
 
 initRichTextEditor();

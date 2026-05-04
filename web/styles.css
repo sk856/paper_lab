@@ -342,6 +342,27 @@ svg { width: 22px; height: 22px; fill: none; stroke: currentColor; stroke-width:
   text-indent: 2em;
   line-height: 1.85;
 }
+.chapter-editor-text.article-editor-text .chapter-editor-paragraph[data-has-display-math],
+.chapter-editor-text.article-editor-text p[data-has-display-math] {
+  text-indent: 0;
+}
+.chapter-editor-text.article-editor-text .chapter-editor-paragraph[data-display-math-only],
+.chapter-editor-text.article-editor-text p[data-display-math-only] {
+  text-align: center;
+  margin: 0.75rem 0;
+}
+.chapter-editor-text.article-editor-text .chapter-editor-paragraph mjx-container,
+.chapter-editor-text.article-editor-text p mjx-container {
+  text-indent: 0;
+  overflow-x: auto;
+  overflow-y: hidden;
+  max-width: 100%;
+}
+.chapter-editor-text.article-editor-text .chapter-editor-paragraph mjx-container[display="true"],
+.chapter-editor-text.article-editor-text p mjx-container[display="true"] {
+  margin: 0.55rem auto;
+  text-align: center;
+}
 .chapter-editor-text.article-editor-text .chapter-editor-paragraph:last-child,
 .chapter-editor-text.article-editor-text p:last-child {
   margin-bottom: 0;
