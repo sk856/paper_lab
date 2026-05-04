@@ -1,0 +1,29 @@
+{
+  "version": 4,
+  "id": "2026-04-27-001",
+  "title": "纸研社",
+  "publish_date": "2026-04-12",
+  "sections": [
+    {
+      "heading": "公告",
+      "items": [
+        "针对用户遇到论文写作运行后未生成内容的问题：",
+        "解决办法如下：",
+        "请在“模型列表”页面修改模型的“参数需求”，将请求超时修改为：“9999”",
+
+        "如需修复问题，请到github重新下载最新版",
+        "如果你在使用过程中遇到问题请在Github或邮箱反馈"
+      ],
+      "links": [
+    {"label": "问题反馈", "url": "https://github.com/Abnerla/AI_paper/issues"}
+  ]
+    }
+  ],
+    "images": [
+    {
+      "path": "Introduction/qun.jpg",
+      "caption": "官方交流群"
+    }
+  ],
+  "footer_note": "欢迎加入我们，帮助我们一起变得更好~"
+}

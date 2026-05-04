@@ -1,0 +1,170 @@
+name: 纸研社跨平台构建
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      create_release:
+        description: '是否创建 Release'
+        required: false
+        default: 'false'
+        type: choice
+        options:
+          - 'true'
+          - 'false'
+      build_version:
+        description: '手动构建时使用的版本号'
+        required: false
+        default: ''
+        type: string
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            platform: windows
+            artifact_name: AI_Paper-Windows
+            artifact_ext: .exe
+          - os: macos-latest
+            platform: macos
+            artifact_name: AI_Paper-macOS
+            artifact_ext: .dmg
+          - os: ubuntu-latest
+            platform: linux
+            artifact_name: AI_Paper-Linux
+            artifact_ext: .AppImage
+
+    runs-on: ${{ matrix.os }}
+    name: 构建 ${{ matrix.platform }}
+    env:
+      PYTHONIOENCODING: utf-8
+      APPIMAGE_EXTRACT_AND_RUN: 1
+      BUILD_VERSION: ${{ github.event.inputs.build_version }}
+
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+
+      - name: 安装 Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: '3.13'
+          cache: 'pip'
+
+      - name: 安装依赖
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: 安装 Windows 打包工具
+        if: matrix.platform == 'windows'
+        run: choco install innosetup --no-progress -y
+
+      - name: 下载 Windows 中文语言文件
+        if: matrix.platform == 'windows'
+        shell: powershell
+        run: |
+          Invoke-WebRequest `
+            -Uri "https://raw.githubusercontent.com/jrsoftware/issrc/main/Files/Languages/Unofficial/ChineseSimplified.isl" `
+            -OutFile "installers/ChineseSimplified.isl"
+
+      - name: 安装 Linux 打包依赖
+        if: matrix.platform == 'linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y python3-tk squashfs-tools rpm
+          wget -q https://github.com/AppImage/AppImageKit/releases/download/continuous/appimagetool-x86_64.AppImage -O appimagetool
+          chmod +x appimagetool
+          sudo mv appimagetool /usr/local/bin/appimagetool
+
+      - name: 构建应用和安装程序
+        run: python build.py --clean --installer
+
+      - name: 上传 Windows 可执行文件
+        if: matrix.platform == 'windows'
+        uses: actions/upload-artifact@v5
+        with:
+          name: AI_Paper-Windows-EXE
+          path: dist/AI_Paper-v*-windows.exe
+          if-no-files-found: error
+
+      - name: 上传 Windows 安装程序
+        if: matrix.platform == 'windows'
+        uses: actions/upload-artifact@v5
+        with:
+          name: AI_Paper-Windows-Installer
+          path: dist/AI_Paper-v*-windows-setup.exe
+          if-no-files-found: error
+
+      - name: 上传 macOS 安装程序
+        if: matrix.platform == 'macos'
+        uses: actions/upload-artifact@v5
+        with:
+          name: AI_Paper-macOS-DMG
+          path: dist/AI_Paper-v*-macos.dmg
+          if-no-files-found: error
+
+      - name: 上传 Linux AppImage
+        if: matrix.platform == 'linux'
+        uses: actions/upload-artifact@v5
+        with:
+          name: AI_Paper-Linux-AppImage
+          path: dist/AI_Paper-v*-linux.AppImage
+          if-no-files-found: error
+
+      - name: 上传 Linux DEB
+        if: matrix.platform == 'linux'
+        uses: actions/upload-artifact@v5
+        with:
+          name: AI_Paper-Linux-DEB
+          path: dist/AI_Paper-v*-linux-*.deb
+          if-no-files-found: error
+
+      - name: 上传 Linux RPM
+        if: matrix.platform == 'linux'
+        uses: actions/upload-artifact@v5
+        with:
+          name: AI_Paper-Linux-RPM
+          path: dist/AI_Paper-v*-linux-*.rpm
+          if-no-files-found: error
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/v') || github.event.inputs.create_release == 'true'
+    name: 发布 Release
+    env:
+      RELEASE_TAG: ${{ startsWith(github.ref, 'refs/tags/v') && github.ref_name || github.event.inputs.build_version }}
+
+    steps:
+      - name: 校验 Release 版本号
+        if: env.RELEASE_TAG == ''
+        run: |
+          echo "手动创建 Release 时必须填写 build_version"
+          exit 1
+
+      - name: 下载所有构建产物
+        uses: actions/download-artifact@v5
+        with:
+          path: release-assets
+          merge-multiple: true
+
+      - name: 创建 Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ env.RELEASE_TAG }}
+          target_commitish: ${{ github.sha }}
+          draft: true
+          generate_release_notes: true
+          files: |
+            release-assets/*

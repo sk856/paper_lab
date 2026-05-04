@@ -1,0 +1,14 @@
+[Desktop Entry]
+Version=1.0
+Type=Application
+Name=纸研社
+Name[en]=PaperLab
+Comment=AI 智能论文工作台
+Comment[en]=AI Smart Paper Workbench
+Exec=纸研社
+Icon=纸研社
+Categories=Office;Education;TextEditor;
+Terminal=false
+StartupNotify=true
+StartupWMClass=纸研社
+Keywords=paper;academic;writing;AI;

@@ -1,0 +1,274 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>纸研社 Web 工作台</title>
+  <link rel="stylesheet" href="/styles.css" />
+</head>
+<body>
+  <div class="app-shell">
+    <header class="app-header">
+      <a class="brand-mark" href="#/paper" data-page-link="paper">
+        <span class="brand-kicker">Local Paper Studio</span>
+        <span class="brand-name">纸研社</span>
+      </a>
+      <nav class="header-actions">
+        <button id="refreshStatus" class="secondary-button compact" type="button">刷新模型</button>
+        <button id="themeToggle" class="icon-btn" type="button" title="切换明暗主题">主题</button>
+      </nav>
+    </header>
+
+    <aside class="feature-rail" aria-label="Web 功能导航">
+      <button class="feature-item active" data-page="paper" type="button">
+        <span class="feature-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M7 3h7l4 4v14H7a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2Z"/><path d="M14 3v5h5"/><path d="M8 13h8"/><path d="M8 17h6"/></svg></span>
+        <span class="feature-copy"><strong>论文写作</strong><span>大纲、章节与编辑器</span></span>
+      </button>
+      <button class="feature-item" data-page="ai" type="button">
+        <span class="feature-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M12 3 5 6v5c0 4.6 3 8.7 7 10 4-1.3 7-5.4 7-10V6l-7-3Z"/><path d="M9.5 12.5 11.2 14 15 9.8"/></svg></span>
+        <span class="feature-copy"><strong>降 AI 检测</strong><span>去痕、核验与差异</span></span>
+      </button>
+      <button class="feature-item" data-page="plagiarism" type="button">
+        <span class="feature-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M9 7h11"/><path d="M9 17h11"/><circle cx="5" cy="7" r="2"/><circle cx="5" cy="17" r="2"/></svg></span>
+        <span class="feature-copy"><strong>降查重率</strong><span>重复源、降重与复核</span></span>
+      </button>
+      <button class="feature-item" data-page="polish" type="button">
+        <span class="feature-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="m4 14 4-4 3 3 5-6 4 5"/><path d="M4 20h16"/></svg></span>
+        <span class="feature-copy"><strong>学术润色</strong><span>任务设置与结果预览</span></span>
+      </button>
+      <button class="feature-item" data-page="correction" type="button">
+        <span class="feature-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M3 12h4l2-7 4 14 2-7h6"/></svg></span>
+        <span class="feature-copy"><strong>智能纠错</strong><span>统计、预览与问题列表</span></span>
+      </button>
+      <button class="feature-item" data-page="config" type="button">
+        <span class="feature-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M4 7h10"/><path d="M18 7h2"/><circle cx="16" cy="7" r="2"/><path d="M4 17h2"/><path d="M10 17h10"/><circle cx="8" cy="17" r="2"/></svg></span>
+        <span class="feature-copy"><strong>配置管理</strong><span>模式、接口与后端配置</span></span>
+      </button>
+      <button class="feature-item" data-page="history" type="button">
+        <span class="feature-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M3 12a9 9 0 1 0 3-6.7"/><path d="M3 4v5h5"/><path d="M12 7v6l4 2"/></svg></span>
+        <span class="feature-copy"><strong>历史记录</strong><span>版本、草稿与恢复</span></span>
+      </button>
+    </aside>
+
+    <main class="app-content">
+      <section class="page-view active" data-page-view="paper">
+        <div class="page-hero compact-hero">
+          <p class="eyebrow">Paper Writer</p>
+          <h1>论文写作</h1>
+          <p class="muted-copy">对应桌面端论文写作页：上方是论文设置和生成动作，下方左侧管理大纲，上方右侧编辑当前章节。</p>
+          <div class="status-strip" id="modelStatus">正在读取模型配置...</div>
+        </div>
+
+        <section class="panel paper-panel">
+          <div class="panel-header-row">
+            <div><p class="eyebrow">Settings</p><h3>论文设置</h3></div>
+            <span class="state-pill" data-state-for="paper">待处理</span>
+          </div>
+          <div class="paper-form-grid">
+            <label class="field-block wide"><span>论文题目</span><input id="paperTopic" class="input-box" placeholder="例如：人工智能辅助学术写作的伦理风险与治理路径研究" /></label>
+            <label class="field-block"><span>学科/方向</span><input id="paperSubject" class="input-box" placeholder="例如：教育技术 / 管理学" /></label>
+            <label class="field-block"><span>论文类型</span><select id="paperStyle" class="input-box"><option>学术论文</option><option>毕业论文</option><option>综述文章</option><option>研究报告</option><option>实验报告</option></select></label>
+            <label class="field-block"><span>引用格式</span><select id="referenceStyle" class="input-box"><option>GB/T 7714</option><option>APA</option><option>MLA</option><option>Chicago</option><option>IEEE</option></select></label>
+            <label class="field-block"><span>当前章节</span><input id="sectionTitle" class="input-box" placeholder="例如：第一章 绪论" /></label>
+            <label class="field-block"><span>目标字数</span><input id="wordCount" class="input-box" type="number" min="300" max="3000" value="1000" /></label>
+          </div>
+          <div class="paper-actions">
+            <button class="primary-button" data-paper-action="outline" type="button">生成大纲</button>
+            <button class="secondary-button" data-paper-action="section" type="button">撰写当前章节</button>
+            <button class="secondary-button" data-paper-action="batch-write" type="button">撰写全部章节</button>
+            <button class="secondary-button" data-paper-action="abstract" type="button">生成摘要</button>
+            <button class="secondary-button" data-paper-action="references" type="button">整理参考文献</button>
+          </div>
+        </section>
+
+        <section class="workbench-grid outline-grid">
+          <div class="panel">
+            <div class="panel-header-row">
+              <div><p class="eyebrow">Outline</p><h3>论文大纲</h3></div>
+              <button class="secondary-button compact" id="refreshOutlineSections" type="button">刷新章节</button>
+            </div>
+            <textarea id="paperOutline" class="text-box outline-text" placeholder="生成大纲后会写入这里；也可以粘贴自己的大纲，作为章节写作依据。"></textarea>
+            <div class="outline-section-box">
+              <div class="outline-section-title">章节选择</div>
+              <div class="outline-section-list" id="paperSectionList">生成或粘贴大纲后，这里会显示可点击章节。</div>
+            </div>
+          </div>
+          <div class="panel editor-panel">
+            <div class="panel-header-row"><div><p class="eyebrow">Editor</p><h3>当前章节编辑器</h3></div><button class="secondary-button compact" data-copy-from="paperContext" type="button">复制</button></div>
+            <textarea id="paperContext" class="text-box chapter-editor-text" placeholder="这里对应桌面端右侧正文编辑区，可放已有章节上下文、全文正文或参考文献。生成结果也会直接写回这里。"></textarea>
+            <textarea id="paperResult" hidden></textarea>
+          </div>
+        </section>
+      </section>
+
+      <section class="page-view" data-page-view="ai">
+        <div class="page-hero compact-hero">
+          <p class="eyebrow">AI Reduce</p>
+          <h1>AI 痕迹消除</h1>
+          <p class="muted-copy">对应桌面端降 AI 检测页：模式选择、原文/结果、结果核验与差异预览都在本功能台内完成。</p>
+        </div>
+        <section class="panel">
+          <div class="panel-header-row"><div><p class="eyebrow">Mode</p><h3>AI痕迹消除·改写模式</h3></div><span class="state-pill" data-state-for="ai">待处理</span></div>
+          <div class="mode-grid">
+            <button class="mode-card selected" data-mode-group="ai" data-action="ai-light" type="button"><strong>轻度去痕</strong><span>微调词汇与语序，保留原文 90% 核心内容。</span></button>
+            <button class="mode-card" data-mode-group="ai" data-action="ai-deep" type="button"><strong>深度重构</strong><span>调整句式结构与段落逻辑，模拟真人写作路径。</span></button>
+            <button class="mode-card" data-mode-group="ai" data-action="ai-academic" type="button"><strong>学术拟合</strong><span>对标学科论文写作习惯，优化严谨性。</span></button>
+          </div>
+          <div class="paper-actions"><button class="primary-button" data-run-panel="ai" type="button">开始执行</button><button class="secondary-button" data-review-panel="ai" type="button">结果复核</button><button class="secondary-button" data-diff-panel="ai" type="button">刷新差异</button></div>
+        </section>
+        <section class="workbench-grid">
+          <div class="panel editor-panel"><div class="panel-header-row"><div><p class="eyebrow">Input</p><h3>待处理原文</h3></div><button class="secondary-button compact" data-clear-panel="ai" type="button">清空</button></div><textarea id="aiInput" class="text-box" placeholder="请粘贴需要消除 AI 痕迹的论文段落/全文。"></textarea></div>
+          <div class="panel editor-panel"><div class="panel-header-row"><div><p class="eyebrow">Output</p><h3>去痕处理结果</h3></div><button class="secondary-button compact" data-copy-from="aiOutput" type="button">复制</button></div><textarea id="aiOutput" class="text-box" readonly placeholder="处理完成后，结果将显示在此处。"></textarea></div>
+        </section>
+        <section class="workbench-grid review-grid">
+          <div class="panel"><div class="panel-header-row"><div><p class="eyebrow">Review</p><h3>检测结果摘要</h3></div></div><pre id="aiReview" class="analysis-detail">完成去痕效果复核后，此处将展示 AI 生成概率、去痕效果评估与核心问题汇总。</pre></div>
+          <div class="panel"><div class="panel-header-row"><div><p class="eyebrow">Diff</p><h3>差异预览</h3></div></div><pre id="aiDiff" class="analysis-detail">点击“刷新差异”，即可查看原文与处理结果的逐句差异对比。</pre></div>
+        </section>
+      </section>
+
+      <section class="page-view" data-page-view="plagiarism">
+        <div class="page-hero compact-hero">
+          <p class="eyebrow">Similarity Reduce</p>
+          <h1>降查重率</h1>
+          <p class="muted-copy">对应桌面端降查重率页：模式选择、重复源文本、原文/结果、效果复核与差异预览集中在本页。</p>
+        </div>
+        <section class="panel">
+          <div class="panel-header-row"><div><p class="eyebrow">Mode</p><h3>重复率降低·降重模式</h3></div><span class="state-pill" data-state-for="plagiarism">待处理</span></div>
+          <div class="mode-grid">
+            <button class="mode-card selected" data-mode-group="plagiarism" data-action="repeat-light" type="button"><strong>轻度降重</strong><span>同义词替换、语序微调，改写幅度 20%-30%。</span></button>
+            <button class="mode-card" data-mode-group="plagiarism" data-action="repeat-medium" type="button"><strong>中度降重</strong><span>句式重组、表述重构，规避连续重复语句。</span></button>
+            <button class="mode-card" data-mode-group="plagiarism" data-action="repeat-deep" type="button"><strong>深度降重</strong><span>段落逻辑重构，适合大面积标红内容。</span></button>
+          </div>
+          <div class="paper-actions"><button class="primary-button" data-run-panel="plagiarism" type="button">开始降重</button><button class="secondary-button" data-review-panel="plagiarism" type="button">效果复核</button><button class="secondary-button" data-diff-panel="plagiarism" type="button">刷新差异</button></div>
+        </section>
+        <section class="workbench-grid">
+          <div class="panel editor-panel"><div class="panel-header-row"><div><p class="eyebrow">Input</p><h3>待降重原文</h3></div><button class="secondary-button compact" data-clear-panel="plagiarism" type="button">清空</button></div><textarea id="plagiarismInput" class="text-box" placeholder="请粘贴需要降重的论文段落/全文。"></textarea></div>
+          <div class="panel editor-panel"><div class="panel-header-row"><div><p class="eyebrow">Output</p><h3>降重处理结果</h3></div><button class="secondary-button compact" data-copy-from="plagiarismOutput" type="button">复制</button></div><textarea id="plagiarismOutput" class="text-box" readonly placeholder="降重完成后，结果将显示在此处。"></textarea></div>
+        </section>
+        <section class="workbench-grid review-grid">
+          <div class="panel"><div class="panel-header-row"><div><p class="eyebrow">Source</p><h3>查重报告 / 重复源文本</h3></div></div><textarea id="plagiarismSource" class="text-box medium" placeholder="请粘贴查重标红内容、重复源文献全文/片段，提升降重精准度。"></textarea></div>
+          <div class="panel"><div class="panel-header-row"><div><p class="eyebrow">Review</p><h3>检测结果摘要</h3></div></div><pre id="plagiarismReview" class="analysis-detail">完成降重效果复核后，此处将展示模拟重复率、标红片段数量、降重效果评估。</pre><pre id="plagiarismDiff" class="analysis-detail">差异预览会显示在这里。</pre></div>
+        </section>
+      </section>
+
+      <section class="page-view" data-page-view="polish">
+        <div class="page-hero compact-hero">
+          <p class="eyebrow">Academic Polish</p>
+          <h1>学术润色</h1>
+          <p class="muted-copy">对应桌面端学术润色页：任务设置、润色方式、补充说明、原文输入和结果预览。</p>
+        </div>
+        <section class="panel">
+          <div class="panel-header-row"><div><p class="eyebrow">Task</p><h3>任务设置</h3></div><span class="state-pill" data-state-for="polish">待处理</span></div>
+          <div class="paper-form-grid">
+            <label class="field-block"><span>任务类型</span><select id="polishTaskType" class="input-box"><option>章节正文</option><option>论文大纲</option><option>摘要</option><option>引言</option><option>结论</option><option>自定义段落</option></select></label>
+            <label class="field-block"><span>执行模式</span><select id="polishExecutionMode" class="input-box"><option>标准模式</option><option>学术强化</option><option>结构重组</option><option>精炼压缩</option></select></label>
+            <label class="field-block wide"><span>主题 / 章节</span><input id="polishTopic" class="input-box" placeholder="例如：第二章 文献综述" /></label>
+          </div>
+          <div class="mode-grid">
+            <button class="mode-card" data-mode-group="polish" data-polish-mode="vocab" type="button"><strong>词汇优化</strong><span>提升学术表达和术语精度。</span></button>
+            <button class="mode-card" data-mode-group="polish" data-polish-mode="logic" type="button"><strong>逻辑优化</strong><span>加强过渡、衔接和论证顺序。</span></button>
+            <button class="mode-card selected" data-mode-group="polish" data-polish-mode="full" type="button"><strong>全面润色</strong><span>综合提升整体学术质量。</span></button>
+          </div>
+          <textarea id="polishNotes" class="text-box small" placeholder="补充说明 / 指令 / 备注内容"></textarea>
+          <div class="paper-actions"><button class="primary-button" data-run-panel="polish" type="button">执行 AI 任务</button><button class="secondary-button" data-run-panel="translate" type="button">翻译润色</button></div>
+        </section>
+        <section class="workbench-grid">
+          <div class="panel editor-panel"><div class="panel-header-row"><div><p class="eyebrow">Input</p><h3>原文输入</h3></div><button class="secondary-button compact" data-clear-panel="polish" type="button">清空</button></div><textarea id="polishInput" class="text-box" placeholder="请输入需要润色的段落、章节或摘要。"></textarea></div>
+          <div class="panel editor-panel"><div class="panel-header-row"><div><p class="eyebrow">Preview</p><h3>结果预览</h3></div><button class="secondary-button compact" data-copy-from="polishOutput" type="button">复制</button></div><textarea id="polishOutput" class="text-box" readonly placeholder="润色结果会显示在这里。"></textarea><pre id="polishReview" class="analysis-detail">执行任务后会在这里显示结果摘要。</pre></div>
+        </section>
+      </section>
+
+      <section class="page-view" data-page-view="correction">
+        <div class="page-hero compact-hero">
+          <p class="eyebrow">Correction</p>
+          <h1>智能纠错</h1>
+          <p class="muted-copy">对应桌面端智能纠错页：纠错设置、错误分类统计、修正预览、问题列表和问题详情。</p>
+        </div>
+        <section class="panel">
+          <div class="panel-header-row"><div><p class="eyebrow">Settings</p><h3>纠错设置</h3></div><span class="state-pill" data-state-for="correction">待处理</span></div>
+          <div class="paper-form-grid">
+            <label class="field-block"><span>引用规范</span><select id="correctionCitationStyle" class="input-box"><option value="auto">auto</option><option>GB/T 7714</option><option>APA</option><option>MLA</option></select></label>
+          </div>
+          <div class="paper-actions"><button class="primary-button" data-run-panel="correction" type="button">开始智能纠错</button><button class="secondary-button" data-run-panel="correction-ai" type="button">AI 风格扫描</button><button class="secondary-button" data-run-panel="correction-citation" type="button">引用规范检查</button></div>
+        </section>
+        <section class="panel">
+          <div class="panel-header-row"><div><p class="eyebrow">Stats</p><h3>错误分类统计</h3></div></div>
+          <div class="stat-grid" id="correctionStats"></div>
+        </section>
+        <section class="workbench-grid">
+          <div class="panel editor-panel"><div class="panel-header-row"><div><p class="eyebrow">Input</p><h3>原文 / 导入文稿</h3></div><button class="secondary-button compact" data-clear-panel="correction" type="button">清空</button></div><textarea id="correctionInput" class="text-box" placeholder="请输入或粘贴待纠错论文内容。"></textarea></div>
+          <div class="panel editor-panel"><div class="panel-header-row"><div><p class="eyebrow">Preview</p><h3>修正预览</h3></div><button class="secondary-button compact" data-copy-from="correctionOutput" type="button">复制</button></div><textarea id="correctionOutput" class="text-box" readonly placeholder="修正预览会显示在这里。"></textarea></div>
+        </section>
+        <section class="workbench-grid review-grid">
+          <div class="panel"><div class="panel-header-row"><div><p class="eyebrow">Issues</p><h3>问题列表</h3></div></div><div class="issue-list" id="correctionIssues">运行智能纠错后，这里会列出问题。</div></div>
+          <div class="panel"><div class="panel-header-row"><div><p class="eyebrow">Report</p><h3>问题详情 / 报告</h3></div></div><pre id="correctionReport" class="analysis-detail">请选择问题或运行智能纠错查看详情。</pre></div>
+        </section>
+      </section>
+
+      <section class="page-view" data-page-view="config">
+        <div class="page-hero compact-hero">
+          <p class="eyebrow">Config</p>
+          <h1>配置管理</h1>
+          <p class="muted-copy">对应桌面端模型配置页：可以新增接口、选择服务商、填写 API Key、选择模型，并切换当前启用接口。</p>
+        </div>
+        <section class="workbench-grid config-grid">
+          <div class="panel">
+            <div class="panel-header-row"><div><p class="eyebrow">Form</p><h3>添加 / 编辑接口</h3></div><span class="state-pill" data-state-for="config">待保存</span></div>
+            <div class="paper-form-grid config-form-grid">
+              <label class="field-block"><span>服务商预设</span><select id="configProviderType" class="input-box"></select></label>
+              <label class="field-block"><span>接口名称</span><input id="configName" class="input-box" placeholder="例如：OpenAI / 公益站 / 本地代理" /></label>
+              <label class="field-block"><span>模型 ID</span><input id="configModel" class="input-box" list="configModelList" placeholder="例如：gpt-4o / deepseek-chat" /></label>
+              <label class="field-block wide"><span>请求地址 Base URL</span><input id="configBaseUrl" class="input-box" placeholder="例如：https://api.openai.com/v1" /></label>
+              <label class="field-block wide"><span>API Key</span><input id="configKey" class="input-box" type="password" placeholder="编辑已有接口时留空表示不修改密钥" /></label>
+              <label class="field-block"><span>显示名称</span><input id="configModelDisplayName" class="input-box" placeholder="可选，仅用于界面展示" /></label>
+              <label class="field-block"><span>请求超时（秒）</span><input id="configTimeout" class="input-box" type="number" min="30" max="300" step="10" placeholder="建议 120 或 180" /></label>
+            </div>
+            <datalist id="configModelList"></datalist>
+            <div class="paper-actions">
+              <button class="primary-button" id="saveConfigApi" type="button">保存并启用</button>
+              <button class="secondary-button" id="newConfigApi" type="button">新建空白</button>
+              <button class="secondary-button" id="fetchConfigModels" type="button">获取模型列表</button>
+            </div>
+            <pre id="configMessage" class="analysis-detail compact-detail">选择已有接口可编辑；新建接口保存后会自动设为当前启用。</pre>
+          </div>
+          <div class="panel">
+          <div class="panel-header-row"><div><p class="eyebrow">Providers</p><h3>已保存接口</h3></div><button class="secondary-button compact" type="button" id="refreshConfig">刷新</button></div>
+          <div class="provider-list" id="providerList">正在读取配置...</div>
+          </div>
+        </section>
+      </section>
+
+      <section class="page-view" data-page-view="history">
+        <div class="page-hero compact-hero">
+          <p class="eyebrow">History</p>
+          <h1>历史记录</h1>
+          <p class="muted-copy">Web 端会自动保存当前草稿；每次生成、降重、润色或纠错成功后，也会写入一条可恢复的历史版本。</p>
+        </div>
+        <section class="workbench-grid history-grid">
+          <div class="panel">
+            <div class="panel-header-row">
+              <div><p class="eyebrow">Records</p><h3>记录列表</h3></div>
+              <span class="state-pill" id="historyCount">0 条</span>
+            </div>
+            <div class="paper-actions">
+              <button class="secondary-button compact" id="refreshHistory" type="button">刷新历史</button>
+              <button class="secondary-button compact" id="clearHistory" type="button">清空历史</button>
+            </div>
+            <div class="history-list" id="historyList">暂无历史记录。</div>
+          </div>
+          <div class="panel">
+            <div class="panel-header-row">
+              <div><p class="eyebrow">Preview</p><h3>版本预览</h3></div>
+              <button class="primary-button compact" id="restoreHistory" type="button">恢复到工作台</button>
+            </div>
+            <pre id="historyMeta" class="analysis-detail compact-detail">请选择左侧历史记录。</pre>
+            <textarea id="historyPreview" class="text-box history-preview" readonly placeholder="选择历史版本后，这里会显示输出内容。"></textarea>
+          </div>
+        </section>
+      </section>
+    </main>
+  </div>
+
+  <script src="/app.js?v=20260504-reference-resync"></script>
+</body>
+</html>

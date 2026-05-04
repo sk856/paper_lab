@@ -1,0 +1,29 @@
+{
+  "version": 10,
+  "latest_version": "v1.3.2",
+  "min_supported_version": "v1.3.0",
+  "release_date": "2026-04-28",
+  "download_url": "https://github.com/Abnerla/AI_paper/releases",
+  "changelog": [
+    {
+      "version": "v1.3.2",
+      "date": "2026-04-28",
+      "changes": [
+      "新增 一次性推送流",
+      "新增 模型路由（分功能自定义模型）",
+
+      "优化 “写所有章节”逻辑改为按章节顺序逐节执行",
+      "优化 收紧请求耗时限制",
+      "优化 提示词功能，同时支持Markdown语法",
+      "优化 AIGC和查重以“结果导向”",
+
+      "修复 正文覆盖问题",
+      "修复 生成新的正文参考文献不更新",
+      "修复 首页请求日志刷新的问题",
+
+      "其他一些性能优化~"
+      ]
+    }
+  ],
+  "update_message": ""
+}

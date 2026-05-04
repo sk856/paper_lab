@@ -1,0 +1,28 @@
+{
+  "version": 2,
+  "id": "2026-04-27-001",
+  "title": "版本推送",
+  "publish_date": "2026-04-27",
+  "description": "论文写作运行后未生成内容的问题",
+  "sections": [
+    {
+      "heading": "解决办法：",
+      "items": [
+        "在模型列表页面修改模型的参数需求，将请求超时修改为：9999"
+      ],
+      "links": [
+        {
+          "label": "项目主页",
+          "url": "https://github.com/Abnerla/AI_paper"
+        }
+      ]
+    }
+  ],
+    "images": [
+    {
+      "path": "Introduction/qun.jpg",
+      "caption": "官方交流群"
+    }
+  ],
+  "footer_note": "感谢使用！"
+}

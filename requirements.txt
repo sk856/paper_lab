@@ -1,0 +1,6 @@
+python-docx>=0.8.11
+Pillow>=10.0.0
+PyMuPDF>=1.24.0
+pyinstaller>=5.0
+pywin32>=306; platform_system == "Windows"
+pystray>=0.19.5
