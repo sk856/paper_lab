@@ -67,6 +67,7 @@
 
 - **历史记录**：最多保存 200 条操作记录，支持筛选、对比差异和一键回滚
 - **Word 导入/导出**：直接导入 .docx 文件编辑，完成后导出
+- **旧版 DOC 模板**：读取 .doc 模板需安装 LibreOffice，项目提供 `installers/install_libreoffice_windows.ps1` 辅助安装
 - **LaTeX 转换**：文本与 LaTeX 格式互转
 - **自动保存**：编辑状态实时保存，下次启动自动恢复
 - **用量统计**：按模型追踪 Token 消耗与费用

@@ -176,7 +176,7 @@ svg { width: 22px; height: 22px; fill: none; stroke: currentColor; stroke-width:
 
 .app-content {
   grid-column: 2;
-  width: min(1220px, calc(100vw - 340px));
+  width: min(1500px, calc(100vw - 340px));
   margin: 0 auto;
   padding: 104px 2rem 4rem;
 }
@@ -314,7 +314,7 @@ svg { width: 22px; height: 22px; fill: none; stroke: currentColor; stroke-width:
   gap: 1rem;
   align-items: stretch;
 }
-.outline-grid { grid-template-columns: minmax(320px, 0.8fr) minmax(0, 1.2fr); }
+.outline-grid { grid-template-columns: minmax(280px, 0.46fr) minmax(760px, 1fr); }
 .review-grid { align-items: start; }
 .editor-panel { min-height: 560px; display: flex; flex-direction: column; }
 .text-box {
@@ -536,12 +536,25 @@ svg { width: 22px; height: 22px; fill: none; stroke: currentColor; stroke-width:
 .source-extra { margin-top: 0.8rem; color: var(--muted); }
 .source-extra summary { cursor: pointer; }
 
-.paper-panel { margin-bottom: 1rem; }
+.paper-top-grid {
+  display: grid;
+  grid-template-columns: minmax(280px, 0.46fr) minmax(760px, 1fr);
+  gap: 1rem;
+  align-items: stretch;
+}
+.paper-panel,
+.paper-template-panel {
+  min-height: 100%;
+}
 .paper-form-grid {
   display: grid;
-  grid-template-columns: 1.25fr repeat(2, minmax(180px, 0.6fr));
-  gap: 0.85rem;
-  margin-bottom: 1rem;
+  grid-template-columns: minmax(300px, 1.35fr) minmax(170px, 0.8fr) minmax(140px, 0.7fr) minmax(140px, 0.7fr);
+  gap: 0.9rem 0.85rem;
+  align-items: end;
+  margin-bottom: 1.05rem;
+}
+.paper-form-grid > .wide {
+  grid-column: span 2;
 }
 .field-block {
   display: flex;
@@ -549,6 +562,34 @@ svg { width: 22px; height: 22px; fill: none; stroke: currentColor; stroke-width:
   gap: 0.45rem;
   color: var(--muted);
   font-size: 0.9rem;
+}
+.inline-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+  color: var(--muted);
+  font-size: 0.82rem;
+  line-height: 1;
+  white-space: nowrap;
+}
+.inline-toggle input {
+  width: 16px;
+  height: 16px;
+  accent-color: var(--accent);
+}
+.word-limit-group {
+  display: grid;
+  gap: 0.45rem;
+  min-width: 0;
+}
+.word-limit-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+  color: var(--muted);
+  font-size: 0.9rem;
+  min-height: 1.25rem;
 }
 .input-box {
   width: 100%;
@@ -559,6 +600,11 @@ svg { width: 22px; height: 22px; fill: none; stroke: currentColor; stroke-width:
   background: var(--surface-soft);
   color: var(--text);
   padding: 0.72rem 0.85rem;
+}
+.input-box:disabled {
+  cursor: not-allowed;
+  opacity: 0.62;
+  background: color-mix(in srgb, var(--surface-soft) 70%, var(--surface));
 }
 .paper-actions {
   display: flex;
@@ -597,6 +643,38 @@ svg { width: 22px; height: 22px; fill: none; stroke: currentColor; stroke-width:
 .paper-push-controls .input-box,
 .paper-push-controls .secondary-button {
   min-height: 38px;
+}
+.template-upload-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.65rem;
+  margin-bottom: 0.75rem;
+}
+.template-upload-button {
+  min-height: 38px;
+  padding: 0.52rem 0.9rem;
+}
+.template-summary {
+  color: var(--muted);
+  font-size: 0.88rem;
+  line-height: 1.55;
+  margin-bottom: 0.75rem;
+}
+.template-preview {
+  min-height: 140px;
+  max-height: 220px;
+  overflow: auto;
+  margin: 0;
+  border: 1px solid var(--line);
+  border-radius: 14px;
+  background: var(--surface-soft);
+  color: var(--muted);
+  padding: 0.85rem;
+  font-family: var(--mono);
+  font-size: 0.84rem;
+  line-height: 1.65;
+  white-space: pre-wrap;
 }
 
 .metric-grid, .stat-grid {
@@ -914,7 +992,8 @@ svg { width: 22px; height: 22px; fill: none; stroke: currentColor; stroke-width:
   .feature-rail { top: 97px; }
   .app-content { width: min(100vw - 1rem, 1180px); padding: 190px 0.5rem 3rem; }
   .page-hero, .page-hero.compact-hero { min-height: 150px; }
-  .editor-grid, .workbench-grid, .paper-form-grid, .paper-push-panel, .paper-push-controls, .metric-grid, .stat-grid, .mode-grid, .action-grid { grid-template-columns: 1fr; }
+  .editor-grid, .workbench-grid, .paper-top-grid, .paper-form-grid, .paper-push-panel, .paper-push-controls, .metric-grid, .stat-grid, .mode-grid, .action-grid { grid-template-columns: 1fr; }
+  .paper-form-grid > .wide { grid-column: auto; }
   .provider-card, .config-grid, .config-form-grid { grid-template-columns: 1fr; }
   .provider-actions { justify-content: flex-start; }
 }

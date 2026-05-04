@@ -466,6 +466,74 @@ def build_reference_number_map(entries):
     return number_map
 
 
+def build_reference_occurrence_runs(entries):
+    """
+    将参考文献条目按编号递增区间拆成批次。
+
+    当后续补写前面的章节时，旧逻辑可能会追加一段从较小编号重新开始的参考文献。
+    例如 [1][2][3][4][3][4] 会被拆成两段，第二段应插回旧编号 3 附近再重排。
+    """
+    runs = []
+    current = []
+    previous_number = None
+    next_auto_number = 1
+    for position, entry in enumerate(entries or []):
+        entry_text = normalize_reference_entry_text(entry.get('text', ''))
+        entry_key = reference_entry_key(entry_text)
+        if not entry_key:
+            continue
+        number = entry.get('number')
+        if not isinstance(number, int) or number <= 0:
+            while any(next_auto_number == item.get('number') for run in runs for item in run) or any(
+                next_auto_number == item.get('number') for item in current
+            ):
+                next_auto_number += 1
+            number = next_auto_number
+
+        if current and previous_number is not None and number <= previous_number:
+            runs.append(current)
+            current = []
+
+        current.append({
+            'number': number,
+            'text': entry_text,
+            'key': entry_key,
+            'position': position,
+            'run_index': len(runs),
+        })
+        previous_number = number
+        next_auto_number = max(next_auto_number, number + 1)
+
+    if current:
+        runs.append(current)
+    return runs
+
+
+def order_reference_occurrences_for_repair(entries):
+    """
+    生成用于修复重复旧编号的参考文献出现顺序。
+
+    第一批按原顺序保留；后续编号回退的批次按其首个旧编号插入到已有列表中，
+    这样补写中间章节追加出来的参考文献会回到正文顺序附近。
+    """
+    ordered = []
+    for run in build_reference_occurrence_runs(entries):
+        if not ordered:
+            ordered.extend(run)
+            continue
+        start_number = run[0].get('number', 0)
+        current_run_index = run[0].get('run_index', 0)
+        insert_at = len(ordered)
+        for index, occurrence in enumerate(ordered):
+            if occurrence.get('run_index', 0) >= current_run_index:
+                continue
+            if occurrence.get('number', 0) >= start_number:
+                insert_at = index
+                break
+        ordered[insert_at:insert_at] = run
+    return ordered
+
+
 def is_markdown_rule_line(line):
     """检查是否是 Markdown 分隔线"""
     stripped = str(line or '').strip()
@@ -854,6 +922,24 @@ def renumber_references(content, old_to_new_map):
     return updated
 
 
+def rewrite_citations_with_number_map(text, old_to_new_map):
+    """
+    使用旧编号到新编号的映射重写正文引用。
+    """
+    if not text or not old_to_new_map:
+        return text
+
+    def replace(match):
+        source_numbers = parse_citation_numbers(match.group(1))
+        if not source_numbers:
+            return match.group(0)
+        target_numbers = [old_to_new_map.get(number, number) for number in source_numbers]
+        formatted = format_citation_numbers(target_numbers)
+        return f'[{formatted}]' if formatted else match.group(0)
+
+    return re.sub(r'\[([^\[\]]+)\]', replace, text)
+
+
 def determine_reference_mode(section_title, all_sections):
     """
     判断参考文献处理模式
@@ -919,8 +1005,9 @@ def process_references_append_mode(section_title, new_content, all_sections, ref
     if current_position is None:
         current_position = len(all_sections)
 
-    # 查找之前章节的最大参考文献编号
-    max_number = find_max_reference_number(all_sections, current_position)
+    # 从整篇文章取最大编号。批量写作中断后补写前文小节时，如果只看当前位置之前，
+    # 很容易把新参考文献编号写到已有编号上，后续整理就无法唯一映射正文引用。
+    max_number = find_max_reference_number(all_sections, len(all_sections))
 
     # 提取新章节的参考文献
     clean_content, references_text = extract_references_from_section_result(new_content)
@@ -1092,4 +1179,141 @@ def process_references_reorder_mode(section_title, new_content, all_sections, re
         'cleaned_content': updated_content,
         'full_references': full_entries,
         'updated_sections': updated_sections
+    }
+
+
+def reorder_references_for_full_paper(all_sections, reference_style='GB/T 7714'):
+    """
+    整篇文章参考文献整理：按正文首次引用顺序重排编号，并重写参考文献章节。
+
+    返回:
+        {
+            'reference_title': 参考文献章节标题,
+            'reference_content': 新参考文献章节正文,
+            'updated_sections': [{'title': ..., 'content': ...}],
+            'entry_count': 条目数,
+            'citation_count': 正文引用数量,
+        }
+    """
+    sections = list(all_sections or [])
+    reference_title = '# 参考文献'
+    reference_content = ''
+    body_sections = []
+
+    for section in sections:
+        title = str(section.get('title', '') or '').strip()
+        content = str(section.get('content', '') or '')
+        if is_reference_section(title):
+            reference_title = title or reference_title
+            reference_content = content
+        else:
+            body_sections.append({'title': title, 'content': content})
+
+    existing_entries = parse_reference_entries(reference_content)
+    ordered_occurrences = order_reference_occurrences_for_repair(existing_entries)
+    occurrence_keys = []
+    key_to_text = {}
+    number_to_keys = {}
+    for occurrence in ordered_occurrences:
+        number = occurrence.get('number')
+        key = occurrence.get('key')
+        text = occurrence.get('text', '')
+        if not key:
+            continue
+        if key not in key_to_text:
+            occurrence_keys.append(key)
+            key_to_text[key] = text
+        if number:
+            number_to_keys.setdefault(number, [])
+            if key not in number_to_keys[number]:
+                number_to_keys[number].append(key)
+
+    duplicate_numbers = {
+        number
+        for number, keys in number_to_keys.items()
+        if len(keys) > 1
+    }
+    duplicate_cursors = {number: 0 for number in duplicate_numbers}
+    unique_number_to_key = {
+        number: keys[0]
+        for number, keys in number_to_keys.items()
+        if len(keys) == 1
+    }
+
+    ordered_keys = []
+    seen_keys = set()
+    citation_count = 0
+    section_citation_maps = []
+
+    def remember_key(key):
+        if not key or key in seen_keys:
+            return
+        if key not in key_to_text:
+            return
+        seen_keys.add(key)
+        ordered_keys.append(key)
+
+    def assign_reference_key(old_number, local_number_to_key):
+        if old_number in local_number_to_key:
+            return local_number_to_key[old_number]
+        if old_number in duplicate_numbers:
+            keys = number_to_keys.get(old_number, [])
+            cursor = duplicate_cursors.get(old_number, 0)
+            key = keys[min(cursor, len(keys) - 1)] if keys else ''
+            if cursor < len(keys) - 1:
+                duplicate_cursors[old_number] = cursor + 1
+        else:
+            key = unique_number_to_key.get(old_number, '')
+        if key:
+            local_number_to_key[old_number] = key
+        return key
+
+    for section in body_sections:
+        title = section.get('title', '')
+        content = normalize_section_body(section.get('content', ''))
+        local_number_to_key = {}
+        for match in re.finditer(r'\[([^\[\]]+)\]', content):
+            for old_number in parse_citation_numbers(match.group(1)):
+                key = assign_reference_key(old_number, local_number_to_key)
+                if key:
+                    citation_count += 1
+                    remember_key(key)
+        section_citation_maps.append({
+            'title': title,
+            'content': content,
+            'number_to_key': local_number_to_key,
+        })
+
+    for key in occurrence_keys:
+        remember_key(key)
+
+    new_number_by_key = {
+        key: index
+        for index, key in enumerate(ordered_keys, start=1)
+    }
+    full_entries = [
+        {'number': new_number_by_key[key], 'text': key_to_text.get(key, ''), 'key': key}
+        for key in ordered_keys
+        if key_to_text.get(key)
+    ]
+
+    updated_sections = []
+    for section in section_citation_maps:
+        title = section.get('title', '')
+        content = section.get('content', '')
+        old_to_new = {
+            number: new_number_by_key[key]
+            for number, key in section.get('number_to_key', {}).items()
+            if key in new_number_by_key
+        }
+        rewritten = rewrite_citations_with_number_map(content, old_to_new)
+        if rewritten != content:
+            updated_sections.append({'title': title, 'content': rewritten})
+
+    return {
+        'reference_title': reference_title,
+        'reference_content': build_reference_body_from_entries(full_entries),
+        'updated_sections': updated_sections,
+        'entry_count': len(full_entries),
+        'citation_count': citation_count,
     }

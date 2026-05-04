@@ -46,6 +46,8 @@ SCENE_DEFS = {
             ('style', '论文类型'),
             ('reference_style', '引用格式'),
             ('subject', '学科/方向'),
+            ('total_word_count', '全文目标字数'),
+            ('outline_section_limit', '章节数量建议'),
         ),
         'required_variables': ('topic', 'style', 'reference_style'),
     },
@@ -138,6 +140,8 @@ LEGACY_INSTRUCTION_WRAPPERS = {
         '论文标题：{topic}\n'
         '论文类型：{style}\n'
         '学科/方向：{subject}\n'
+        '全文目标字数：约 {total_word_count} 字\n'
+        '章节数量建议：{outline_section_limit}\n'
         '引用格式：{reference_style}\n\n'
         '附加提示词：\n{instruction}\n\n'
         '请直接输出最终大纲正文。'

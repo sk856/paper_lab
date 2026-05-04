@@ -19,12 +19,15 @@ const state = {
   paperRunning: false,
   paperSectionFilter: '',
   paperPushTargets: {},
+  paperTemplate: null,
   selectedHistoryId: '',
   restoring: false,
 };
 
 const DEFAULT_REQUEST_TIMEOUT_MS = 120000;
 const PAPER_REQUEST_TIMEOUT_MS = 210000;
+const BATCH_PAPER_REQUEST_TIMEOUT_MS = 420000;
+const BATCH_WRITE_MAX_ATTEMPTS = 3;
 
 const STORAGE_KEYS = {
   draft: 'paperlab-web-draft-v3',
@@ -32,7 +35,7 @@ const STORAGE_KEYS = {
 };
 
 const FIELD_SELECTORS = [
-  '#paperTopic', '#paperSubject', '#paperStyle', '#referenceStyle', '#sectionTitle', '#wordCount', '#paperOutline', '#paperContext', '#paperResult',
+  '#paperTopic', '#paperSubject', '#paperStyle', '#referenceStyle', '#sectionTitle', '#totalWordCountAuto', '#totalWordCount', '#wordCountAuto', '#wordCount', '#paperOutline', '#paperContext', '#paperResult',
   '#aiInput', '#aiOutput', '#aiReview', '#aiDiff',
   '#plagiarismInput', '#plagiarismOutput', '#plagiarismSource', '#plagiarismReview', '#plagiarismDiff',
   '#polishTaskType', '#polishExecutionMode', '#polishTopic', '#polishNotes', '#polishInput', '#polishOutput', '#polishReview',
@@ -72,6 +75,7 @@ function setText(selector, value) {
 
 function readNodeText(node) {
   if (!node) return '';
+  if (node.type === 'checkbox') return node.checked ? '1' : '0';
   if (isPaperEditorNode(node)) return readPaperEditorText(node);
   if (node.isContentEditable) {
     return (node.innerText || node.textContent || '').replace(/\u00a0/g, ' ');
@@ -81,6 +85,10 @@ function readNodeText(node) {
 
 function writeNodeText(node, value) {
   if (!node) return;
+  if (node.type === 'checkbox') {
+    node.checked = value === true || value === '1' || value === 'true' || value === 'on';
+    return;
+  }
   if (isPaperEditorNode(node)) {
     writePaperEditorText(node, value);
     return;
@@ -165,7 +173,12 @@ function captureFields() {
   const fields = {};
   FIELD_SELECTORS.forEach((selector) => {
     const node = $(selector);
-    if (node) fields[selector] = readNodeText(node);
+    if (!node) return;
+    if ((selector === '#totalWordCount' || selector === '#wordCount') && node.disabled) {
+      fields[selector] = node.dataset.lastValue || readNodeText(node);
+      return;
+    }
+    fields[selector] = readNodeText(node);
   });
   return fields;
 }
@@ -192,6 +205,7 @@ function saveDraft() {
     paperSectionContentSources: state.paperSectionContentSources,
     paperReferenceSnapshot: state.paperReferenceSnapshot,
     paperPushTargets: state.paperPushTargets,
+    paperTemplate: state.paperTemplate,
     fields: captureFields(),
     savedAt: new Date().toISOString(),
   });
@@ -207,8 +221,11 @@ function restoreDraft() {
   state.paperSectionContentSources = draft.paperSectionContentSources || {};
   state.paperReferenceSnapshot = draft.paperReferenceSnapshot || '';
   state.paperPushTargets = draft.paperPushTargets || {};
+  state.paperTemplate = draft.paperTemplate || null;
   applyFields(draft.fields);
   syncModeSelections();
+  syncWordLimitControls();
+  renderPaperTemplate();
 }
 
 function getHistoryRecords() {
@@ -246,6 +263,7 @@ function createHistoryRecord(page, operation, data = {}) {
     paperSectionContents: { ...state.paperSectionContents },
     paperSectionContentSources: { ...state.paperSectionContentSources },
     paperReferenceSnapshot: state.paperReferenceSnapshot,
+    paperTemplate: state.paperTemplate,
     analysis: data.analysis || state.lastAnalysis || null,
   };
 }
@@ -318,6 +336,20 @@ async function requestJson(url, options = {}, requestOptions = {}) {
     throw error;
   } finally {
     if (timeoutId) window.clearTimeout(timeoutId);
+  }
+}
+
+function isFetchConnectionError(error) {
+  const message = String(error?.message || error || '').toLowerCase();
+  return message.includes('failed to fetch') || message.includes('networkerror') || message.includes('load failed');
+}
+
+async function isLocalServerReachable() {
+  try {
+    await requestJson('/api/status', { method: 'GET' }, { timeoutMs: 5000 });
+    return true;
+  } catch (error) {
+    return false;
   }
 }
 
@@ -1072,7 +1104,7 @@ function pushScopeSectionTitles(scopeValue) {
 }
 
 function paperSectionTextBlock(title) {
-  const body = String(state.paperSectionContents[title] || '').trim();
+  const body = paperSectionBodyContent(title);
   if (!body) return '';
   return `${paperSectionNumberedTitle(title)}\n${body}`;
 }
@@ -1248,7 +1280,7 @@ function renderPaperSections() {
     const level = Math.min(Math.max(Number(section.level || 1), 1), 4);
     const kind = paperSpecialKind(section.title) || 'body';
     const writable = isPaperSectionWritable(section.title);
-    const hasContent = Boolean(String(state.paperSectionContents[section.title] || '').trim());
+    const hasContent = isPaperSectionWritten(section.title);
     const number = formatOutlineSectionNumber(numbers[index] ?? String(index + 1));
     const titleText = number ? `<em>${escapeHtml(number)}</em>${escapeHtml(section.title)}` : escapeHtml(section.title);
     return `
@@ -1433,6 +1465,35 @@ function looksLikeOutlineOnlySectionContent(title, content, source = '') {
   return false;
 }
 
+function looksLikeOutlineSectionAnalysis(title, content, source = '') {
+  const text = String(content || '').trim();
+  if (!text) return false;
+  if (source === 'outline') return true;
+  if (source === 'user') return false;
+  if (paperSpecialKind(title)) return false;
+  if (text.length > 360) return false;
+  if (/\[\d+(?:[-,，、]\d+)*\]/.test(text)) return false;
+  if (text.split(/\r?\n/).filter((line) => line.trim()).length > 2) return false;
+  const hints = [
+    '章节分析', '章节说明', '本章主要', '本节主要', '本章重点', '本节重点',
+    '本章将', '本节将', '主要阐述', '主要分析', '主要讨论', '围绕',
+    '用于说明', '写作要点', '写作思路', '可从', '需要从',
+  ];
+  return hints.some((hint) => text.includes(hint));
+}
+
+function paperSectionBodyContent(title) {
+  const content = String(state.paperSectionContents?.[title] || '').trim();
+  if (!content) return '';
+  const source = state.paperSectionContentSources?.[title] || '';
+  if (looksLikeOutlineSectionAnalysis(title, content, source)) return '';
+  return content;
+}
+
+function isPaperSectionWritten(title) {
+  return Boolean(paperSectionBodyContent(title));
+}
+
 function refreshPaperSections(selectFirst = false, options = {}) {
   const preserveExisting = options.preserveExisting !== false;
   if (!preserveExisting) state.paperReferenceSnapshot = '';
@@ -1493,6 +1554,7 @@ function paperTargetSectionForAction(action) {
   if (action === 'abstract') return ensurePaperSection('中文摘要', 'cn_abstract');
   if (action === 'references') return ensurePaperSection('参考文献', 'reference');
   const requestedTitle = textValue('#sectionTitle') || state.selectedPaperSection || state.paperEditorSection;
+  if (action === 'section' && findPaperSectionByTitle(requestedTitle)) return requestedTitle;
   const targetTitle = nearestWritablePaperSection(requestedTitle) || requestedTitle;
   return ensurePaperSection(targetTitle);
 }
@@ -1647,7 +1709,7 @@ function collectPaperTextForAbstract() {
   state.paperSections.forEach((section) => {
     const kind = paperSpecialKind(section.title);
     if (['cn_abstract', 'cn_keywords', 'en_abstract', 'en_keywords', 'reference'].includes(kind)) return;
-    const body = String(state.paperSectionContents[section.title] || '').trim();
+    const body = paperSectionBodyContent(section.title);
     if (body) parts.push(`${section.title}\n${body}`);
   });
   if (!parts.length && getCurrentPaperContent()) {
@@ -1677,7 +1739,8 @@ function collectBatchWriteTargets(emptyOnly = false) {
     const hasChildren = state.paperSections.some((s) => s.parent === title);
     if (hasChildren) return;
 
-    const existingContent = String(state.paperSectionContents[title] || '').trim();
+    const rawContent = String(state.paperSectionContents[title] || '').trim();
+    const existingContent = paperSectionBodyContent(title);
 
     if (!isPaperSectionWritable(title)) return;
 
@@ -1686,11 +1749,170 @@ function collectBatchWriteTargets(emptyOnly = false) {
 
     targets.push({
       title,
-      context: existingContent,
+      context: existingContent || rawContent,
     });
   });
 
   return targets;
+}
+
+function targetWordCountValue(selector, fallback) {
+  const value = parseInt($(selector)?.value, 10);
+  return Number.isFinite(value) && value > 0 ? value : fallback;
+}
+
+function isChecked(selector) {
+  const node = $(selector);
+  return Boolean(node?.checked);
+}
+
+function customTotalWordCount() {
+  return isChecked('#totalWordCountAuto') ? 0 : targetWordCountValue('#totalWordCount', 0);
+}
+
+function customSectionWordCount() {
+  return isChecked('#wordCountAuto') ? 0 : targetWordCountValue('#wordCount', 0);
+}
+
+function isPaperBodySection(section) {
+  const kind = paperSpecialKind(section?.title);
+  return !['reference', 'cn_abstract', 'cn_keywords', 'en_abstract', 'en_keywords'].includes(kind);
+}
+
+function deepestBodyWritingSections() {
+  const sections = (state.paperSections || []).filter((section) => isPaperBodySection(section) && isPaperSectionWritable(section.title));
+  if (!sections.length) return [];
+  const deepestLevel = Math.max(...sections.map((section) => Math.max(1, Number(section.level || 1))));
+  return sections.filter((section) => Math.max(1, Number(section.level || 1)) === deepestLevel);
+}
+
+function autoSectionWordCount() {
+  const totalTarget = customTotalWordCount();
+  if (!totalTarget) return 1000;
+  const basisCount = deepestBodyWritingSections().length || 1;
+  return Math.max(300, Math.round(totalTarget / basisCount));
+}
+
+function autoWordCountForSection(title) {
+  const perLeafCount = autoSectionWordCount();
+  return perLeafCount;
+}
+
+function recommendedOutlineSectionLimit(totalWordCount) {
+  const total = Number(totalWordCount || 0);
+  if (!total) return '';
+  if (total <= 5000) return '4-6 个正文叶子章节，尽量只保留二级标题';
+  if (total <= 10000) return '6-10 个正文叶子章节，谨慎使用三级标题';
+  if (total <= 20000) return '10-16 个正文叶子章节，避免超过 18 个可写小节';
+  if (total <= 40000) return '16-28 个正文叶子章节，按研究主线合并相近小节';
+  return '28-40 个正文叶子章节，仍需避免机械拆分为过多小节';
+}
+
+function requestedSectionWordCount(title = '') {
+  return customSectionWordCount() || autoWordCountForSection(title);
+}
+
+function perSectionWordCountForBatch() {
+  return requestedSectionWordCount();
+}
+
+function paperTemplateForPayload() {
+  const template = state.paperTemplate;
+  if (!template || !Array.isArray(template.headings) || !template.headings.length) return null;
+  return {
+    filename: template.filename || '',
+    fileType: template.fileType || '',
+    summary: template.summary || '',
+    headings: template.headings.slice(0, 80),
+  };
+}
+
+function renderPaperTemplate() {
+  const status = $('#paperTemplateStatus');
+  const summary = $('#paperTemplateSummary');
+  const preview = $('#paperTemplatePreview');
+  const template = state.paperTemplate;
+  if (!template || !Array.isArray(template.headings) || !template.headings.length) {
+    if (status) status.textContent = '未上传模板';
+    if (summary) summary.textContent = '支持 DOC、DOCX、PDF、TXT、Markdown。上传后生成大纲会参考模板目录结构。';
+    if (preview) preview.textContent = '暂无目录结构';
+    return;
+  }
+  const headingCount = template.headings.length;
+  if (status) status.textContent = `${template.filename || '论文模板'} · ${headingCount} 个标题`;
+  if (summary) summary.textContent = template.summary || `已读取目录结构：${headingCount} 个标题，生成大纲时会参考模板层级。`;
+  if (preview) {
+    preview.textContent = template.headings
+      .slice(0, 60)
+      .map((heading) => `${'  '.repeat(Math.max(0, Number(heading.level || 1) - 1))}${heading.title}`)
+      .join('\n') || '暂无目录结构';
+  }
+}
+
+function clearPaperTemplate() {
+  state.paperTemplate = null;
+  const input = $('#paperTemplateFile');
+  if (input) input.value = '';
+  renderPaperTemplate();
+  saveDraft();
+}
+
+async function uploadPaperTemplateFile(file) {
+  if (!file) return;
+  const status = $('#paperTemplateStatus');
+  if (status) status.textContent = '正在读取目录...';
+  try {
+    const dataUrl = await readFileAsDataUrl(file);
+    const data = await requestJson('/api/template/parse', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        filename: file.name,
+        mimeType: file.type || '',
+        dataUrl,
+      }),
+    });
+    state.paperTemplate = data;
+    renderPaperTemplate();
+    saveDraft();
+    setState('paper', `已读取论文模板目录：${data.filename || file.name}`, 'done');
+  } catch (error) {
+    state.paperTemplate = null;
+    renderPaperTemplate();
+    if (status) status.textContent = '模板读取失败';
+    setState('paper', `模板读取失败：${error.message}`, 'error');
+  }
+}
+
+function readFileAsDataUrl(file) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(String(reader.result || ''));
+    reader.onerror = () => reject(reader.error || new Error('文件读取失败'));
+    reader.readAsDataURL(file);
+  });
+}
+
+function syncWordLimitControls() {
+  syncWordLimitInput('#totalWordCountAuto', '#totalWordCount', '20000');
+  syncWordLimitInput('#wordCountAuto', '#wordCount', '1000');
+}
+
+function syncWordLimitInput(autoSelector, inputSelector, fallbackValue) {
+  const input = $(inputSelector);
+  if (!input) return;
+  const auto = isChecked(autoSelector);
+  if (auto) {
+    const current = String(input.value || '').trim();
+    if (current && current !== '0') input.dataset.lastValue = current;
+    if (!input.dataset.lastValue) input.dataset.lastValue = fallbackValue;
+    input.value = '0';
+    input.disabled = true;
+  } else {
+    input.disabled = false;
+    if (!input.value || input.value === '0') input.value = input.dataset.lastValue || fallbackValue;
+    input.focus();
+  }
 }
 
 function paperSectionsForReferenceSync() {
@@ -1726,12 +1948,14 @@ async function runBatchWriteAllSections() {
     return;
   }
 
-  const wordCount = parseInt($('#wordCount').value) || 1000;
+  const wordCount = perSectionWordCountForBatch();
   const totalWords = targets.length * wordCount;
+  const totalTarget = customTotalWordCount();
 
   // 警告确认
   if (targets.length > 8 || wordCount > 1200 || totalWords > 12000) {
-    const warningMsg = `即将批量写作 ${targets.length} 个章节，预计生成约 ${totalWords} 字。\n\n这可能需要较长时间并消耗较多 API 额度。\n\n是否继续？`;
+    const targetText = totalTarget ? `全文目标字数 ${totalTarget} 字，` : '';
+    const warningMsg = `即将批量写作 ${targets.length} 个章节，${targetText}按每节约 ${wordCount} 字预计生成约 ${totalWords} 字。\n\n这可能需要较长时间并消耗较多 API 额度。\n\n是否继续？`;
     if (!confirm(warningMsg)) {
       setState('paper', '已取消批量写作', 'error');
       return;
@@ -1752,28 +1976,33 @@ async function runBatchWriteAllSections() {
     for (let i = 0; i < targets.length; i++) {
       const target = targets[i];
       const progress = `${i + 1}/${targets.length}`;
+      let sectionDone = false;
+      let lastError = '';
 
-      setState('paper', `正在写作 ${progress}：${target.title}`, 'running');
+      for (let attempt = 1; attempt <= BATCH_WRITE_MAX_ATTEMPTS; attempt += 1) {
+        const retryText = attempt > 1 ? `（重试 ${attempt - 1}/${BATCH_WRITE_MAX_ATTEMPTS - 1}）` : '';
+        setState('paper', `正在写作 ${progress}：${target.title}${retryText}`, 'running');
 
-      try {
-        const payload = {
-          action: 'section',
-          outline,
-          sectionTitle: target.title,
-          context: target.context,
-          wordCount,
-          referenceStyle,
-          allSections: paperSectionsForReferenceSync(),
-          referenceSnapshot: state.paperReferenceSnapshot || '',
-        };
+        try {
+          const payload = {
+            action: 'section',
+            text: outline,
+            outline,
+            sectionTitle: target.title,
+            context: target.context,
+            wordCount,
+            referenceStyle,
+            allSections: paperSectionsForReferenceSync(),
+            referenceSnapshot: state.paperReferenceSnapshot || '',
+          };
 
-        const data = await requestPaperRun(payload);
+          const data = await requestPaperRun(payload, { timeoutMs: BATCH_PAPER_REQUEST_TIMEOUT_MS });
+          const body = data.content || data.result || '';
+          if (!body) throw new Error('返回结果为空');
 
-        if (data.content || data.result) {
-          writePaperContentToSection(target.title, data.content || data.result, { loadEditor: false });
+          writePaperContentToSection(target.title, body, { loadEditor: false });
           completedSections.push(target.title);
 
-          // Handle references
           if (data.references) {
             const refTitle = data.references.title || referenceTitle || '# 参考文献';
             const mode = data.references.mode;
@@ -1781,12 +2010,10 @@ async function runBatchWriteAllSections() {
             if (mode === 'append' && data.references.append) {
               referenceTitle = appendPaperReferences(refTitle, data.references.append, { loadEditor: false }) || referenceTitle;
             } else if (mode === 'reorder' && data.references.content) {
-              // Reorder mode: replace entire reference section
               referenceTitle = writePaperContentToSection(refTitle, data.references.content, { loadEditor: false }) || referenceTitle;
             }
           }
 
-          // Handle updated sections (citation renumbering)
           if (data.updatedSections && Array.isArray(data.updatedSections)) {
             for (const section of data.updatedSections) {
               if (section.title) {
@@ -1794,18 +2021,40 @@ async function runBatchWriteAllSections() {
               }
             }
           }
-        } else {
-          failedSections.push({ title: target.title, error: '返回结果为空' });
-        }
-      } catch (error) {
-        failedSections.push({ title: target.title, error: error.message });
 
-        // 如果是额度或频率限制错误，停止继续写作
-        const errorMsg = String(error.message || '').toLowerCase();
-        if (errorMsg.includes('quota') || errorMsg.includes('rate limit') || errorMsg.includes('额度') || errorMsg.includes('频率')) {
-          setState('paper', `批量写作中止：${error.message}`, 'error');
+          saveDraft();
+          sectionDone = true;
           break;
+        } catch (error) {
+          lastError = error.message || String(error);
+          const errorMsg = String(lastError || '').toLowerCase();
+          const shouldStopImmediately = errorMsg.includes('quota') || errorMsg.includes('rate limit') || errorMsg.includes('额度') || errorMsg.includes('频率');
+          if (isFetchConnectionError(error) && attempt < BATCH_WRITE_MAX_ATTEMPTS) {
+            const reachable = await isLocalServerReachable();
+            const waitMs = reachable ? 2500 : 6000;
+            setState('paper', `本地连接短暂中断，正在重试 ${target.title}（${attempt}/${BATCH_WRITE_MAX_ATTEMPTS - 1}）`, 'running');
+            await new Promise((resolve) => window.setTimeout(resolve, waitMs));
+            continue;
+          }
+          if (shouldStopImmediately || attempt >= BATCH_WRITE_MAX_ATTEMPTS) {
+            failedSections.push({ title: target.title, error: lastError });
+            break;
+          }
         }
+      }
+
+      if (!sectionDone) {
+        setState('paper', `批量写作已暂停在 ${progress}：${target.title}。错误：${lastError}`, 'error');
+        alert(`批量写作已暂停\n\n已完成：${completedSections.length} 个\n失败章节：${target.title}\n错误：${lastError}\n\n后续章节尚未继续写，避免跳过。修复后可选择“只写空白章节”继续。`);
+        break;
+      }
+
+      if (i + 1 < targets.length) {
+        await new Promise((resolve) => window.setTimeout(resolve, 350));
+      }
+
+      if (failedSections.length) {
+          break;
       }
     }
 
@@ -1820,12 +2069,8 @@ async function runBatchWriteAllSections() {
         output: `成功写作 ${completedSections.length} 个章节：\n${completedSections.join('\n')}`,
       });
     } else {
-      const successMsg = completedSections.length > 0 ? `成功 ${completedSections.length} 个，` : '';
-      setState('paper', `批量写作部分完成：${successMsg}失败 ${failedSections.length} 个`, 'error');
-
-      const failedList = failedSections.slice(0, 5).map((f) => `${f.title}: ${f.error}`).join('\n');
-      const moreMsg = failedSections.length > 5 ? `\n...还有 ${failedSections.length - 5} 个失败` : '';
-      alert(`批量写作完成\n\n成功：${completedSections.length} 个\n失败：${failedSections.length} 个\n\n失败章节：\n${failedList}${moreMsg}`);
+      const failed = failedSections[0];
+      setState('paper', `批量写作已暂停：成功 ${completedSections.length} 个，停在 ${failed.title}`, 'error');
     }
   } catch (error) {
     setState('paper', `批量写作失败：${error.message}`, 'error');
@@ -1837,6 +2082,7 @@ async function runBatchWriteAllSections() {
 }
 
 function paperRequestPayload(action, payloadText, targetSection, topic, outline, context) {
+  const allSectionsPayload = ['section', 'references'].includes(action) ? paperSectionsForReferenceSync() : null;
   const payload = {
     action,
     text: payloadText,
@@ -1845,29 +2091,55 @@ function paperRequestPayload(action, payloadText, targetSection, topic, outline,
     paperStyle: $('#paperStyle').value,
     referenceStyle: $('#referenceStyle').value,
     sectionTitle: targetSection,
-    wordCount: $('#wordCount').value,
+    wordCount: action === 'section' ? requestedSectionWordCount(targetSection) : (customSectionWordCount() || ''),
+    totalWordCount: customTotalWordCount() || '',
+    outlineSectionLimit: recommendedOutlineSectionLimit(customTotalWordCount()),
+    templateStructure: paperTemplateForPayload(),
     outline,
     context,
     language: '中文',
   };
 
   // Include all sections for reference management
-  if (action === 'section') {
-    payload.allSections = paperSectionsForReferenceSync();
+  if (allSectionsPayload) {
+    payload.allSections = allSectionsPayload;
     payload.referenceSnapshot = state.paperReferenceSnapshot || '';
   }
 
   return payload;
 }
 
-async function requestPaperRun(payload) {
+function applyReferenceResult(data, fallbackTitle = '# 参考文献') {
+  if (data.updatedSections && Array.isArray(data.updatedSections)) {
+    for (const section of data.updatedSections) {
+      if (section.title) {
+        writePaperContentToSection(section.title, section.content, { loadEditor: false });
+      }
+    }
+  }
+
+  if (!data.references) return '';
+  const refTitle = data.references.title || fallbackTitle;
+  const mode = data.references.mode;
+
+  if (mode === 'append' && data.references.append) {
+    return appendPaperReferences(refTitle, data.references.append, { loadEditor: false }) || refTitle;
+  }
+  if (mode === 'reorder' && data.references.content) {
+    return writePaperContentToSection(refTitle, data.references.content, { loadEditor: false }) || refTitle;
+  }
+  return '';
+}
+
+async function requestPaperRun(payload, options = {}) {
+  const timeoutMs = Number(options.timeoutMs || PAPER_REQUEST_TIMEOUT_MS);
   return requestJson('/api/run', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(payload),
   }, {
-    timeoutMs: PAPER_REQUEST_TIMEOUT_MS,
-    timeoutMessage: '论文生成请求等待超过 210 秒仍未返回。请检查网络状态，或到「配置管理」切换接口/模型后重试。',
+    timeoutMs,
+    timeoutMessage: `论文生成请求等待超过 ${Math.round(timeoutMs / 1000)} 秒仍未返回。请检查网络状态，或到「配置管理」切换接口/模型后重试。`,
   });
 }
 
@@ -1899,7 +2171,11 @@ async function runPaperAction(action) {
   const targetSection = paperTargetSectionForAction(action);
   const payloadText = action === 'outline'
     ? topic
-    : (action === 'abstract' ? collectPaperTextForAbstract() : (action === 'section' ? outline : context || outline || topic));
+    : (action === 'abstract'
+      ? collectPaperTextForAbstract()
+      : (action === 'section'
+        ? outline
+        : (action === 'references' ? state.paperReferenceSnapshot || context || outline || topic : context || outline || topic)));
   if (!payloadText) {
     setState('paper', action === 'abstract' ? '请先完善论文正文内容' : '请先填写内容', 'error');
     return;
@@ -1926,31 +2202,24 @@ async function runPaperAction(action) {
       refreshPaperSections(false, { preserveExisting: false });
     } else if (action === 'abstract') {
       loadPaperSection(findPaperSectionByKind('cn_abstract') || targetSection);
+    } else if (action === 'references') {
+      const refTitle = applyReferenceResult(data, targetSection || '# 参考文献');
+      if (refTitle) loadPaperSection(refTitle);
+      syncPaperOutlineFromSections();
+      const entryCount = data.references?.entryCount;
+      const citationCount = data.references?.citationCount;
+      const detail = Number.isFinite(entryCount) ? `，共 ${entryCount} 条参考文献` : '';
+      const citationDetail = Number.isFinite(citationCount) ? `，扫描到 ${citationCount} 处正文引用` : '';
+      setState('paper', `参考文献已按整篇文章引用顺序整理${detail}${citationDetail}`, 'done');
     } else {
-      writePaperContentToSection(targetSection, data.content || data.result || '');
+      const generatedContent = data.content || data.result || '';
+      writePaperContentToSection(targetSection, generatedContent);
 
-      // Handle references if returned
-      if (data.references) {
-        const refTitle = data.references.title || '# 参考文献';
-        const mode = data.references.mode;
-
-        if (mode === 'append' && data.references.append) {
-          appendPaperReferences(refTitle, data.references.append, { loadEditor: false });
-          setState('paper', `章节写作完成，参考文献已追加到 ${refTitle}`, 'done');
-        } else if (mode === 'reorder' && data.references.content) {
-          // Reorder mode: replace entire reference section
-          writePaperContentToSection(refTitle, data.references.content, { loadEditor: false });
-          setState('paper', `章节写作完成，参考文献已重新排序`, 'done');
-        }
-      }
-
-      // Handle updated sections (citation renumbering)
-      if (data.updatedSections && Array.isArray(data.updatedSections)) {
-        for (const section of data.updatedSections) {
-          if (section.title) {
-            writePaperContentToSection(section.title, section.content, { loadEditor: false });
-          }
-        }
+      const refTitle = applyReferenceResult(data);
+      if (refTitle && data.references?.mode === 'append') {
+        setState('paper', `章节写作完成，参考文献已追加到 ${refTitle}`, 'done');
+      } else if (refTitle && data.references?.mode === 'reorder') {
+        setState('paper', '章节写作完成，参考文献已重新排序', 'done');
       }
 
       syncPaperOutlineFromSections();
@@ -2218,8 +2487,10 @@ function restoreSelectedHistory() {
   state.paperSectionContents = record.paperSectionContents || {};
   state.paperSectionContentSources = record.paperSectionContentSources || {};
   state.lastAnalysis = record.analysis || null;
+  state.paperTemplate = record.paperTemplate || null;
   applyFields(record.fields || {});
   syncModeSelections();
+  renderPaperTemplate();
   if (record.page === 'correction' && record.analysis?.correction) {
     renderCorrection(record.analysis.correction);
   } else if (record.page === 'correction' && record.analysis) {
@@ -2244,6 +2515,22 @@ function bindActions() {
   }));
   bindModeCards();
   $$('[data-paper-action]').forEach((button) => button.addEventListener('click', () => runPaperAction(button.dataset.paperAction)));
+  ['#totalWordCountAuto', '#wordCountAuto'].forEach((selector) => {
+    $(selector)?.addEventListener('change', () => {
+      syncWordLimitControls();
+      saveDraft();
+    });
+  });
+  ['#totalWordCount', '#wordCount'].forEach((selector) => {
+    $(selector)?.addEventListener('input', () => {
+      const node = $(selector);
+      if (node && !node.disabled && node.value && node.value !== '0') node.dataset.lastValue = node.value;
+    });
+  });
+  $('#paperTemplateFile')?.addEventListener('change', (event) => {
+    uploadPaperTemplateFile(event.target.files?.[0]);
+  });
+  $('#clearPaperTemplate')?.addEventListener('click', clearPaperTemplate);
   $('#refreshOutlineSections').addEventListener('click', () => refreshPaperSections(true));
   $('#paperOutline').addEventListener('input', () => refreshPaperSections(false));
   $('#paperSectionJump')?.addEventListener('change', (event) => {
@@ -2374,6 +2661,7 @@ function restoreTheme() {
 restoreTheme();
 bindActions();
 restoreDraft();
+syncWordLimitControls();
 routeFromHash();
 renderHistory();
 loadStatus().catch((error) => {

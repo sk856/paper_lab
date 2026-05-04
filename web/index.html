@@ -4,7 +4,7 @@
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>纸研社 Web 工作台</title>
-  <link rel="stylesheet" href="/styles.css?v=20260504-editor-paragraphs" />
+  <link rel="stylesheet" href="/styles.css?v=20260504-template-upload" />
 </head>
 <body>
   <div class="app-shell">
@@ -59,44 +59,67 @@
           <div class="status-strip" id="modelStatus">正在读取模型配置...</div>
         </div>
 
-        <section class="panel paper-panel">
-          <div class="panel-header-row">
-            <div><p class="eyebrow">Settings</p><h3>论文设置</h3></div>
-            <span class="state-pill" data-state-for="paper">待处理</span>
-          </div>
-          <div class="paper-form-grid">
-            <label class="field-block wide"><span>论文题目</span><input id="paperTopic" class="input-box" placeholder="例如：人工智能辅助学术写作的伦理风险与治理路径研究" /></label>
-            <label class="field-block"><span>学科/方向</span><input id="paperSubject" class="input-box" placeholder="例如：教育技术 / 管理学" /></label>
-            <label class="field-block"><span>论文类型</span><select id="paperStyle" class="input-box"><option>学术论文</option><option>毕业论文</option><option>综述文章</option><option>研究报告</option><option>实验报告</option></select></label>
-            <label class="field-block"><span>引用格式</span><select id="referenceStyle" class="input-box"><option>GB/T 7714</option><option>APA</option><option>MLA</option><option>Chicago</option><option>IEEE</option></select></label>
-            <label class="field-block"><span>当前章节</span><input id="sectionTitle" class="input-box" placeholder="例如：第一章 绪论" /></label>
-            <label class="field-block"><span>目标字数</span><input id="wordCount" class="input-box" type="number" min="300" max="3000" value="1000" /></label>
-          </div>
-          <div class="paper-actions">
-            <button class="primary-button" data-paper-action="outline" type="button">生成大纲</button>
-            <button class="secondary-button" data-paper-action="section" type="button">撰写当前章节</button>
-            <button class="secondary-button" data-paper-action="batch-write" type="button">撰写全部章节</button>
-            <button class="secondary-button" data-paper-action="abstract" type="button">生成摘要</button>
-            <button class="secondary-button" data-paper-action="references" type="button">整理参考文献</button>
-          </div>
-          <div class="paper-push-panel">
-            <div class="paper-push-copy">
-              <strong>推送章节到功能区</strong>
-              <span>把整篇文章、某章/某节或单个小节送到降 AI、降重、润色、纠错页面。</span>
+        <section class="paper-top-grid">
+          <section class="panel paper-template-panel">
+            <div class="panel-header-row">
+              <div><p class="eyebrow">Template</p><h3>论文模板</h3></div>
+              <button id="clearPaperTemplate" class="secondary-button compact" type="button">清除</button>
             </div>
-            <div class="paper-push-controls">
-              <select id="paperPushScope" class="input-box" aria-label="推送范围">
-                <option value="all">整篇文章</option>
-              </select>
-              <select id="paperPushTarget" class="input-box" aria-label="目标功能区">
-                <option value="ai">降 AI 检测</option>
-                <option value="plagiarism">降查重率</option>
-                <option value="polish">学术润色</option>
-                <option value="correction">智能纠错</option>
-              </select>
-              <button id="paperPushButton" class="secondary-button" type="button">推送</button>
+            <div class="template-upload-row">
+              <label class="secondary-button template-upload-button" for="paperTemplateFile">上传模板</label>
+              <input id="paperTemplateFile" type="file" accept=".doc,.docx,.pdf,.txt,.md" hidden />
+              <span id="paperTemplateStatus" class="mini-hint">未上传模板</span>
             </div>
-          </div>
+            <div id="paperTemplateSummary" class="template-summary">支持 DOC、DOCX、PDF、TXT、Markdown。上传后生成大纲会参考模板目录结构。</div>
+            <pre id="paperTemplatePreview" class="template-preview">暂无目录结构</pre>
+          </section>
+
+          <section class="panel paper-panel">
+            <div class="panel-header-row">
+              <div><p class="eyebrow">Settings</p><h3>论文设置</h3></div>
+              <span class="state-pill" data-state-for="paper">待处理</span>
+            </div>
+            <div class="paper-form-grid">
+              <label class="field-block wide"><span>论文题目</span><input id="paperTopic" class="input-box" placeholder="例如：人工智能辅助学术写作的伦理风险与治理路径研究" /></label>
+              <label class="field-block"><span>学科/方向</span><input id="paperSubject" class="input-box" placeholder="例如：教育技术 / 管理学" /></label>
+              <label class="field-block"><span>论文类型</span><select id="paperStyle" class="input-box"><option>学术论文</option><option>毕业论文</option><option>综述文章</option><option>研究报告</option><option>实验报告</option></select></label>
+              <label class="field-block"><span>引用格式</span><select id="referenceStyle" class="input-box"><option>GB/T 7714</option><option>APA</option><option>MLA</option><option>Chicago</option><option>IEEE</option></select></label>
+              <label class="field-block"><span>当前章节</span><input id="sectionTitle" class="input-box" placeholder="例如：第一章 绪论" /></label>
+              <div class="word-limit-group">
+                <div class="word-limit-head"><span>全文目标字数</span><label class="inline-toggle"><input id="totalWordCountAuto" type="checkbox" checked />自动</label></div>
+                <input id="totalWordCount" class="input-box" type="number" min="1000" max="100000" step="500" value="20000" data-last-value="20000" />
+              </div>
+              <div class="word-limit-group">
+                <div class="word-limit-head"><span>单章节目标字数</span><label class="inline-toggle"><input id="wordCountAuto" type="checkbox" checked />自动</label></div>
+                <input id="wordCount" class="input-box" type="number" min="300" max="3000" value="1000" data-last-value="1000" />
+              </div>
+            </div>
+            <div class="paper-actions">
+              <button class="primary-button" data-paper-action="outline" type="button">生成大纲</button>
+              <button class="secondary-button" data-paper-action="section" type="button">撰写当前章节</button>
+              <button class="secondary-button" data-paper-action="batch-write" type="button">撰写全部章节</button>
+              <button class="secondary-button" data-paper-action="abstract" type="button">生成摘要</button>
+              <button class="secondary-button" data-paper-action="references" type="button">整理参考文献</button>
+            </div>
+            <div class="paper-push-panel">
+              <div class="paper-push-copy">
+                <strong>推送章节到功能区</strong>
+                <span>把整篇文章、某章/某节或单个小节送到降 AI、降重、润色、纠错页面。</span>
+              </div>
+              <div class="paper-push-controls">
+                <select id="paperPushScope" class="input-box" aria-label="推送范围">
+                  <option value="all">整篇文章</option>
+                </select>
+                <select id="paperPushTarget" class="input-box" aria-label="目标功能区">
+                  <option value="ai">降 AI 检测</option>
+                  <option value="plagiarism">降查重率</option>
+                  <option value="polish">学术润色</option>
+                  <option value="correction">智能纠错</option>
+                </select>
+                <button id="paperPushButton" class="secondary-button" type="button">推送</button>
+              </div>
+            </div>
+          </section>
         </section>
 
         <section class="workbench-grid outline-grid">
@@ -357,6 +380,6 @@
     </main>
   </div>
 
-  <script src="/app.js?v=20260504-editor-paragraphs"></script>
+  <script src="/app.js?v=20260504-template-upload"></script>
 </body>
 </html>

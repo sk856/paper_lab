@@ -4,12 +4,20 @@
 from __future__ import annotations
 
 import argparse
+import base64
+import io
 import json
 import mimetypes
 import os
 import re
+import shutil
+import subprocess
+import sys
+import tempfile
 import threading
+import traceback
 import webbrowser
+from datetime import datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlparse
 
@@ -35,12 +43,29 @@ from modules.reference_manager import (
     determine_reference_mode,
     process_references_append_mode,
     process_references_reorder_mode,
+    reorder_references_for_full_paper,
     is_reference_section
 )
 from pages.api_config_support import merge_with_preset_defaults
 
 PROJECT_DIR = os.path.dirname(os.path.abspath(__file__))
 WEB_DIR = os.path.join(PROJECT_DIR, 'web')
+SERVER_ERROR_LOG = os.path.join(PROJECT_DIR, 'server_errors.log')
+
+
+def _write_server_error_log(exc, payload=None):
+    try:
+        with open(SERVER_ERROR_LOG, 'a', encoding='utf-8') as handle:
+            handle.write(f'[{datetime.now().isoformat(timespec="seconds")}] {type(exc).__name__}: {exc}\n')
+            if payload is not None:
+                safe_payload = dict(payload or {})
+                if 'dataUrl' in safe_payload:
+                    safe_payload['dataUrl'] = '<omitted>'
+                handle.write(json.dumps(safe_payload, ensure_ascii=False)[:4000] + '\n')
+            handle.write(traceback.format_exc())
+            handle.write('\n---\n')
+    except Exception:
+        pass
 
 
 def _strip_outline_title_markup(title):
@@ -92,6 +117,545 @@ def _is_reference_linkable_section_title(title):
         'keywords', 'keywords', 'key words'.replace(' ', ''),
         '参考文献', 'references', 'bibliography',
     }
+
+
+TEMPLATE_HEADING_PATTERNS = (
+    (r'^\s{0,8}#{1,6}\s+(.+)$', None),
+    (r'^\s{0,8}(摘要|中文摘要|英文摘要|abstract|关键词|keywords|引言|绪论|结论|参考文献|references|附录)\s*$', 1),
+    (r'^\s{0,8}第[一二三四五六七八九十百千万\d]+章\s*[:：]?\s*(.+)$', 1),
+    (r'^\s{0,8}第[一二三四五六七八九十百千万\d]+节\s*[:：]?\s*(.+)$', 2),
+    (r'^\s{0,8}(\d+)[、.．]\s*[^\d\s].{1,80}$', 1),
+    (r'^\s{0,8}(\d+)\s+[^\d\s].{1,80}$', 1),
+    (r'^\s{0,8}(\d+\.\d+)\s+.{1,80}$', 2),
+    (r'^\s{0,8}(\d+\.\d+\.\d+)\s+.{1,80}$', 3),
+    (r'^\s{0,8}[一二三四五六七八九十]+[、.．]\s*(.{1,80})$', 2),
+    (r'^\s{0,8}（[一二三四五六七八九十]+）\s*(.{1,80})$', 3),
+)
+
+
+def _clean_template_heading(text):
+    text = re.sub(r'\s+', ' ', str(text or '')).strip()
+    text = text.strip('：:;；,.，。')
+    if not text or len(text) > 120:
+        return ''
+    return text
+
+
+def _heading_from_line(line):
+    raw = _clean_template_heading(line)
+    if not raw:
+        return None
+    if re.search(r'[。！？!?；;]$', raw) and not re.match(r'^\s{0,8}#{1,6}\s+', line or ''):
+        return None
+    for pattern, level in TEMPLATE_HEADING_PATTERNS:
+        match = re.match(pattern, raw, flags=re.IGNORECASE)
+        if not match:
+            continue
+        if pattern.startswith('^\\s{0,8}#{1,6}'):
+            level = min(6, len(re.match(r'^\s*(#{1,6})', raw).group(1)))
+            title = re.sub(r'^\s*#{1,6}\s+', '', raw).strip()
+        elif level == 1 and match.lastindex == 1 and match.group(1) != raw:
+            title = raw
+        else:
+            title = raw
+        title = _clean_template_heading(title)
+        if title:
+            return {'level': int(level or 1), 'title': title}
+    return None
+
+
+def _dedupe_template_headings(headings, limit=120):
+    result = []
+    seen = set()
+    for item in headings:
+        title = _clean_template_heading((item or {}).get('title', ''))
+        if not title:
+            continue
+        level = max(1, min(6, int((item or {}).get('level') or 1)))
+        key = (level, re.sub(r'\s+', '', title).lower())
+        if key in seen:
+            continue
+        seen.add(key)
+        result.append({'level': level, 'title': title})
+        if len(result) >= limit:
+            break
+    return result
+
+
+def _headings_from_plain_text(text):
+    headings = []
+    for line in str(text or '').splitlines():
+        heading = _heading_from_line(line)
+        if heading:
+            headings.append(heading)
+    return _dedupe_template_headings(headings)
+
+
+TOC_PAGE_TOKEN_PATTERN = r'(?:第?\s*\d{1,4}\s*页?|[ivxlcdmIVXLCDM]{1,10}|[ⅠⅡⅢⅣⅤⅥⅦⅧⅨⅩⅪⅫ]{1,8}|[一二三四五六七八九十百千万]{1,8})'
+TOC_LEADER_PATTERN = r'(?:\.{2,}|…+|⋯+|·{2,}|•{2,}|_{2,}|-{2,})'
+
+
+def _is_toc_title(line):
+    text = re.sub(r'\s+', ' ', str(line or '')).strip().strip('：:')
+    if not text:
+        return False
+    compact = re.sub(r'\s+', '', text).lower()
+    return compact in {'目录', '目次', 'contents', 'tableofcontents'}
+
+
+def _is_standalone_toc_page_number(line):
+    text = re.sub(r'\s+', '', str(line or '')).strip()
+    return bool(text and re.fullmatch(TOC_PAGE_TOKEN_PATTERN, text, flags=re.IGNORECASE))
+
+
+def _strip_toc_page_number(line):
+    raw = str(line or '').replace('\u3000', ' ').strip()
+    if not raw:
+        return ''
+    text = re.sub(
+        rf'\s*{TOC_LEADER_PATTERN}\s*{TOC_PAGE_TOKEN_PATTERN}\s*$',
+        '',
+        raw,
+        flags=re.IGNORECASE,
+    ).strip()
+    text = re.sub(rf'[\t ]{{2,}}{TOC_PAGE_TOKEN_PATTERN}\s*$', '', text, flags=re.IGNORECASE).strip()
+    text = re.sub(r'\s+', ' ', text).strip()
+    candidate = re.sub(rf'\s+{TOC_PAGE_TOKEN_PATTERN}\s*$', '', text, flags=re.IGNORECASE).strip()
+    if candidate != text and _heading_from_line(candidate):
+        text = candidate
+    return _clean_template_heading(text)
+
+
+def _has_toc_page_marker(line):
+    raw = str(line or '')
+    if re.search(rf'{TOC_LEADER_PATTERN}\s*{TOC_PAGE_TOKEN_PATTERN}\s*$', raw, flags=re.IGNORECASE):
+        return True
+    if re.search(rf'[\t ]{{2,}}{TOC_PAGE_TOKEN_PATTERN}\s*$', raw, flags=re.IGNORECASE):
+        return True
+    return _strip_toc_page_number(raw) != _clean_template_heading(raw)
+
+
+def _template_heading_key(title):
+    key = re.sub(r'\s+', '', _clean_template_heading(title)).lower()
+    if key in {'摘要', '中文摘要', '内容摘要'}:
+        return '中文摘要'
+    if key in {'abstract', '英文摘要', 'englishabstract'}:
+        return '英文摘要'
+    return key
+
+
+def _is_probable_body_start(line):
+    raw = _clean_template_heading(line)
+    if not raw:
+        return False
+    return bool(re.match(
+        r'^(摘要|中文摘要|英文摘要|abstract|关键词|keywords|引言|绪论|第[一二三四五六七八九十百千万\d]+章)',
+        raw,
+        flags=re.IGNORECASE,
+    ))
+
+
+def _extract_toc_lines(text):
+    raw_lines = str(text or '').replace('\r\n', '\n').replace('\r', '\n').replace('\f', '\n\f\n').split('\n')
+    toc_index = next((index for index, line in enumerate(raw_lines[:120]) if _is_toc_title(line)), -1)
+    if toc_index < 0:
+        return []
+
+    collected = []
+    seen = set()
+    blank_count = 0
+    noise_count = 0
+    scanned = 0
+    marker_count = 0
+    for raw_line in raw_lines[toc_index + 1:]:
+        scanned += 1
+        if scanned > 320:
+            break
+        if str(raw_line).strip() == '\f':
+            if len(collected) >= 2 and blank_count >= 1:
+                break
+            blank_count += 1
+            continue
+        if _is_toc_title(raw_line):
+            continue
+        if not str(raw_line or '').strip():
+            if collected:
+                blank_count += 1
+                if blank_count >= 6 and len(collected) >= 2:
+                    break
+            continue
+        if _is_standalone_toc_page_number(raw_line):
+            continue
+
+        line = _strip_toc_page_number(raw_line)
+        heading = _heading_from_line(line)
+        has_marker = _has_toc_page_marker(raw_line)
+        key = _template_heading_key(line)
+
+        if heading and collected and not has_marker:
+            if (
+                key in seen
+                or (
+                    len(collected) >= 2
+                    and _is_probable_body_start(line)
+                    and (blank_count >= 1 or marker_count >= 2)
+                )
+            ):
+                break
+
+        if heading:
+            collected.append(line)
+            seen.add(key)
+            if has_marker:
+                marker_count += 1
+            blank_count = 0
+            noise_count = 0
+            if len(collected) >= 120:
+                break
+            continue
+
+        if collected:
+            noise_count += 1
+            if noise_count >= 8 and len(collected) >= 2:
+                break
+
+    return collected
+
+
+def _headings_from_toc_text(text):
+    headings = []
+    for line in _extract_toc_lines(text):
+        heading = _heading_from_line(line)
+        if heading:
+            headings.append(heading)
+    return _dedupe_template_headings(headings)
+
+
+def _headings_from_outline_like_text(text):
+    raw_lines = [line for line in str(text or '').splitlines() if _clean_template_heading(line)]
+    if not raw_lines or len(raw_lines) > 180 or len(str(text or '')) > 30000:
+        return []
+    headings = _headings_from_plain_text('\n'.join(raw_lines))
+    if len(headings) < 2:
+        return []
+    return headings
+
+
+def _headings_from_template_text(text, allow_outline_fallback=False):
+    headings = _headings_from_toc_text(text)
+    if headings or not allow_outline_fallback:
+        return headings
+    return _headings_from_outline_like_text(text)
+
+
+def _decode_template_text_bytes(data):
+    for encoding in ('utf-8-sig', 'utf-8', 'gb18030', 'gbk', 'utf-16', 'utf-16le'):
+        try:
+            text = data.decode(encoding)
+        except Exception:
+            continue
+        if text and text.count('\ufffd') < max(2, len(text) // 100):
+            return text
+    return data.decode('utf-8', errors='ignore')
+
+
+def _parse_doc_like_text(data):
+    head = data[:4096].lstrip().lower()
+    if head.startswith(b'{\\rtf'):
+        text = _decode_template_text_bytes(data)
+        text = re.sub(r'\\par[d]?|\\line', '\n', text)
+        text = re.sub(r'\\u(-?\d+)\??', lambda m: chr(int(m.group(1)) % 65536), text)
+        text = re.sub(r'\\[a-zA-Z]+-?\d* ?', '', text)
+        text = re.sub(r'[{}]', '', text)
+        return _headings_from_template_text(text)
+    if b'<html' in head or b'<!doctype html' in head or b'<body' in head:
+        text = _decode_template_text_bytes(data)
+        text = re.sub(r'(?is)<(h[1-6]|p|div|br|li)[^>]*>', '\n', text)
+        text = re.sub(r'(?is)<[^>]+>', '', text)
+        text = (text.replace('&nbsp;', ' ').replace('&amp;', '&')
+                    .replace('&lt;', '<').replace('&gt;', '>'))
+        return _headings_from_template_text(text)
+    if not data.startswith(b'\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1'):
+        return _headings_from_template_text(_decode_template_text_bytes(data))
+    return []
+
+
+def _extract_doc_binary_text_candidates(data):
+    chunks = []
+    for encoding in ('utf-16le', 'gb18030'):
+        try:
+            text = data.decode(encoding, errors='ignore')
+        except Exception:
+            continue
+        text = re.sub(r'[\x00-\x08\x0b\x0c\x0e-\x1f]+', '\n', text)
+        text = re.sub(r'\s{2,}', '\n', text)
+        chunks.append(text)
+
+    ascii_like = re.sub(rb'[\x00-\x08\x0b\x0c\x0e-\x1f]+', b'\n', data)
+    try:
+        chunks.append(ascii_like.decode('gb18030', errors='ignore'))
+    except Exception:
+        pass
+    return '\n'.join(chunks)
+
+
+def _parse_doc_binary_heuristic(data):
+    text = _extract_doc_binary_text_candidates(data)
+    if not text:
+        return []
+    lines = []
+    for raw_line in text.splitlines():
+        line = _clean_template_heading(raw_line)
+        if not line:
+            continue
+        if any(keyword in line for keyword in ('Evaluation Only', 'Microsoft Word', 'Word.Document')):
+            continue
+        lines.append(line)
+    return _headings_from_template_text('\n'.join(lines))
+
+
+def _parse_docx_template(data):
+    from docx import Document
+
+    document = Document(io.BytesIO(data))
+    paragraph_texts = []
+    for paragraph in document.paragraphs:
+        text = _clean_template_heading(paragraph.text)
+        if text:
+            paragraph_texts.append(text)
+    return _headings_from_template_text('\n'.join(paragraph_texts))
+
+
+def _parse_doc_with_soffice(path, temp_dir):
+    soffice = _find_soffice()
+    if not soffice:
+        return []
+    subprocess.run(
+        [soffice, '--headless', '--convert-to', 'txt:Text', '--outdir', temp_dir, path],
+        check=True,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        timeout=30,
+    )
+    txt_path = os.path.join(temp_dir, os.path.splitext(os.path.basename(path))[0] + '.txt')
+    if not os.path.isfile(txt_path):
+        return []
+    with open(txt_path, 'r', encoding='utf-8', errors='ignore') as handle:
+        return _headings_from_template_text(handle.read())
+
+
+def _find_soffice():
+    env_candidates = []
+    for key in ('SOFFICE_PATH', 'LIBREOFFICE_HOME'):
+        value = os.environ.get(key, '').strip()
+        if not value:
+            continue
+        env_candidates.append(value if value.lower().endswith('.exe') else os.path.join(value, 'program', 'soffice.exe'))
+
+    project_candidates = (
+        os.path.join(PROJECT_DIR, 'tools', 'LibreOffice', 'program', 'soffice.exe'),
+        os.path.join(PROJECT_DIR, 'tools', 'LibreOfficePortable', 'App', 'libreoffice', 'program', 'soffice.exe'),
+        os.path.join(PROJECT_DIR, 'LibreOffice', 'program', 'soffice.exe'),
+    )
+    system_candidates = (
+        r'C:\Program Files\LibreOffice\program\soffice.exe',
+        r'C:\Program Files (x86)\LibreOffice\program\soffice.exe',
+    )
+    return (
+        shutil.which('soffice')
+        or shutil.which('libreoffice')
+        or next((candidate for candidate in [*env_candidates, *project_candidates, *system_candidates] if os.path.isfile(candidate)), None)
+    )
+
+
+def _convert_doc_to_docx_with_soffice(path, temp_dir):
+    soffice = _find_soffice()
+    if not soffice:
+        return ''
+    subprocess.run(
+        [soffice, '--headless', '--convert-to', 'docx', '--outdir', temp_dir, path],
+        check=True,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        timeout=45,
+    )
+    docx_path = os.path.join(temp_dir, os.path.splitext(os.path.basename(path))[0] + '.docx')
+    return docx_path if os.path.isfile(docx_path) else ''
+
+
+def _convert_doc_to_docx_with_word_subprocess(path, temp_dir):
+    output_path = os.path.join(temp_dir, 'template_converted.docx')
+    script = r'''
+import os
+import sys
+import pythoncom
+import win32com.client
+
+source_path = os.path.abspath(sys.argv[1])
+output_path = os.path.abspath(sys.argv[2])
+pythoncom.CoInitialize()
+word = None
+document = None
+try:
+    word = win32com.client.DispatchEx('Word.Application')
+    word.Visible = False
+    word.DisplayAlerts = 0
+    document = word.Documents.Open(source_path, ConfirmConversions=False, ReadOnly=True, AddToRecentFiles=False, Visible=False)
+    document.SaveAs2(output_path, FileFormat=16)
+finally:
+    if document is not None:
+        document.Close(False)
+    if word is not None:
+        word.Quit()
+    pythoncom.CoUninitialize()
+'''
+    subprocess.run(
+        [sys.executable, '-c', script, path, output_path],
+        check=True,
+        capture_output=True,
+        text=True,
+        encoding='utf-8',
+        errors='replace',
+        timeout=8,
+    )
+    return output_path if os.path.isfile(output_path) else ''
+
+
+def _parse_doc_via_docx_conversion(path, temp_dir):
+    errors = []
+    for convert in (_convert_doc_to_docx_with_soffice, _convert_doc_to_docx_with_word_subprocess):
+        try:
+            docx_path = convert(path, temp_dir)
+            if not docx_path:
+                continue
+            with open(docx_path, 'rb') as handle:
+                headings = _parse_docx_template(handle.read())
+            if headings:
+                return headings
+        except subprocess.TimeoutExpired:
+            errors.append('DOC 转 DOCX 超时')
+        except Exception as exc:
+            errors.append(str(exc))
+    if errors:
+        raise ValueError('；'.join(errors[:2]))
+    return []
+
+
+def _parse_doc_with_word_subprocess(path):
+    script = r'''
+import json
+import os
+import sys
+import pythoncom
+import win32com.client
+
+pythoncom.CoInitialize()
+word = None
+document = None
+try:
+    word = win32com.client.DispatchEx('Word.Application')
+    word.Visible = False
+    document = word.Documents.Open(os.path.abspath(sys.argv[1]), ReadOnly=True, AddToRecentFiles=False)
+    lines = []
+    for paragraph in document.Paragraphs:
+        text = str(paragraph.Range.Text or '').replace('\r', '').replace('\x07', '').strip()
+        if text:
+            lines.append(text)
+    print(json.dumps(lines[:400], ensure_ascii=False))
+finally:
+    if document is not None:
+        document.Close(False)
+    if word is not None:
+        word.Quit()
+    pythoncom.CoUninitialize()
+'''
+    completed = subprocess.run(
+        [sys.executable, '-c', script, path],
+        check=True,
+        capture_output=True,
+        text=True,
+        encoding='utf-8',
+        errors='replace',
+        timeout=8,
+    )
+    payload = json.loads((completed.stdout or '[]').strip() or '[]')
+    if isinstance(payload, list):
+        return _headings_from_template_text('\n'.join(str(item) for item in payload))
+    return []
+
+
+def _parse_doc_template(data):
+    headings = _parse_doc_like_text(data)
+    if headings:
+        return headings
+    with tempfile.TemporaryDirectory(prefix='paper_template_') as temp_dir:
+        path = os.path.join(temp_dir, 'template.doc')
+        with open(path, 'wb') as handle:
+            handle.write(data)
+        errors = []
+        try:
+            headings = _parse_doc_via_docx_conversion(path, temp_dir)
+            if headings:
+                return headings
+        except Exception as exc:
+            errors.append(str(exc))
+        try:
+            headings = _parse_doc_with_soffice(path, temp_dir)
+            if headings:
+                return headings
+        except Exception as exc:
+            errors.append(str(exc))
+        try:
+            headings = _parse_doc_binary_heuristic(data)
+            if headings:
+                return headings
+        except Exception as exc:
+            errors.append(str(exc))
+        try:
+            headings = _parse_doc_with_word_subprocess(path)
+            if headings:
+                return headings
+        except subprocess.TimeoutExpired:
+            errors.append('Word 后台打开 DOC 超时')
+        except Exception as exc:
+            errors.append(str(exc))
+    clean_errors = []
+    for error in errors:
+        error = str(error).strip()
+        if not error:
+            continue
+        if 'Command ' in error and 'timed out' in error:
+            error = 'Word 后台打开 DOC 超时'
+        if error not in clean_errors:
+            clean_errors.append(error)
+    detail = f'：{"；".join(clean_errors[:2])}' if clean_errors else ''
+    raise ValueError(f'DOC 模板读取失败，请运行 installers\\install_libreoffice_windows.ps1 安装 LibreOffice 后重试，或将模板另存为 DOCX/PDF 后上传{detail}')
+
+
+def _parse_pdf_template(data):
+    import fitz
+
+    doc = fitz.open(stream=data, filetype='pdf')
+    lines = []
+    for page_index in range(min(len(doc), 30)):
+        page = doc[page_index]
+        text = page.get_text('text') or ''
+        lines.extend(text.splitlines())
+    doc.close()
+    return _headings_from_template_text('\n'.join(lines))
+
+
+def _parse_template_headings(filename, mime_type, data):
+    suffix = os.path.splitext(filename or '')[1].lower()
+    if suffix == '.doc':
+        return _parse_doc_template(data)
+    if suffix == '.docx':
+        return _parse_docx_template(data)
+    if suffix == '.pdf':
+        return _parse_pdf_template(data)
+    if suffix in {'.txt', '.md', '.markdown'} or str(mime_type or '').startswith('text/'):
+        return _headings_from_template_text(data.decode('utf-8', errors='ignore'), allow_outline_fallback=True)
+    raise ValueError('仅支持 DOC、DOCX、PDF、TXT、Markdown 模板')
 
 
 class WebWorkbench:
@@ -239,6 +803,28 @@ class WebWorkbench:
         models = self.api_client.fetch_models(api_id or provider_type, cfg=cfg)
         return {'models': models}
 
+    def parse_template(self, payload):
+        filename = os.path.basename(str(payload.get('filename', '') or '论文模板')).strip() or '论文模板'
+        mime_type = str(payload.get('mimeType', '') or '').strip()
+        data_url = str(payload.get('dataUrl', '') or '')
+        if ',' not in data_url:
+            raise ValueError('模板文件内容无效')
+        raw = base64.b64decode(data_url.split(',', 1)[1], validate=True)
+        if not raw:
+            raise ValueError('模板文件为空')
+        if len(raw) > 12 * 1024 * 1024:
+            raise ValueError('模板文件过大，请上传 12MB 以内的 DOC、DOCX、PDF、TXT 或 Markdown 文件')
+        headings = _parse_template_headings(filename, mime_type, raw)
+        if not headings:
+            raise ValueError('未识别到可用目录结构，请上传包含目录的论文模板')
+        levels = sorted({item['level'] for item in headings})
+        return {
+            'filename': filename,
+            'fileType': os.path.splitext(filename)[1].lower().lstrip('.') or mime_type or 'template',
+            'summary': f'已读取目录结构：{len(headings)} 个标题，层级包含：{", ".join(str(level) for level in levels)}',
+            'headings': headings,
+        }
+
     def analyze(self, text):
         ai = self.ai_reducer.scan_ai_features(text)
         repeat = self.plagiarism.simulate_repeat_risk(text)
@@ -253,7 +839,7 @@ class WebWorkbench:
         action = str(payload.get('action', '') or '').strip()
         text = str(payload.get('text', '') or '').strip()
         source_text = str(payload.get('sourceText', '') or '').strip()
-        if not text:
+        if not text and not (action == 'references' and payload.get('allSections')):
             raise ValueError('请输入需要处理的文本')
 
         if action == 'analyze':
@@ -304,9 +890,20 @@ class WebWorkbench:
             subject = str(payload.get('subject', '') or '').strip()
             paper_style = str(payload.get('paperStyle', '学术论文') or '学术论文')
             reference_style = str(payload.get('referenceStyle', 'GB/T 7714') or 'GB/T 7714')
+            total_word_count = str(payload.get('totalWordCount', '') or '').strip()
+            outline_section_limit = str(payload.get('outlineSectionLimit', '') or '').strip()
+            template_structure = payload.get('templateStructure')
             if not topic:
                 raise ValueError('请输入论文题目')
-            result = self.paper_writer.generate_outline(topic, style=paper_style, reference_style=reference_style, subject=subject)
+            result = self.paper_writer.generate_outline(
+                topic,
+                style=paper_style,
+                reference_style=reference_style,
+                subject=subject,
+                total_word_count=total_word_count,
+                outline_section_limit=outline_section_limit,
+                template_structure=template_structure,
+            )
             return {'result': result, 'analysis': {}}
         if action == 'section':
             outline = str(payload.get('outline', '') or '').strip()
@@ -324,7 +921,13 @@ class WebWorkbench:
                 raise ValueError('请输入章节标题')
 
             # Generate section content
-            raw_result = self.paper_writer.write_section(outline, section_title, context=context, word_count=word_count, reference_style=reference_style)
+            raw_result = self.paper_writer.write_section(
+                outline,
+                section_title,
+                context=context,
+                word_count=word_count,
+                reference_style=reference_style,
+            )
 
             # Determine reference processing mode
             mode = determine_reference_mode(section_title, all_sections)
@@ -389,6 +992,24 @@ class WebWorkbench:
             return {'result': result, 'analysis': self.analyze(result)}
         if action == 'references':
             reference_style = str(payload.get('referenceStyle', 'GB/T 7714') or 'GB/T 7714')
+            all_sections = payload.get('allSections', [])
+            if all_sections:
+                result = reorder_references_for_full_paper(all_sections, reference_style)
+                if not result['reference_content']:
+                    raise ValueError('没有找到可整理的参考文献条目')
+                return {
+                    'result': result['reference_content'],
+                    'content': result['reference_content'],
+                    'references': {
+                        'mode': 'reorder',
+                        'title': result['reference_title'],
+                        'content': result['reference_content'],
+                        'entryCount': result['entry_count'],
+                        'citationCount': result['citation_count'],
+                    },
+                    'updatedSections': result['updated_sections'],
+                    'analysis': {'citation': self.plagiarism.check_citation_format(result['reference_content'])},
+                }
             result = self.paper_writer.format_references(text, style=reference_style)
             return {'result': result, 'analysis': {'citation': self.plagiarism.check_citation_format(result)}}
         if action == 'batch_write':
@@ -529,11 +1150,14 @@ class RequestHandler(BaseHTTPRequestHandler):
                 data = self.workbench.activate_api(payload)
             elif parsed.path == '/api/config/models':
                 data = self.workbench.fetch_models_for_payload(payload)
+            elif parsed.path == '/api/template/parse':
+                data = self.workbench.parse_template(payload)
             else:
                 self._send_json({'ok': False, 'error': 'Not found'}, status=404)
                 return
             self._send_json({'ok': True, 'data': data})
         except Exception as exc:
+            _write_server_error_log(exc, payload if 'payload' in locals() else None)
             self._send_json({'ok': False, 'error': str(exc)}, status=400)
 
     def _serve_static(self, path):
