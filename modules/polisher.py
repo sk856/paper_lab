@@ -28,6 +28,17 @@ class AcademicPolisher:
             'action': action,
         }
 
+    @staticmethod
+    def _append_custom_prompt(prompt: str, custom_prompt: str = '') -> str:
+        custom = str(custom_prompt or '').strip()
+        if not custom:
+            return prompt
+        return (
+            f'{prompt.rstrip()}\n\n'
+            f'用户启用的补充提示词：\n{custom}\n\n'
+            '请在不违背上述基本任务，并保留事实、数据、公式、术语和引用编号的前提下执行。'
+        )
+
     def run_task(
         self,
         text: str,
@@ -36,6 +47,7 @@ class AcademicPolisher:
         execution_mode: str = '标准模式',
         topic: str = '',
         notes: str = '',
+        custom_prompt: str = '',
     ) -> str:
         """统一任务入口。"""
         text = (text or '').strip()
@@ -59,9 +71,10 @@ class AcademicPolisher:
                 'notes': notes,
             },
         )
+        prompt = self._append_custom_prompt(rendered['prompt'], custom_prompt)
         temperature = self.TEMPERATURE_MAP.get(execution_mode, 0.4)
         return self.api.call_sync(
-            rendered['prompt'],
+            prompt,
             rendered['system'],
             temperature=temperature,
             usage_context=self._usage_context('run_task'),

@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import base64
+import hashlib
 import io
 import json
 import mimetypes
@@ -19,11 +20,12 @@ import traceback
 import webbrowser
 from datetime import datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from urllib.parse import urlparse
+from urllib.parse import unquote, urlparse
 
 from modules.ai_reducer import AIReducer
 from modules.api_client import APIClient
 from modules.config import ConfigManager, resolve_model_display_name
+from modules.data_chart_assistant import DataChartAssistant
 from modules.intelligent_corrector import CATEGORY_LABELS, CATEGORY_ORDER, IntelligentCorrector
 from modules.plagiarism import PlagiarismReducer
 from modules.polisher import AcademicPolisher
@@ -40,6 +42,7 @@ from modules.reference_manager import (
     parse_reference_entries,
     collect_citation_reference_keys,
     reference_entry_key,
+    normalize_reference_entry_text,
     determine_reference_mode,
     process_references_append_mode,
     process_references_reorder_mode,
@@ -50,6 +53,7 @@ from pages.api_config_support import merge_with_preset_defaults
 
 PROJECT_DIR = os.path.dirname(os.path.abspath(__file__))
 WEB_DIR = os.path.join(PROJECT_DIR, 'web')
+DATA_CHART_ASSET_DIR = os.path.join(WEB_DIR, 'generated', 'charts')
 SERVER_ERROR_LOG = os.path.join(PROJECT_DIR, 'server_errors.log')
 
 
@@ -66,6 +70,333 @@ def _write_server_error_log(exc, payload=None):
             handle.write('\n---\n')
     except Exception:
         pass
+
+
+def _safe_asset_slug(value):
+    text = re.sub(r'[^A-Za-z0-9_-]+', '-', str(value or '').strip())
+    text = re.sub(r'-+', '-', text).strip('-')
+    return text[:36] or 'chart'
+
+
+def _persist_data_chart_image(data_url, title='chart'):
+    value = str(data_url or '')
+    match = re.match(r'^data:image/(png|jpeg|jpg);base64,([A-Za-z0-9+/=\s]+)$', value)
+    if not match:
+        return value
+    image_type = 'jpg' if match.group(1).lower() in {'jpg', 'jpeg'} else 'png'
+    raw = base64.b64decode(re.sub(r'\s+', '', match.group(2)))
+    digest = hashlib.sha256(raw).hexdigest()[:14]
+    stamp = datetime.now().strftime('%Y%m%d%H%M%S')
+    filename = f'{stamp}-{_safe_asset_slug(title)}-{digest}.{image_type}'
+    os.makedirs(DATA_CHART_ASSET_DIR, exist_ok=True)
+    with open(os.path.join(DATA_CHART_ASSET_DIR, filename), 'wb') as handle:
+        handle.write(raw)
+    return f'/generated/charts/{filename}'
+
+
+def _data_chart_reference_payload(result):
+    entries = []
+    seen = set()
+    for item in result.get('referenceEntries', []) if isinstance(result, dict) else []:
+        if isinstance(item, dict):
+            text = item.get('text', '')
+        else:
+            text = item
+        entry_text = normalize_reference_entry_text(text)
+        key = reference_entry_key(entry_text)
+        if not key or key in seen:
+            continue
+        seen.add(key)
+        payload = {'text': entry_text, 'key': key}
+        if isinstance(item, dict):
+            for field in ('sourceName', 'publisher', 'url', 'source', 'note'):
+                value = str(item.get(field, '') or '').strip()
+                if value:
+                    payload[field] = value
+        entries.append(payload)
+    return entries
+
+
+_DATA_CHART_SOURCE_SIGNAL_RE = re.compile(
+    r'('
+    r'\u6570\u636e\u6765\u6e90|\u6570\u636e\u6765\u81ea|\u6765\u6e90\u4e3a|\u6765\u6e90\u4e8e|'
+    r'\u6839\u636e|\u4f9d\u636e|\u7edf\u8ba1\u62a5\u544a|\u5e74\u9274|\u516c\u62a5|'
+    r'\u767d\u76ae\u4e66|\u53d1\u5e03|\u4e2d\u56fd\u4e92\u8054\u7f51\u7edc\u4fe1\u606f\u4e2d\u5fc3|CNNIC|'
+    r'according\s+to|data\s+source|data\s+from|source:|published\s+by|released\s+by'
+    r')',
+    re.IGNORECASE,
+)
+
+
+def _data_chart_source_terms(reference_entries):
+    terms = []
+    seen = set()
+    ignored_ascii_terms = {
+        'http', 'https', 'www', 'com', 'cn', 'net', 'org', 'edu', 'gov',
+        'data', 'source', 'url', 'html', 'htm', 'index',
+    }
+
+    def add(value):
+        text = str(value or '').strip()
+        if not text:
+            return
+        candidates = [text]
+        if text.startswith(('http://', 'https://')):
+            host = urlparse(text).netloc.lower().removeprefix('www.')
+            if host:
+                candidates.append(host)
+        candidates.extend(
+            part.strip()
+            for part in re.split(r'[\s,;:，；：。.!?！？\[\]（）()<>]+', text)
+            if part.strip()
+        )
+        for candidate in candidates:
+            normalized = re.sub(r'\s+', ' ', candidate).strip()
+            key = normalized.lower()
+            if len(normalized) < 2 or len(normalized) > 90 or key in seen:
+                continue
+            if key in ignored_ascii_terms:
+                continue
+            if re.fullmatch(r'[a-z0-9_-]+', key) and len(key) < 5:
+                continue
+            seen.add(key)
+            terms.append(normalized)
+
+    for entry in reference_entries or []:
+        if not isinstance(entry, dict):
+            continue
+        for field in ('sourceName', 'publisher', 'url', 'source'):
+            add(entry.get(field, ''))
+    return terms[:24]
+
+
+def _data_chart_sentence_spans(text):
+    content = str(text or '')
+    start = 0
+
+    def is_period_boundary(index):
+        previous = content[index - 1] if index > 0 else ''
+        next_char = content[index + 1] if index + 1 < len(content) else ''
+        if previous.isdigit() and next_char.isdigit():
+            return False
+        if previous.isalnum() and next_char.isalnum():
+            return False
+        return True
+
+    for index, char in enumerate(content):
+        boundary = char in '\u3002\uff01\uff1f!?' or (char == '.' and is_period_boundary(index))
+        if char == '\n' or boundary:
+            end = index + (1 if boundary else 0)
+            sentence = content[start:end]
+            if sentence.strip():
+                yield start, end, sentence
+            start = index + 1
+    if start < len(content):
+        sentence = content[start:]
+        if sentence.strip():
+            yield start, len(content), sentence
+
+
+def _data_chart_sentence_has_source(sentence, source_terms):
+    text = str(sentence or '')
+    if _DATA_CHART_SOURCE_SIGNAL_RE.search(text):
+        return True
+    lowered = text.lower()
+    return any(term.lower() in lowered for term in source_terms or [])
+
+
+def _data_chart_sentence_has_citation(sentence, citation):
+    return str(citation or '') in str(sentence or '')
+
+
+def _insert_citation_at_sentence_end(text, start, end, citation):
+    sentence = text[start:end]
+    stripped_end = start + len(sentence.rstrip())
+    insert_at = stripped_end
+    while insert_at > start and text[insert_at - 1] in '\u3002\uff01\uff1f!?.':
+        insert_at -= 1
+    return f'{text[:insert_at]}{citation}{text[insert_at:]}'
+
+
+def _citation_already_marks_source(text, citation, source_terms):
+    content = str(text or '')
+    citation_text = str(citation or '')
+    if not citation_text or citation_text not in content:
+        return False
+    for match in re.finditer(re.escape(citation_text), content):
+        window = content[max(0, match.start() - 180): min(len(content), match.end() + 80)]
+        if _data_chart_sentence_has_source(window, source_terms):
+            return True
+    return False
+
+
+def _insert_data_source_citation(text, citation, reference_entries):
+    content = str(text or '')
+    citation_text = str(citation or '').strip()
+    if not content or not citation_text:
+        return content
+
+    source_terms = _data_chart_source_terms(reference_entries)
+    if _citation_already_marks_source(content, citation_text, source_terms):
+        return content
+
+    working = re.sub(r'\s*' + re.escape(citation_text) + r'\s*$', '', content.rstrip())
+    spans = list(_data_chart_sentence_spans(working))
+    for start, end, sentence in spans:
+        stripped = sentence.strip()
+        if stripped.startswith('![') or stripped.startswith('<img'):
+            continue
+        if _data_chart_sentence_has_citation(sentence, citation_text):
+            return working
+        if _data_chart_sentence_has_source(sentence, source_terms):
+            return _insert_citation_at_sentence_end(working, start, end, citation_text)
+
+    for start, end, sentence in spans:
+        stripped = sentence.strip()
+        if not stripped or stripped.startswith('![') or stripped.startswith('<img'):
+            continue
+        return _insert_citation_at_sentence_end(working, start, end, citation_text)
+
+    return f'{working.rstrip()}{citation_text}'
+
+
+def _append_data_chart_references(all_sections, section_title, replacement_text, reference_entries, reference_style='GB/T 7714', original_text=''):
+    if not reference_entries:
+        return {
+            'content': replacement_text,
+            'references': None,
+            'updatedSections': [],
+            'citationNumber': None,
+        }
+
+    sections = list(all_sections or [])
+    ref_title = '# 参考文献'
+    existing_refs = []
+    current_position = len(sections)
+    current_found = False
+    for index, section in enumerate(sections):
+        title = str(section.get('title', '') or '').strip()
+        if title == section_title:
+            current_position = index
+            current_found = True
+        if _is_reference_section_title(title) or is_reference_section(title):
+            ref_title = title or ref_title
+            existing_refs = parse_reference_entries(section.get('content', ''))
+
+    current_entries = merge_reference_entry_lists(existing_refs, reference_entries)
+    existing_keys = {entry.get('key') for entry in existing_refs}
+    added_entries = [entry for entry in current_entries if entry.get('key') not in existing_keys]
+    if not added_entries and reference_entries:
+        added_entries = reference_entries[:1]
+
+    existing_number_map = build_reference_number_map(existing_refs)
+    max_existing_number = max(existing_number_map.keys(), default=0)
+    temp_entries = []
+    temp_number_by_key = {}
+    for index, entry in enumerate(reference_entries, start=1):
+        text = normalize_reference_entry_text(entry.get('text', ''))
+        key = reference_entry_key(text)
+        if not key:
+            continue
+        temp_number = max_existing_number + index
+        temp_number_by_key[key] = temp_number
+        temp_entries.append({'text': text, 'key': key, 'number': temp_number})
+
+    citation_numbers = [
+        temp_number_by_key.get(entry.get('key') or reference_entry_key(entry.get('text', '')))
+        for entry in reference_entries
+    ]
+    citation_numbers = [number for number in citation_numbers if number]
+    citation = ''
+    if citation_numbers:
+        citation = '[' + ','.join(str(number) for number in dict.fromkeys(citation_numbers)) + ']'
+
+    content_with_citation = _insert_data_source_citation(replacement_text, citation, reference_entries)
+
+    local_number_map = build_reference_number_map(temp_entries)
+    key_to_text = {}
+    for entry in current_entries:
+        key = entry.get('key') or reference_entry_key(entry.get('text', ''))
+        text = normalize_reference_entry_text(entry.get('text', ''))
+        if key and text:
+            key_to_text[key] = text
+
+    combined_current_map = dict(existing_number_map)
+    combined_current_map.update(local_number_map)
+    current_section_content = ''
+    for section in sections:
+        if str(section.get('title', '') or '').strip() == section_title:
+            current_section_content = str(section.get('content', '') or '')
+            break
+    original = str(original_text or '').strip()
+    if current_section_content:
+        if original and original in current_section_content:
+            current_content_for_order = current_section_content.replace(original, content_with_citation, 1)
+        else:
+            current_content_for_order = f'{current_section_content.rstrip()}\n\n{content_with_citation}'.strip()
+    else:
+        current_content_for_order = content_with_citation
+    ordered_keys = []
+    seen_keys = set()
+
+    def remember(key):
+        if key and key in key_to_text and key not in seen_keys:
+            seen_keys.add(key)
+            ordered_keys.append(key)
+
+    for index, section in enumerate(sections):
+        title = str(section.get('title', '') or '').strip()
+        if _is_reference_section_title(title) or is_reference_section(title):
+            continue
+        if index == current_position:
+            for key in collect_citation_reference_keys(current_content_for_order, combined_current_map):
+                remember(key)
+            continue
+        content = normalize_section_body(section.get('content', ''))
+        for key in collect_citation_reference_keys(content, existing_number_map):
+            remember(key)
+
+    if not current_found:
+        for key in collect_citation_reference_keys(content_with_citation, local_number_map):
+            remember(key)
+    for entry in current_entries:
+        remember(entry.get('key') or reference_entry_key(entry.get('text', '')))
+
+    full_entries = [
+        {'number': index, 'text': key_to_text[key], 'key': key}
+        for index, key in enumerate(ordered_keys, start=1)
+        if key_to_text.get(key)
+    ]
+    new_number_by_key = {entry['key']: entry['number'] for entry in full_entries}
+    for entry in existing_number_map.values():
+        entry['new_number'] = new_number_by_key.get(entry.get('key'))
+    for entry in local_number_map.values():
+        entry['new_number'] = new_number_by_key.get(entry.get('key'))
+
+    updated_content = rewrite_citations_with_entry_map(content_with_citation, combined_current_map)
+    updated_sections = []
+    for index, section in enumerate(sections):
+        if index == current_position:
+            continue
+        title = str(section.get('title', '') or '').strip()
+        if _is_reference_section_title(title) or is_reference_section(title):
+            continue
+        content = normalize_section_body(section.get('content', ''))
+        rewritten = rewrite_citations_with_entry_map(content, existing_number_map)
+        if rewritten != content:
+            updated_sections.append({'title': title, 'content': rewritten})
+
+    return {
+        'content': updated_content,
+        'references': {
+            'mode': 'reorder',
+            'title': ref_title,
+            'content': build_reference_body_from_entries(full_entries),
+            'entryCount': len(full_entries),
+        },
+        'updatedSections': updated_sections,
+        'citationNumber': next((entry.get('new_number') for entry in local_number_map.values() if entry.get('new_number')), None),
+    }
 
 
 def _strip_outline_title_markup(title):
@@ -105,7 +436,7 @@ def _section_match_key(title):
 
 
 def _is_reference_section_title(title):
-    return _section_match_key(title) in {'参考文献', 'references', 'bibliography'}
+    return _section_match_key(title) in {'参考文献', 'references', 'bibliography', 'reference'}
 
 
 def _is_reference_linkable_section_title(title):
@@ -668,6 +999,7 @@ class WebWorkbench:
         self.polisher = AcademicPolisher(self.api_client)
         self.paper_writer = PaperWriter(self.api_client)
         self.corrector = IntelligentCorrector(self.api_client)
+        self.data_chart = DataChartAssistant(self.api_client)
 
     def status(self):
         active_id = self.config.active_api
@@ -825,6 +1157,58 @@ class WebWorkbench:
             'headings': headings,
         }
 
+    def run_data_chart(self, payload):
+        action = str(payload.get('action', '') or '').strip()
+        target = payload.get('target') if isinstance(payload.get('target'), dict) else {}
+        if action == 'find':
+            return self.data_chart.find_targets(
+                payload.get('fullText', '') or payload.get('text', ''),
+                topic=payload.get('topic', ''),
+                outline=payload.get('outline', ''),
+                sections=payload.get('sections'),
+                limit=payload.get('limit', 8),
+            )
+        if action == 'search':
+            return self.data_chart.search_data(
+                query=payload.get('query', ''),
+                target=target,
+                full_text=payload.get('fullText', '') or payload.get('text', ''),
+                user_data=payload.get('userData', ''),
+            )
+        if action == 'generate':
+            result = self.data_chart.generate_chart(
+                table_text=payload.get('tableText', ''),
+                chart_type=payload.get('chartType', 'bar'),
+                title=payload.get('title', ''),
+                unit=payload.get('unit', ''),
+                target=target,
+            )
+            chart = result.get('chart') if isinstance(result, dict) else None
+            if isinstance(chart, dict):
+                image_url = _persist_data_chart_image(chart.get('dataUrl'), chart.get('title') or payload.get('title', 'chart'))
+                chart['imageUrl'] = image_url
+                if image_url:
+                    chart['dataUrl'] = image_url
+                title = chart.get('title') or payload.get('title') or '论文数据图表'
+                caption = chart.get('caption') or ''
+                result['figureMarkdown'] = f'![{title}]({image_url})\n\n图1 {caption}'
+            reference_entries = _data_chart_reference_payload(result)
+            reference_result = _append_data_chart_references(
+                payload.get('allSections', []),
+                target.get('sectionTitle', '') if isinstance(target, dict) else '',
+                result.get('replacementText', ''),
+                reference_entries,
+                payload.get('referenceStyle', 'GB/T 7714'),
+                target.get('originalText', '') if isinstance(target, dict) else '',
+            )
+            result['replacementText'] = reference_result['content']
+            result['referenceEntries'] = reference_entries
+            result['references'] = reference_result['references']
+            result['updatedSections'] = reference_result['updatedSections']
+            result['citationNumber'] = reference_result['citationNumber']
+            return result
+        raise ValueError('未知数据图表操作')
+
     def analyze(self, text):
         ai = self.ai_reducer.scan_ai_features(text)
         repeat = self.plagiarism.simulate_repeat_risk(text)
@@ -839,6 +1223,7 @@ class WebWorkbench:
         action = str(payload.get('action', '') or '').strip()
         text = str(payload.get('text', '') or '').strip()
         source_text = str(payload.get('sourceText', '') or '').strip()
+        custom_prompt = str(payload.get('customPrompt', '') or '').strip()
         if not text and not (action == 'references' and payload.get('allSections')):
             raise ValueError('请输入需要处理的文本')
 
@@ -846,25 +1231,33 @@ class WebWorkbench:
             return {'result': '', 'analysis': self.analyze(text)}
         if action == 'polish':
             mode = str(payload.get('polishMode', 'full') or 'full')
-            result = self.polisher.run_task(text, polish_type=mode)
+            result = self.polisher.run_task(
+                text,
+                task_type=str(payload.get('taskType', '章节正文') or '章节正文'),
+                polish_type=mode,
+                execution_mode=str(payload.get('executionMode', '标准模式') or '标准模式'),
+                topic=str(payload.get('topic', '') or ''),
+                notes=str(payload.get('notes', '') or ''),
+                custom_prompt=custom_prompt,
+            )
             return {'result': result, 'analysis': self.analyze(result)}
         if action == 'ai-light':
-            result = self.ai_reducer.rewrite_light(text)
+            result = self.ai_reducer.rewrite_light(text, custom_prompt=custom_prompt)
             return {'result': result, 'analysis': self.analyze(result)}
         if action == 'ai-deep':
-            result = self.ai_reducer.rewrite_deep(text)
+            result = self.ai_reducer.rewrite_deep(text, custom_prompt=custom_prompt)
             return {'result': result, 'analysis': self.analyze(result)}
         if action == 'ai-academic':
-            result = self.ai_reducer.rewrite_academic(text)
+            result = self.ai_reducer.rewrite_academic(text, custom_prompt=custom_prompt)
             return {'result': result, 'analysis': self.analyze(result)}
         if action == 'repeat-light':
-            result = self.plagiarism.reduce_light(text, source_text=source_text)
+            result = self.plagiarism.reduce_light(text, source_text=source_text, custom_prompt=custom_prompt)
             return {'result': result, 'analysis': self.analyze(result)}
         if action == 'repeat-medium':
-            result = self.plagiarism.reduce_medium(text, source_text=source_text)
+            result = self.plagiarism.reduce_medium(text, source_text=source_text, custom_prompt=custom_prompt)
             return {'result': result, 'analysis': self.analyze(result)}
         if action == 'repeat-deep':
-            result = self.plagiarism.reduce_deep(text, source_text=source_text)
+            result = self.plagiarism.reduce_deep(text, source_text=source_text, custom_prompt=custom_prompt)
             return {'result': result, 'analysis': self.analyze(result)}
         if action == 'citation':
             return {'result': '', 'analysis': {'citation': self.plagiarism.check_citation_format(text)}}
@@ -1152,6 +1545,8 @@ class RequestHandler(BaseHTTPRequestHandler):
                 data = self.workbench.fetch_models_for_payload(payload)
             elif parsed.path == '/api/template/parse':
                 data = self.workbench.parse_template(payload)
+            elif parsed.path == '/api/data-chart':
+                data = self.workbench.run_data_chart(payload)
             else:
                 self._send_json({'ok': False, 'error': 'Not found'}, status=404)
                 return
@@ -1161,7 +1556,7 @@ class RequestHandler(BaseHTTPRequestHandler):
             self._send_json({'ok': False, 'error': str(exc)}, status=400)
 
     def _serve_static(self, path):
-        relative = path.lstrip('/') or 'index.html'
+        relative = unquote(path.lstrip('/') or 'index.html')
         if relative.endswith('/'):
             relative += 'index.html'
         file_path = os.path.abspath(os.path.join(WEB_DIR, relative))

@@ -20,6 +20,14 @@ const state = {
   paperSectionFilter: '',
   paperPushTargets: {},
   paperTemplate: null,
+  dataChartTargets: [],
+  selectedDataChartTargetId: '',
+  dataChartResult: null,
+  dataChartSearchResult: null,
+  dataChartApproved: false,
+  promptTemplates: {},
+  activePromptScope: '',
+  selectedPromptTemplateId: '',
   selectedHistoryId: '',
   currentCorrectionIssues: [],
   currentCorrectionLabels: {},
@@ -39,6 +47,7 @@ const STORAGE_KEYS = {
 
 const FIELD_SELECTORS = [
   '#paperTopic', '#paperSubject', '#paperStyle', '#referenceStyle', '#sectionTitle', '#totalWordCountAuto', '#totalWordCount', '#wordCountAuto', '#wordCount', '#paperOutline', '#paperContext', '#paperResult',
+  '#dataChartFullText', '#dataChartQuery', '#dataChartType', '#dataChartUnit', '#dataChartTitle', '#dataChartDataTable', '#dataChartSourceList', '#dataChartResultText', '#dataChartDiff',
   '#aiInput', '#aiOutput', '#aiReview', '#aiDiff',
   '#plagiarismInput', '#plagiarismOutput', '#plagiarismOutputEditor', '#plagiarismSource', '#plagiarismReview', '#plagiarismDiff',
   '#polishTaskType', '#polishExecutionMode', '#polishTopic', '#polishNotes', '#polishInput', '#polishOutput', '#polishOutputEditor', '#polishReview', '#polishDiff',
@@ -47,6 +56,7 @@ const FIELD_SELECTORS = [
 
 const PAGE_LABELS = {
   paper: '论文写作',
+  datachart: '数据图表',
   ai: '降 AI 检测',
   plagiarism: '降查重率',
   polish: '学术润色',
@@ -61,6 +71,33 @@ const PAPER_ACTION_LABELS = {
   'batch-write': '撰写全部章节',
   abstract: '生成摘要',
   references: '整理参考文献',
+};
+
+const DEFAULT_PROMPT_TEMPLATES = {
+  ai: [
+    {
+      id: 'default',
+      name: '默认模板',
+      content: '请在保留原文事实、数据、公式、专业术语和引用编号的前提下，降低机械化表达，减少模板化连接词，调整句式节奏，使文本更像真实学术写作。输出时只给处理后的正文。',
+      builtin: true,
+    },
+  ],
+  plagiarism: [
+    {
+      id: 'default',
+      name: '默认模板',
+      content: '请在不改变原意、数据、引文编号和关键术语的前提下，重组句式和段落表达，降低与重复源的连续相似表达，避免简单同义词替换。输出时只给降重后的正文。',
+      builtin: true,
+    },
+  ],
+  polish: [
+    {
+      id: 'default',
+      name: '默认模板',
+      content: '请保持原文事实、数据、公式、参考文献编号和专业术语不变，增强学术语气、逻辑衔接和论证清晰度，避免扩写无依据内容。输出时只给润色后的正文。',
+      builtin: true,
+    },
+  ],
 };
 
 const $ = (selector) => document.querySelector(selector);
@@ -125,6 +162,7 @@ function paperEditorUsesStoredMathSource(editor) {
 
 function paperEditorBlockSource(block, options = {}) {
   const source = block?.dataset?.sourceText;
+  if (source !== undefined && block?.dataset?.sourceKind === 'image') return normalizeEditorPlainText(source).trim();
   if (options.preferStored && source !== undefined) return normalizeEditorPlainText(source).trim();
   return normalizeEditorPlainText(block?.innerText || block?.textContent || '').trim();
 }
@@ -147,6 +185,15 @@ function appendTextWithLineBreaks(parent, text) {
     if (index > 0) parent.appendChild(document.createElement('br'));
     parent.appendChild(document.createTextNode(line));
   });
+}
+
+function parseMarkdownImageLine(text) {
+  const match = String(text || '').trim().match(/^!\[([^\]]*)\]\(([^)]+)\)$/);
+  if (!match) return null;
+  return {
+    alt: match[1] || '论文图表',
+    src: match[2] || '',
+  };
 }
 
 function updatePaperEditorFormatMode(title = state.paperEditorSection) {
@@ -278,6 +325,7 @@ function syncPaperEditorSourcesFromDom(editor = $('#paperContext')) {
   Array.from(editor.children || []).filter((child) => child.matches(blockSelector)).forEach((block) => {
     if (isReference) block.classList.add('chapter-editor-reference-line');
     else block.classList.add('chapter-editor-paragraph');
+    if (block.dataset.sourceKind === 'image' && block.dataset.sourceText) return;
     const source = normalizeEditorPlainText(block.innerText || block.textContent || '').trim();
     if (source) block.dataset.sourceText = source;
     else delete block.dataset.sourceText;
@@ -369,8 +417,18 @@ function writePaperEditorText(editor, value, options = {}) {
     const block = document.createElement(isReference ? 'div' : 'p');
     block.className = isReference ? 'chapter-editor-reference-line' : 'chapter-editor-paragraph';
     block.dataset.sourceText = part;
-    if (!isReference) setPaperEditorBlockMathFlags(block, part);
-    appendTextWithLineBreaks(block, part);
+    const image = !isReference ? parseMarkdownImageLine(part) : null;
+    if (image?.src) {
+      block.classList.add('chapter-editor-image-block');
+      block.dataset.sourceKind = 'image';
+      const img = document.createElement('img');
+      img.src = image.src;
+      img.alt = image.alt;
+      block.appendChild(img);
+    } else {
+      if (!isReference) setPaperEditorBlockMathFlags(block, part);
+      appendTextWithLineBreaks(block, part);
+    }
     editor.appendChild(block);
   });
 
@@ -394,6 +452,221 @@ function writeStoredJson(key, value) {
   } catch (error) {
     console.warn('保存本地数据失败', error);
   }
+}
+
+function createPromptTemplateId() {
+  return `tpl-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+}
+
+function normalizePromptTemplates(raw = {}) {
+  const normalized = {};
+  Object.entries(DEFAULT_PROMPT_TEMPLATES).forEach(([scope, defaults]) => {
+    const storedScope = raw?.[scope] || {};
+    const storedTemplates = Array.isArray(storedScope.templates) ? storedScope.templates : [];
+    const templatesById = new Map();
+    defaults.forEach((template) => templatesById.set(template.id, { ...template }));
+    storedTemplates.forEach((template) => {
+      const id = String(template?.id || '').trim() || createPromptTemplateId();
+      const name = String(template?.name || '').trim() || '未命名模板';
+      const content = String(template?.content || '').trim();
+      if (!content) return;
+      templatesById.set(id, {
+        id,
+        name,
+        content,
+        builtin: Boolean(template?.builtin && id === 'default'),
+      });
+    });
+    const templates = Array.from(templatesById.values());
+    const activeId = templates.some((template) => template.id === storedScope.activeId)
+      ? storedScope.activeId
+      : defaults[0]?.id || templates[0]?.id || '';
+    normalized[scope] = { activeId, templates };
+  });
+  return normalized;
+}
+
+function ensurePromptTemplates() {
+  state.promptTemplates = normalizePromptTemplates(state.promptTemplates);
+  return state.promptTemplates;
+}
+
+function promptTemplatesForScope(scope) {
+  ensurePromptTemplates();
+  return state.promptTemplates[scope]?.templates || [];
+}
+
+function activePromptTemplate(scope) {
+  ensurePromptTemplates();
+  const group = state.promptTemplates[scope];
+  return (group?.templates || []).find((template) => template.id === group.activeId) || group?.templates?.[0] || null;
+}
+
+function selectedPromptTemplate(scope = state.activePromptScope) {
+  const templates = promptTemplatesForScope(scope);
+  return templates.find((template) => template.id === state.selectedPromptTemplateId) || activePromptTemplate(scope);
+}
+
+function promptTemplatePreview(content) {
+  return previewText(String(content || '').replace(/\s+/g, ' '), 80);
+}
+
+function renderPromptTemplateDialog() {
+  const scope = state.activePromptScope;
+  const dialog = $('#promptTemplateDialog');
+  if (!dialog || !scope) return;
+  ensurePromptTemplates();
+  const title = $('#promptTemplateTitle');
+  if (title) title.textContent = `${PAGE_LABELS[scope] || '功能区'}提示词`;
+  const group = state.promptTemplates[scope];
+  if (!state.selectedPromptTemplateId || !group.templates.some((template) => template.id === state.selectedPromptTemplateId)) {
+    state.selectedPromptTemplateId = group.activeId || group.templates[0]?.id || '';
+  }
+  const list = $('#promptTemplateList');
+  if (list) {
+    list.innerHTML = group.templates.map((template) => `
+      <button class="prompt-template-item ${template.id === state.selectedPromptTemplateId ? 'selected' : ''}" data-prompt-template-id="${escapeHtml(template.id)}" type="button">
+        <strong>${escapeHtml(template.name)}</strong>
+        <span>${escapeHtml(promptTemplatePreview(template.content))}</span>
+        ${template.id === group.activeId ? '<mark>已启用</mark>' : ''}
+      </button>
+    `).join('');
+    $$('.prompt-template-item').forEach((button) => {
+      button.addEventListener('click', () => {
+        state.selectedPromptTemplateId = button.dataset.promptTemplateId || '';
+        renderPromptTemplateDialog();
+      });
+    });
+  }
+  const selected = selectedPromptTemplate(scope);
+  if ($('#promptTemplateName')) $('#promptTemplateName').value = selected?.name || '';
+  if ($('#promptTemplateContent')) $('#promptTemplateContent').value = selected?.content || '';
+  const deleteButton = $('#promptTemplateDelete');
+  if (deleteButton) deleteButton.disabled = selected?.builtin || group.templates.length <= 1;
+}
+
+function openPromptTemplateDialog(scope) {
+  state.activePromptScope = scope;
+  ensurePromptTemplates();
+  state.selectedPromptTemplateId = state.promptTemplates[scope]?.activeId || 'default';
+  renderPromptTemplateDialog();
+  const dialog = $('#promptTemplateDialog');
+  if (dialog) dialog.hidden = false;
+  $('#promptTemplateName')?.focus();
+}
+
+function closePromptTemplateDialog() {
+  const dialog = $('#promptTemplateDialog');
+  if (dialog) dialog.hidden = true;
+}
+
+function saveSelectedPromptTemplate() {
+  const scope = state.activePromptScope;
+  if (!scope) return;
+  ensurePromptTemplates();
+  const group = state.promptTemplates[scope];
+  const selected = selectedPromptTemplate(scope);
+  if (!selected) return;
+  const name = textValue('#promptTemplateName') || '未命名模板';
+  const content = textValue('#promptTemplateContent');
+  if (!content) {
+    setState(scope, '提示词内容不能为空', 'error');
+    return;
+  }
+  if (selected.builtin) {
+    const copy = {
+      id: createPromptTemplateId(),
+      name: name === selected.name ? `${name} 副本` : name,
+      content,
+      builtin: false,
+    };
+    group.templates.push(copy);
+    state.selectedPromptTemplateId = copy.id;
+  } else {
+    selected.name = name;
+    selected.content = content;
+  }
+  saveDraft();
+  renderPromptTemplateDialog();
+  setState(scope, '提示词模板已保存', 'done');
+}
+
+function addPromptTemplate() {
+  const scope = state.activePromptScope;
+  if (!scope) return;
+  ensurePromptTemplates();
+  const group = state.promptTemplates[scope];
+  const template = {
+    id: createPromptTemplateId(),
+    name: `新模板 ${group.templates.length + 1}`,
+    content: activePromptTemplate(scope)?.content || '',
+    builtin: false,
+  };
+  group.templates.push(template);
+  state.selectedPromptTemplateId = template.id;
+  saveDraft();
+  renderPromptTemplateDialog();
+  $('#promptTemplateName')?.select();
+}
+
+function enableSelectedPromptTemplate() {
+  const scope = state.activePromptScope;
+  if (!scope) return;
+  ensurePromptTemplates();
+  const group = state.promptTemplates[scope];
+  const selected = selectedPromptTemplate(scope);
+  if (!selected) return;
+  const name = textValue('#promptTemplateName') || selected.name || '未命名模板';
+  const content = textValue('#promptTemplateContent');
+  if (!content) {
+    setState(scope, '提示词内容不能为空', 'error');
+    return;
+  }
+  if (selected.builtin && (name !== selected.name || content !== selected.content)) {
+    const copy = {
+      id: createPromptTemplateId(),
+      name: name === selected.name ? `${name} 副本` : name,
+      content,
+      builtin: false,
+    };
+    group.templates.push(copy);
+    state.selectedPromptTemplateId = copy.id;
+    group.activeId = copy.id;
+  } else {
+    if (!selected.builtin) {
+      selected.name = name;
+      selected.content = content;
+    }
+    group.activeId = selected.id;
+  }
+  saveDraft();
+  renderPromptTemplateDialog();
+  setState(scope, '提示词模板已启用', 'done');
+}
+
+function deleteSelectedPromptTemplate() {
+  const scope = state.activePromptScope;
+  if (!scope) return;
+  ensurePromptTemplates();
+  const group = state.promptTemplates[scope];
+  const selected = selectedPromptTemplate(scope);
+  if (!selected || selected.builtin || group.templates.length <= 1) return;
+  group.templates = group.templates.filter((template) => template.id !== selected.id);
+  if (group.activeId === selected.id) group.activeId = group.templates[0]?.id || 'default';
+  state.selectedPromptTemplateId = group.activeId;
+  saveDraft();
+  renderPromptTemplateDialog();
+  setState(scope, '提示词模板已删除', 'done');
+}
+
+function activePromptPayload(scope) {
+  const template = activePromptTemplate(scope);
+  const customPrompt = String(template?.content || '').trim();
+  if (!customPrompt) return {};
+  return {
+    customPrompt,
+    promptTemplateName: template.name || '',
+  };
 }
 
 function captureFields() {
@@ -433,6 +706,12 @@ function saveDraft() {
     paperReferenceSnapshot: state.paperReferenceSnapshot,
     paperPushTargets: state.paperPushTargets,
     paperTemplate: state.paperTemplate,
+    dataChartTargets: state.dataChartTargets,
+    selectedDataChartTargetId: state.selectedDataChartTargetId,
+    dataChartResult: state.dataChartResult,
+    dataChartSearchResult: state.dataChartSearchResult,
+    dataChartApproved: state.dataChartApproved,
+    promptTemplates: state.promptTemplates,
     fields: captureFields(),
     savedAt: new Date().toISOString(),
   });
@@ -449,10 +728,20 @@ function restoreDraft() {
   state.paperReferenceSnapshot = draft.paperReferenceSnapshot || '';
   state.paperPushTargets = draft.paperPushTargets || {};
   state.paperTemplate = draft.paperTemplate || null;
+  state.dataChartTargets = Array.isArray(draft.dataChartTargets) ? draft.dataChartTargets : [];
+  state.selectedDataChartTargetId = draft.selectedDataChartTargetId || '';
+  state.dataChartResult = draft.dataChartResult || null;
+  state.dataChartSearchResult = draft.dataChartSearchResult || null;
+  state.dataChartApproved = Boolean(draft.dataChartApproved);
+  state.promptTemplates = normalizePromptTemplates(draft.promptTemplates || {});
   applyFields(draft.fields);
   syncModeSelections();
   syncWordLimitControls();
   renderPaperTemplate();
+  setDataChartTableText(textValue('#dataChartDataTable'));
+  renderDataChartTargets();
+  renderDataChartSourceList();
+  renderDataChartResult();
 }
 
 function getHistoryRecords() {
@@ -491,6 +780,11 @@ function createHistoryRecord(page, operation, data = {}) {
     paperSectionContentSources: { ...state.paperSectionContentSources },
     paperReferenceSnapshot: state.paperReferenceSnapshot,
     paperTemplate: state.paperTemplate,
+    dataChartTargets: state.dataChartTargets,
+    selectedDataChartTargetId: state.selectedDataChartTargetId,
+    dataChartResult: state.dataChartResult,
+    dataChartSearchResult: state.dataChartSearchResult,
+    dataChartApproved: state.dataChartApproved,
     analysis: data.analysis || state.lastAnalysis || null,
   };
 }
@@ -1442,6 +1736,21 @@ function collectPaperPushPayload(scopeValue) {
   };
 }
 
+function collectPaperSectionsPayload(includeReference = false) {
+  storeCurrentPaperEditor({ skipEmptyOverwrite: true });
+  return (state.paperSections || [])
+    .map((section) => ({
+      title: section.title,
+      content: state.paperSectionContents?.[section.title] || '',
+    }))
+    .filter((section) => section.content && (includeReference || paperSpecialKind(section.title) !== 'reference'));
+}
+
+function collectFullPaperText(includeReference = false) {
+  const sections = collectPaperSectionsPayload(includeReference);
+  return sections.map((section) => `${section.title}\n${section.content}`).join('\n\n').trim();
+}
+
 function renderPaperPushScopes() {
   const select = $('#paperPushScope');
   if (!select) return;
@@ -1464,6 +1773,7 @@ function renderPaperPushScopes() {
 
 function paperPushTargetConfig(target) {
   return {
+    datachart: { page: 'datachart', input: '#dataChartFullText', output: '#dataChartResultText', stateScope: 'datachart', label: '数据图表' },
     ai: { page: 'ai', input: '#aiInput', output: '#aiOutput', stateScope: 'ai', label: '降 AI 检测' },
     plagiarism: { page: 'plagiarism', input: '#plagiarismInput', output: '#plagiarismOutput', stateScope: 'plagiarism', label: '降查重率' },
     polish: { page: 'polish', input: '#polishInput', output: '#polishOutput', stateScope: 'polish', label: '学术润色' },
@@ -1497,11 +1807,28 @@ function pushPaperSelectionToWorkspace() {
 
 function resetPushedTargetResults(target) {
   ({
+    datachart: resetDataChartResultsForNewInput,
     ai: resetAiResultsForNewInput,
     plagiarism: resetPlagiarismResultsForNewInput,
     polish: resetPolishResultsForNewInput,
     correction: resetCorrectionResultsForNewInput,
   }[target] || (() => {}))();
+}
+
+function resetDataChartResultsForNewInput() {
+  state.dataChartTargets = [];
+  state.selectedDataChartTargetId = '';
+  state.dataChartResult = null;
+  state.dataChartSearchResult = null;
+  state.dataChartApproved = false;
+  setText('#dataChartQuery', '');
+  setDataChartTableText('');
+  renderDataChartSourceList();
+  setText('#dataChartResultText', '');
+  resetDataChartDiff();
+  renderDataChartTargets();
+  renderDataChartResult();
+  updateDataChartStep(1);
 }
 
 function resetAiResultsForNewInput() {
@@ -1590,6 +1917,10 @@ function splitPaperBackfillSections(text, titles) {
 }
 
 function backfillProcessedPanel(target) {
+  if (target === 'datachart') {
+    backfillDataChartResult();
+    return;
+  }
   const config = paperPushTargetConfig(target);
   if (!config) return;
   const output = textValue(config.output);
@@ -1758,9 +2089,10 @@ function paperSectionContentByTitle(title) {
 function appendPaperReferences(refTitle, appendContent, options = {}) {
   const extra = String(appendContent || '').trim();
   if (!extra) return refTitle;
-  const existingContent = String(paperSectionContentByTitle(refTitle) || '').trim();
+  const targetTitle = ensurePaperSection(refTitle, paperSpecialKind(refTitle) || 'reference') || refTitle;
+  const existingContent = String(paperSectionContentByTitle(targetTitle) || '').trim();
   const newContent = existingContent ? `${existingContent}\n${extra}` : extra;
-  return writePaperContentToSection(refTitle, newContent, options) || refTitle;
+  return writePaperContentToSection(targetTitle, newContent, options) || targetTitle;
 }
 
 function ensurePaperSection(title, kind = '') {
@@ -1954,6 +2286,29 @@ function paperSectionTitleKeys(title) {
   return keys;
 }
 
+function findPaperSectionTitleLike(title) {
+  const key = paperTitleMatchKey(title);
+  if (!key) return '';
+  const parsed = analyzeOutlineHeading(title);
+  const candidates = new Set([key, paperTitleMatchKey(normalizeOutlineTitle(title))]);
+  if (parsed) {
+    candidates.add(paperTitleMatchKey(parsed.title));
+    candidates.add(paperTitleMatchKey(parsed.raw));
+    candidates.add(paperTitleMatchKey(normalizeOutlineTitle(parsed.raw)));
+  }
+  for (const section of state.paperSections || []) {
+    const sectionKeys = [
+      section.title,
+      section.raw,
+      normalizeOutlineTitle(section.title),
+      normalizeOutlineTitle(section.raw),
+      analyzeOutlineHeading(section.raw)?.title,
+    ].map(paperTitleMatchKey).filter(Boolean);
+    if (sectionKeys.some((item) => candidates.has(item))) return section.title;
+  }
+  return '';
+}
+
 function isGeneratedHeadingForSection(line, title) {
   const text = stripOutlineEmphasis(line);
   if (!text || text.length > 160) return false;
@@ -1980,7 +2335,7 @@ function normalizeGeneratedSectionBody(title, content) {
 }
 
 function writePaperContentToSection(title, content, options = {}) {
-  const target = ensurePaperSection(title, paperSpecialKind(title));
+  const target = findPaperSectionTitleLike(title) || ensurePaperSection(title, paperSpecialKind(title));
   if (!target) return;
   const normalizedContent = normalizeGeneratedSectionBody(target, content);
   state.paperSectionContents[target] = normalizedContent;
@@ -1997,6 +2352,719 @@ function writePaperContentToSection(title, content, options = {}) {
   }
   renderPaperSections();
   return target;
+}
+
+function replacePaperSectionParagraph(sectionTitle, originalText, replacementText) {
+  const target = findPaperSectionTitleLike(sectionTitle) || ensurePaperSection(sectionTitle);
+  if (!target) return { ok: false, message: '没有找到可回填的章节' };
+  const existing = state.paperSectionContents?.[target] || '';
+  const original = String(originalText || '').trim();
+  const replacement = String(replacementText || '').trim();
+  if (!replacement) return { ok: false, message: '没有可回填的处理结果' };
+  let next = '';
+  if (original && existing.includes(original)) {
+    next = existing.replace(original, replacement);
+  } else if (existing.includes(replacement)) {
+    return { ok: true, title: target, alreadyFilled: true };
+  } else if (existing) {
+    next = `${existing}\n\n${replacement}`;
+  } else {
+    next = replacement;
+  }
+  writePaperContentToSection(target, next);
+  return { ok: true, title: target };
+}
+
+function applyDataChartReferenceResult(result) {
+  if (!result) return '';
+  const references = result.references;
+  if (references?.mode === 'reorder' && references.content) {
+    const targetRefTitle = ensurePaperSection(references.title || '参考文献', paperSpecialKind(references.title) || 'reference');
+    const refTitle = writePaperContentToSection(targetRefTitle || references.title || '参考文献', references.content, { loadEditor: false });
+    (result.updatedSections || []).forEach((section) => {
+      if (section?.title) writePaperContentToSection(section.title, section.content || '', { loadEditor: false });
+    });
+    syncPaperOutlineFromSections();
+    return refTitle || references.title || '';
+  }
+  if (references?.mode === 'append' && references.append) {
+    return appendPaperReferences(references.title || '# 参考文献', references.append, { loadEditor: false });
+  }
+  return '';
+}
+
+function updateDataChartStep(step) {
+  const current = Number(step || 1);
+  $$('[data-data-step]').forEach((card) => {
+    const value = Number(card.dataset.dataStep || 0);
+    card.classList.toggle('active', value === current);
+    card.classList.toggle('done', value < current);
+  });
+}
+
+function currentDataChartTarget() {
+  return (state.dataChartTargets || []).find((target) => target.id === state.selectedDataChartTargetId) || null;
+}
+
+function defaultDataChartTitle(target = currentDataChartTarget()) {
+  if (!target) return '论文数据图表';
+  const title = String(target.chartTitle || target.title || '').trim();
+  if (title) return title;
+  const need = String(target.dataNeed || '').replace(/^补充/, '').replace(/数据$/, '').trim();
+  return need ? `${need}图` : '论文数据图表';
+}
+
+function renderDataChartTargets() {
+  const list = $('#dataChartTargets');
+  if (!list) return;
+  const targets = state.dataChartTargets || [];
+  const count = $('#dataChartTargetCount');
+  if (count) count.textContent = `${targets.length} 项`;
+  if (!targets.length) {
+    list.textContent = '点击“AI 阅读全文”后，这里会列出适合插入数据图表的位置。';
+    return;
+  }
+  if (!targets.some((target) => target.id === state.selectedDataChartTargetId)) {
+    state.selectedDataChartTargetId = targets[0].id;
+  }
+  list.innerHTML = targets.map((target, index) => `
+    <button class="data-target-card ${target.id === state.selectedDataChartTargetId ? 'selected' : ''}" data-data-target-id="${escapeHtml(target.id)}" type="button">
+      <span class="data-target-meta">${index + 1}. ${escapeHtml(target.sectionTitle || '未命名章节')} · ${escapeHtml(target.dataNeed || '数据需求')}</span>
+      <strong>${escapeHtml(target.reason || '建议补充数据图表')}</strong>
+      <span>${escapeHtml(target.excerpt || '')}</span>
+      <small>${escapeHtml(target.query || '')}</small>
+    </button>
+  `).join('');
+  $$('.data-target-card').forEach((button) => {
+    button.addEventListener('click', () => selectDataChartTarget(button.dataset.dataTargetId));
+  });
+}
+
+function selectDataChartTarget(targetId) {
+  const target = (state.dataChartTargets || []).find((item) => item.id === targetId);
+  if (!target) return;
+  const previousTargetId = state.selectedDataChartTargetId;
+  state.selectedDataChartTargetId = target.id;
+  setText('#dataChartQuery', target.query || '');
+  const type = $('#dataChartType');
+  if (type && target.chartType) type.value = target.chartType;
+  setText('#dataChartTitle', defaultDataChartTitle(target));
+  state.dataChartApproved = false;
+  if (previousTargetId && previousTargetId !== target.id) {
+    state.dataChartResult = null;
+    state.dataChartSearchResult = null;
+    setText('#dataChartResultText', '');
+    setDataChartTableText('');
+    renderDataChartSourceList();
+    resetDataChartDiff();
+  }
+  renderDataChartTargets();
+  renderDataChartResult();
+  setState('datachart', `已选择：${target.sectionTitle || '候选段落'}`);
+  saveDraft();
+}
+
+function dataChartFigureMarkdown(result = state.dataChartResult) {
+  return String(result?.figureMarkdown || '').trim();
+}
+
+function dataChartComposedBackfillText(result = state.dataChartResult) {
+  const replacement = String(result?.replacementText || '').trim();
+  const figure = dataChartFigureMarkdown(result);
+  if (!replacement) return figure;
+  if (!figure) return replacement;
+  const paragraphs = replacement.split(/\n{2,}/).map((part) => part.trim()).filter(Boolean);
+  const figureIndex = paragraphs.findIndex((part) => /图\s*1|图一|如图|见图|figure\s*1/i.test(part));
+  if (figureIndex >= 0) {
+    paragraphs.splice(figureIndex + 1, 0, figure);
+    return paragraphs.join('\n\n').trim();
+  }
+  return [replacement, figure].filter(Boolean).join('\n\n').trim();
+}
+
+function dataChartBackfillText() {
+  return textValue('#dataChartResultText');
+}
+
+function dataChartReplacementText(result = state.dataChartResult) {
+  const stored = textValue('#dataChartResultText');
+  if (stored) return stored;
+  return dataChartComposedBackfillText(result);
+}
+
+function dataChartTextWithoutFigures(text) {
+  return String(text || '')
+    .split(/\r?\n/)
+    .filter((line) => !parseMarkdownImageLine(line))
+    .join('\n')
+    .replace(/\n{3,}/g, '\n\n')
+    .trim();
+}
+
+function dataChartFigureParts(result = state.dataChartResult) {
+  const figure = dataChartFigureMarkdown(result);
+  if (!figure) return { image: null, caption: '' };
+  const lines = figure.split(/\r?\n/);
+  const imageLine = lines.find((line) => parseMarkdownImageLine(line));
+  return {
+    image: parseMarkdownImageLine(imageLine || ''),
+    caption: lines.filter((line) => line.trim() && line !== imageLine).join('\n').trim(),
+  };
+}
+
+function splitDataChartTextAroundFigure(text) {
+  const lines = String(text || '').replace(/\r\n/g, '\n').replace(/\r/g, '\n').split('\n');
+  const imageIndex = lines.findIndex((line) => parseMarkdownImageLine(line));
+  if (imageIndex < 0) return { found: false, before: String(text || '').trim(), after: '' };
+  let afterStart = imageIndex + 1;
+  while (afterStart < lines.length && !lines[afterStart].trim()) afterStart += 1;
+  if (/^\s*(?:图\s*\d+|Figure\s*\d+)/i.test(lines[afterStart] || '')) afterStart += 1;
+  while (afterStart < lines.length && !lines[afterStart].trim()) afterStart += 1;
+  return {
+    found: true,
+    before: lines.slice(0, imageIndex).join('\n').trim(),
+    after: lines.slice(afterStart).join('\n').trim(),
+  };
+}
+
+function dataChartOriginalTextForDiff() {
+  const target = currentDataChartTarget();
+  if (!target) return '';
+  return String(target.originalText || target.excerpt || '').trim();
+}
+
+function resetDataChartDiff() {
+  const status = $('#dataChartDiffStatus');
+  if (status) status.textContent = '红色为删除，绿色为新增。图表会直接显示在差异区域内。';
+  setText('#dataChartDiff', '差异预览会显示在这里。');
+}
+
+function refreshDataChartDiff() {
+  const diffNode = $('#dataChartDiff');
+  if (!diffNode) return;
+  const before = dataChartOriginalTextForDiff();
+  const after = dataChartReplacementText();
+  const status = $('#dataChartDiffStatus');
+  if (status) {
+    if (before && after) status.textContent = '差异视图已刷新。红色为删除，绿色为新增；图表已嵌入下方。';
+    else if (before) status.textContent = '已选中原候选段落，生成图表后会显示差异。';
+    else status.textContent = '请先定位并选择候选段落。';
+  }
+  const figure = dataChartFigureParts();
+  const figureHtml = figure.image?.src
+    ? `<figure class="data-chart-diff-figure"><img src="${escapeHtml(figure.image.src)}" alt="${escapeHtml(figure.image.alt || '数据图表')}" /><figcaption>${escapeHtml(figure.caption || figure.image.alt || '')}</figcaption></figure>`
+    : '';
+  if (figureHtml) {
+    const split = splitDataChartTextAroundFigure(after);
+    if (split.found) {
+      const tailHtml = split.after ? diffText('', split.after) : '';
+      diffNode.innerHTML = `${diffText(before, split.before)}${figureHtml}${tailHtml}`;
+      return;
+    }
+  }
+  diffNode.innerHTML = `${diffText(before, dataChartTextWithoutFigures(after))}${figureHtml}`;
+}
+
+function renderDataChartResult() {
+  const result = state.dataChartResult || null;
+  if (!result?.chart?.dataUrl) {
+    refreshDataChartDiff();
+    return;
+  }
+  const currentResultText = textValue('#dataChartResultText');
+  const replacementText = String(result.replacementText || '').trim();
+  const backfillText = dataChartComposedBackfillText(result);
+  if ((!currentResultText || currentResultText === replacementText) && backfillText) {
+    setText('#dataChartResultText', backfillText);
+  }
+  refreshDataChartDiff();
+}
+
+const DATA_CHART_TABLE_COLUMNS = [
+  { key: 'label', label: '标签', fallback: 0 },
+  { key: 'value', label: '数值', fallback: 1 },
+  { key: 'sourceName', label: '来源名称', fallback: 2 },
+  { key: 'publisher', label: '发布机构', fallback: 3 },
+  { key: 'url', label: '链接', fallback: 4 },
+  { key: 'note', label: '备注', fallback: 5 },
+];
+
+function csvEscape(value) {
+  const text = String(value ?? '');
+  return /[",\n\r]/.test(text) ? `"${text.replaceAll('"', '""')}"` : text;
+}
+
+function dataChartRowsFromSearch(data = state.dataChartSearchResult) {
+  const rows = Array.isArray(data?.dataRows) ? data.dataRows : [];
+  return rows.map((row) => ({
+    label: String(row?.label || '').trim(),
+    value: String(row?.rawValue || row?.value || '').trim(),
+    sourceName: String(row?.sourceName || '').trim(),
+    publisher: String(row?.publisher || '').trim(),
+    url: String(row?.url || '').trim(),
+    note: String(row?.note || row?.source || '').trim(),
+  })).filter((row) => row.label || row.value || row.sourceName || row.publisher || row.url || row.note);
+}
+
+function parseDataChartTableText(text) {
+  const lines = String(text || '').replace(/\r\n/g, '\n').replace(/\r/g, '\n').split('\n').filter((line) => line.trim());
+  if (!lines.length) return [];
+  const parseLine = (line) => {
+    const cells = [];
+    let cell = '';
+    let quoted = false;
+    for (let index = 0; index < line.length; index += 1) {
+      const char = line[index];
+      if (char === '"' && quoted && line[index + 1] === '"') {
+        cell += '"';
+        index += 1;
+      } else if (char === '"') {
+        quoted = !quoted;
+      } else if (char === ',' && !quoted) {
+        cells.push(cell.trim());
+        cell = '';
+      } else {
+        cell += char;
+      }
+    }
+    cells.push(cell.trim());
+    return cells;
+  };
+  const header = parseLine(lines[0]).map((cell) => cell.trim());
+  const hasHeader = header.some((cell) => ['标签', '数值', '来源名称', '发布机构', '链接', '备注', '来源/备注'].includes(cell));
+  const dataLines = hasHeader ? lines.slice(1) : lines;
+  return dataLines.map((line) => {
+    const cells = parseLine(line);
+    return {
+      label: cells[0] || '',
+      value: cells[1] || '',
+      sourceName: cells[2] || '',
+      publisher: cells[3] || '',
+      url: cells[4] || '',
+      note: cells[5] || cells[2] || '',
+    };
+  }).filter((row) => row.label || row.value || row.sourceName || row.publisher || row.url || row.note);
+}
+
+function dataChartRowsToCsv(rows) {
+  if (!Array.isArray(rows) || !rows.length) return '';
+  const output = [DATA_CHART_TABLE_COLUMNS.map((column) => csvEscape(column.label)).join(',')];
+  (rows || []).forEach((row) => {
+    output.push(DATA_CHART_TABLE_COLUMNS.map((column) => csvEscape(row?.[column.key] || '')).join(','));
+  });
+  return output.join('\n');
+}
+
+function dataChartEditableRows() {
+  return $$('#dataChartEditableTable .data-chart-table-row').map((rowNode) => {
+    const row = {};
+    DATA_CHART_TABLE_COLUMNS.forEach((column) => {
+      row[column.key] = rowNode.querySelector(`[data-data-table-cell="${column.key}"]`)?.value || '';
+    });
+    return row;
+  }).filter((row) => DATA_CHART_TABLE_COLUMNS.some((column) => String(row[column.key] || '').trim()));
+}
+
+function syncDataChartTableFromEditable() {
+  setText('#dataChartDataTable', dataChartRowsToCsv(dataChartEditableRows()));
+}
+
+function renderDataChartEditableTable(rows = []) {
+  const table = $('#dataChartEditableTable');
+  if (!table) return;
+  const normalizedRows = rows.length ? rows : [{ label: '', value: '', sourceName: '', publisher: '', url: '', note: '' }];
+  table.innerHTML = `
+    <div class="data-chart-table-header">
+      ${DATA_CHART_TABLE_COLUMNS.map((column) => `<div>${escapeHtml(column.label)}</div>`).join('')}
+      <div>操作</div>
+    </div>
+    <div class="data-chart-table-body">
+      ${normalizedRows.map((row, index) => `
+        <div class="data-chart-table-row" data-data-table-row="${index}">
+          ${DATA_CHART_TABLE_COLUMNS.map((column) => `
+            <input class="data-chart-table-input" data-data-table-cell="${column.key}" value="${escapeHtml(row?.[column.key] || '')}" />
+          `).join('')}
+          <button class="secondary-button compact data-chart-row-remove" type="button" title="删除行">删除</button>
+        </div>
+      `).join('')}
+    </div>
+  `;
+  $$('#dataChartEditableTable .data-chart-table-input').forEach((input) => {
+    input.addEventListener('input', () => {
+      syncDataChartTableFromEditable();
+      saveDraft();
+    });
+  });
+  $$('#dataChartEditableTable .data-chart-row-remove').forEach((button) => {
+    button.addEventListener('click', () => {
+      button.closest('.data-chart-table-row')?.remove();
+      if (!$('#dataChartEditableTable .data-chart-table-row')) {
+        renderDataChartEditableTable([]);
+      }
+      syncDataChartTableFromEditable();
+      saveDraft();
+    });
+  });
+  syncDataChartTableFromEditable();
+}
+
+function setDataChartTableText(text) {
+  setText('#dataChartDataTable', text || '');
+  renderDataChartEditableTable(parseDataChartTableText(text));
+}
+
+function setDataChartRows(rows) {
+  renderDataChartEditableTable(rows || []);
+}
+
+function addDataChartEditableRow(row = {}) {
+  const rows = dataChartEditableRows();
+  rows.push({
+    label: row.label || '',
+    value: row.value || '',
+    sourceName: row.sourceName || '',
+    publisher: row.publisher || '',
+    url: row.url || '',
+    note: row.note || '',
+  });
+  renderDataChartEditableTable(rows);
+  saveDraft();
+}
+
+function dataChartRowSummary(row) {
+  const label = String(row?.label || '').trim();
+  const value = String(row?.rawValue || row?.value || '').trim();
+  const sourceName = String(row?.sourceName || '').trim();
+  const publisher = String(row?.publisher || '').trim();
+  const source = String(row?.source || '').trim();
+  const note = String(row?.note || '').trim();
+  const sourcePart = [sourceName || source, publisher, note].filter(Boolean).join('；');
+  return [label, value, sourcePart].filter(Boolean).join(',');
+}
+
+function dataChartSourceItemsFromSearch(data = state.dataChartSearchResult) {
+  if (!data) return [];
+  if (Array.isArray(data.sourceItems) && data.sourceItems.length) return data.sourceItems;
+  const rows = Array.isArray(data.dataRows) ? data.dataRows : [];
+  const sources = Array.isArray(data.dataSources) ? data.dataSources : [];
+  const rowItems = rows.map((row) => ({
+    title: row.sourceName || row.publisher || row.source || '数据来源',
+    url: row.url || '',
+    publisher: row.publisher || '',
+    summary: dataChartRowSummary(row),
+    rows: [row],
+  }));
+  const known = new Set(rowItems.map((item) => item.url || item.title || item.summary));
+  const sourceItems = sources.map((source) => {
+    const text = String(source || '').trim();
+    const urlMatch = text.match(/https?:\/\/\S+/);
+    return {
+      title: text.split('；')[0] || '候选来源',
+      url: urlMatch ? urlMatch[0] : '',
+      publisher: '',
+      summary: text,
+      rows: [],
+    };
+  }).filter((item) => {
+    const key = item.url || item.title || item.summary;
+    if (!key || known.has(key)) return false;
+    known.add(key);
+    return true;
+  });
+  return [...rowItems, ...sourceItems];
+}
+
+function renderDataChartSourceList(data = state.dataChartSearchResult) {
+  const list = $('#dataChartSourceList');
+  if (!list) return;
+  const items = dataChartSourceItemsFromSearch(data);
+  if (!items.length) {
+    list.textContent = 'AI 搜索数据后，这里会列出可点击核验的来源。';
+    return;
+  }
+  list.innerHTML = items.map((item, index) => {
+    const title = item.title || item.sourceName || '数据来源';
+    const url = item.url || '';
+    const rows = Array.isArray(item.rows) ? item.rows : [];
+    const rowText = rows.length ? rows.map(dataChartRowSummary).filter(Boolean).join('\n') : (item.summary || item.snippet || '');
+    const meta = [item.publisher, item.sourceName].filter(Boolean).join('；');
+    const titleHtml = url
+      ? `<a href="${escapeHtml(url)}" target="_blank" rel="noopener noreferrer">${escapeHtml(title)}</a>`
+      : `<strong>${escapeHtml(title)}</strong>`;
+    return `
+      <article class="data-source-card">
+        <div class="data-source-index">${index + 1}</div>
+        <div class="data-source-body">
+          <div class="data-source-title">${titleHtml}</div>
+          ${meta ? `<div class="data-source-meta">${escapeHtml(meta)}</div>` : ''}
+          <div class="data-source-summary">${escapeHtml(rowText || '请打开来源核验统计口径和原始数据。')}</div>
+        </div>
+      </article>
+    `;
+  }).join('');
+}
+
+function dataChartTableSummary(data = state.dataChartSearchResult) {
+  const rows = Array.isArray(data?.dataRows) ? data.dataRows : [];
+  const tableText = textValue('#dataChartDataTable');
+  const lines = tableText.split(/\r?\n/).filter((line) => line.trim());
+  const rowCount = rows.length || Math.max(0, lines.length - 1);
+  const sourceNote = String(data?.sourceNote || '').trim();
+  return [
+    sourceNote || '请审核下方数据表，确认每行数据、单位和来源后再生成图表。',
+    rowCount ? `已汇总 ${rowCount} 行候选数据。` : '尚未汇总到可作图数据。',
+    '最终用于绘图的数据以“可编辑数据表”为准，格式：标签,数值,来源/备注。',
+  ].join('\n');
+}
+
+function dataChartSectionsForPayload() {
+  const sections = collectPaperSectionsPayload(false);
+  if (sections.length) return sections;
+  const text = textValue('#dataChartFullText');
+  return text ? [{ title: '全文内容', content: text }] : [];
+}
+
+function ensureDataChartFullText() {
+  const existing = textValue('#dataChartFullText');
+  if (existing) return existing;
+  const pushed = state.paperPushTargets?.datachart;
+  if (pushed?.titles?.length) {
+    const pushedText = (pushed.titles || []).map(paperSectionTextBlock).filter(Boolean).join('\n\n').trim();
+    if (pushedText) {
+      setText('#dataChartFullText', pushedText);
+      return pushedText;
+    }
+  }
+  const fullText = collectFullPaperText(false);
+  if (fullText) {
+    setText('#dataChartFullText', fullText);
+    return fullText;
+  }
+  const current = textValue('#paperContext');
+  if (current) {
+    setText('#dataChartFullText', current);
+    return current;
+  }
+  return '';
+}
+
+function loadDataChartFullText() {
+  const fullText = collectFullPaperText(false) || textValue('#paperContext') || textValue('#dataChartFullText');
+  if (!fullText) {
+    setState('datachart', '论文写作页暂无可查看的正文内容。', 'error');
+    return;
+  }
+  setText('#dataChartFullText', fullText);
+  setState('datachart', '已汇总全文内容', 'done');
+  updateDataChartStep(1);
+  saveDraft();
+}
+
+async function findDataChartTargets() {
+  const fullText = ensureDataChartFullText();
+  if (!fullText) {
+    setState('datachart', '请先查看或粘贴全文内容。', 'error');
+    return;
+  }
+  try {
+    const data = await withRunningState('datachart', 'AI 正在阅读全文并定位图表插入位置...', async () => requestJson('/api/data-chart', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        action: 'find',
+        fullText,
+        topic: textValue('#paperTopic'),
+        outline: textValue('#paperOutline'),
+        sections: dataChartSectionsForPayload(),
+        limit: 8,
+      }),
+    }));
+    state.dataChartTargets = Array.isArray(data.targets) ? data.targets : [];
+    state.selectedDataChartTargetId = state.dataChartTargets[0]?.id || '';
+    state.dataChartResult = null;
+    state.dataChartSearchResult = null;
+    state.dataChartApproved = false;
+    setText('#dataChartResultText', '');
+    setDataChartTableText('');
+    renderDataChartSourceList();
+    resetDataChartDiff();
+    const selected = currentDataChartTarget();
+    if (selected) {
+      setText('#dataChartQuery', selected.query || '');
+      setText('#dataChartTitle', defaultDataChartTitle(selected));
+      if ($('#dataChartType')) $('#dataChartType').value = selected.chartType || 'bar';
+    }
+    renderDataChartTargets();
+    updateDataChartStep(2);
+    setState('datachart', data.summary || `已定位 ${state.dataChartTargets.length} 个候选位置`, 'done');
+    saveDraft();
+  } catch (error) {
+    setState('datachart', `定位失败：${error.message}`, 'error');
+  }
+}
+
+async function searchDataChartData() {
+  const target = currentDataChartTarget();
+  if (!target) {
+    setState('datachart', '请先定位并选择一个候选段落。', 'error');
+    return;
+  }
+  try {
+    const data = await withRunningState('datachart', 'AI 正在检索数据并整理来源...', async () => requestJson('/api/data-chart', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        action: 'search',
+        query: textValue('#dataChartQuery') || target.query || '',
+        target,
+        fullText: textValue('#dataChartFullText'),
+      }),
+    }));
+    state.dataChartSearchResult = data;
+    const rows = dataChartRowsFromSearch(data);
+    if (rows.length) setDataChartRows(rows);
+    else if (data.tableText) setDataChartTableText(data.tableText);
+    if (data.title) setText('#dataChartTitle', data.title);
+    if (data.unit && !textValue('#dataChartUnit')) setText('#dataChartUnit', data.unit);
+    if (data.chartType && $('#dataChartType')) $('#dataChartType').value = data.chartType;
+    renderDataChartSourceList(data);
+    updateDataChartStep(3);
+    setState('datachart', data.needsManualData ? '请补充真实数据后审核' : '数据已整理，请审核', data.needsManualData ? 'running' : 'done');
+    saveDraft();
+  } catch (error) {
+    setState('datachart', `搜索数据失败：${error.message}`, 'error');
+  }
+}
+
+function fillDataChartSampleTable() {
+  if (textValue('#dataChartDataTable')) return;
+  const sampleRows = [
+    { label: '2020年城镇地区', value: 79.8, rawValue: '79.8', source: '第47次《中国互联网络发展状况统计报告》；中国互联网络信息中心（CNNIC）', sourceName: '第47次《中国互联网络发展状况统计报告》', publisher: '中国互联网络信息中心（CNNIC）', url: 'https://www.cnnic.net.cn/' },
+    { label: '2020年农村地区', value: 55.9, rawValue: '55.9', source: '第47次《中国互联网络发展状况统计报告》；中国互联网络信息中心（CNNIC）', sourceName: '第47次《中国互联网络发展状况统计报告》', publisher: '中国互联网络信息中心（CNNIC）', url: 'https://www.cnnic.net.cn/' },
+  ];
+  state.dataChartSearchResult = {
+    sourceNote: '已填入示例表头，请替换为已核验的真实数据。',
+    dataRows: sampleRows,
+    sourceItems: [{
+      title: '中国互联网络信息中心（CNNIC）',
+      url: 'https://www.cnnic.net.cn/',
+      publisher: 'CNNIC',
+      summary: '2020年城镇地区,79.8,第47次《中国互联网络发展状况统计报告》；中国互联网络信息中心（CNNIC）',
+      rows: sampleRows,
+    }],
+  };
+  setDataChartRows(dataChartRowsFromSearch(state.dataChartSearchResult));
+  renderDataChartSourceList();
+  updateDataChartStep(3);
+  saveDraft();
+}
+
+async function generateDataChart() {
+  const target = currentDataChartTarget();
+  if (!target) {
+    setState('datachart', '请先选择候选段落。', 'error');
+    return;
+  }
+  syncDataChartTableFromEditable();
+  if (!textValue('#dataChartDataTable')) {
+    setState('datachart', '请先搜索或填写已审核的数据表。', 'error');
+    return;
+  }
+  storeCurrentPaperEditor({ skipEmptyOverwrite: true });
+  try {
+    const data = await withRunningState('datachart', '正在通过 Python 生成图表...', async () => requestJson('/api/data-chart', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        action: 'generate',
+        target,
+        tableText: textValue('#dataChartDataTable'),
+        chartType: $('#dataChartType')?.value || target.chartType || 'bar',
+        title: textValue('#dataChartTitle'),
+        unit: textValue('#dataChartUnit'),
+        referenceStyle: textValue('#referenceStyle') || 'GB/T 7714',
+        allSections: paperSectionsForReferenceSync(),
+      }),
+    }));
+    state.dataChartResult = data;
+    state.dataChartApproved = false;
+    const backfillText = dataChartComposedBackfillText(data);
+    setText('#dataChartResultText', backfillText);
+    $('#dataChartResultText')?.setAttribute('hidden', '');
+    renderDataChartResult();
+    updateDataChartStep(4);
+    setState('datachart', '图表已生成，正在回填到论文对应位置...', 'running');
+    addHistoryRecord('datachart', '生成数据图表', {
+      inputSelector: '#dataChartDataTable',
+      outputSelector: '#dataChartResultText',
+      output: backfillText,
+    });
+    backfillDataChartResult({ stayOnDataChart: true });
+    saveDraft();
+  } catch (error) {
+    setState('datachart', `生成图表失败：${error.message}`, 'error');
+  }
+}
+
+function approveDataChartResult() {
+  if (!state.dataChartResult?.chart?.dataUrl || !textValue('#dataChartResultText')) {
+    setState('datachart', '请先生成图表和改写内容。', 'error');
+    return;
+  }
+  state.dataChartApproved = true;
+  updateDataChartStep(5);
+  backfillDataChartResult();
+  saveDraft();
+}
+
+function backfillDataChartResult(options = {}) {
+  const target = currentDataChartTarget();
+  if (!target) {
+    setState('datachart', '没有可回填的候选段落。', 'error');
+    return;
+  }
+  state.dataChartApproved = true;
+  const replacement = dataChartBackfillText();
+  const refTitle = applyDataChartReferenceResult(state.dataChartResult);
+  const outcome = replacePaperSectionParagraph(target.sectionTitle, target.originalText, replacement);
+  if (!outcome.ok) {
+    setState('datachart', outcome.message || '回填失败', 'error');
+    return;
+  }
+  loadPaperSection(outcome.title);
+  renderPaperSections();
+  const refHint = refTitle ? `，并更新 ${refTitle}` : '';
+  setState('datachart', `已回填到 ${outcome.title}${refHint}`, 'done');
+  setState('paper', `已从数据图表回填到 ${outcome.title}${refHint}`, 'done');
+  if (!options.stayOnDataChart) setPage('paper');
+  saveDraft();
+}
+
+function bindDataChartActions() {
+  $('#dataChartLoadFullText')?.addEventListener('click', loadDataChartFullText);
+  $('#dataChartFindTargets')?.addEventListener('click', findDataChartTargets);
+  $('#dataChartSearchData')?.addEventListener('click', searchDataChartData);
+  $('#dataChartGenerate')?.addEventListener('click', generateDataChart);
+  $('#dataChartBackfill')?.addEventListener('click', backfillDataChartResult);
+  $('#dataChartUseSample')?.addEventListener('click', fillDataChartSampleTable);
+  $('#dataChartAddRow')?.addEventListener('click', () => addDataChartEditableRow());
+  $('#dataChartApproveResult')?.addEventListener('click', approveDataChartResult);
+  $('#dataChartEditResult')?.addEventListener('click', () => {
+    const editor = $('#dataChartResultText');
+    if (editor) {
+      editor.hidden = false;
+      editor.focus();
+    }
+    state.dataChartApproved = false;
+    setState('datachart', '正在编辑回填文字，图片仍会在差异区预览。', 'running');
+    refreshDataChartDiff();
+    saveDraft();
+  });
+  $('#dataChartResultText')?.addEventListener('input', () => {
+    state.dataChartApproved = false;
+    refreshDataChartDiff();
+    saveDraft();
+  });
 }
 
 function parseGeneratedAbstractBlock(text, language = 'cn') {
@@ -2679,7 +3747,10 @@ async function reviewText(inputSelector, outputSelector, reviewSelector, sourceT
 
 async function runPanel(kind) {
   if (kind === 'ai') {
-    const data = await runTransformPanel('ai', '#aiInput', '#aiOutput', { action: selectedAction('ai') });
+    const data = await runTransformPanel('ai', '#aiInput', '#aiOutput', {
+      action: selectedAction('ai'),
+      ...activePromptPayload('ai'),
+    });
     if (data) {
       $('#aiReview').textContent = renderAnalysisSummary(data.analysis, 'ai');
       refreshPanelDiff('ai');
@@ -2692,6 +3763,7 @@ async function runPanel(kind) {
     const data = await runTransformPanel('plagiarism', '#plagiarismInput', '#plagiarismOutput', {
       action: selectedAction('plagiarism'),
       sourceText,
+      ...activePromptPayload('plagiarism'),
     });
     if (data) {
       setText('#plagiarismReview', '');
@@ -2709,6 +3781,7 @@ async function runPanel(kind) {
       executionMode: $('#polishExecutionMode').value,
       topic: textValue('#polishTopic'),
       notes: textValue('#polishNotes'),
+      ...activePromptPayload('polish'),
     });
     if (data) {
       setText('#polishReview', '');
@@ -2719,7 +3792,15 @@ async function runPanel(kind) {
     }
   }
   if (kind === 'translate') {
-    const data = await runTransformPanel('polish', '#polishInput', '#polishOutput', { action: 'polish', polishMode: 'full' });
+    const data = await runTransformPanel('polish', '#polishInput', '#polishOutput', {
+      action: 'polish',
+      polishMode: 'full',
+      taskType: $('#polishTaskType').value,
+      executionMode: $('#polishExecutionMode').value,
+      topic: textValue('#polishTopic'),
+      notes: textValue('#polishNotes'),
+      ...activePromptPayload('polish'),
+    });
     if (data) {
       setText('#polishReview', '');
       syncResultOutputToEditor('polish');
@@ -3005,9 +4086,17 @@ function restoreSelectedHistory() {
   state.paperSectionContentSources = record.paperSectionContentSources || {};
   state.lastAnalysis = record.analysis || null;
   state.paperTemplate = record.paperTemplate || null;
+  state.dataChartTargets = Array.isArray(record.dataChartTargets) ? record.dataChartTargets : [];
+  state.selectedDataChartTargetId = record.selectedDataChartTargetId || '';
+  state.dataChartResult = record.dataChartResult || null;
+  state.dataChartSearchResult = record.dataChartSearchResult || null;
+  state.dataChartApproved = Boolean(record.dataChartApproved);
   applyFields(record.fields || {});
   syncModeSelections();
   renderPaperTemplate();
+  renderDataChartTargets();
+  renderDataChartSourceList();
+  renderDataChartResult();
   if (record.page === 'correction' && record.analysis?.correction) {
     renderCorrection(record.analysis.correction);
   } else if (record.page === 'correction' && record.analysis) {
@@ -3031,6 +4120,7 @@ function bindActions() {
     setPage(link.dataset.pageLink);
   }));
   bindModeCards();
+  bindDataChartActions();
   $$('[data-paper-action]').forEach((button) => button.addEventListener('click', () => runPaperAction(button.dataset.paperAction)));
   ['#totalWordCountAuto', '#wordCountAuto'].forEach((selector) => {
     $(selector)?.addEventListener('change', () => {
@@ -3073,6 +4163,18 @@ function bindActions() {
     saveDraft();
   });
   $$('[data-run-panel]').forEach((button) => button.addEventListener('click', () => runPanel(button.dataset.runPanel)));
+  $$('[data-prompt-panel]').forEach((button) => button.addEventListener('click', () => openPromptTemplateDialog(button.dataset.promptPanel)));
+  $('#promptTemplateClose')?.addEventListener('click', closePromptTemplateDialog);
+  $('#promptTemplateAdd')?.addEventListener('click', addPromptTemplate);
+  $('#promptTemplateSave')?.addEventListener('click', saveSelectedPromptTemplate);
+  $('#promptTemplateEnable')?.addEventListener('click', enableSelectedPromptTemplate);
+  $('#promptTemplateDelete')?.addEventListener('click', deleteSelectedPromptTemplate);
+  $('#promptTemplateDialog')?.addEventListener('click', (event) => {
+    if (event.target?.id === 'promptTemplateDialog') closePromptTemplateDialog();
+  });
+  window.addEventListener('keydown', (event) => {
+    if (event.key === 'Escape' && !$('#promptTemplateDialog')?.hidden) closePromptTemplateDialog();
+  });
   $$('[data-review-panel="ai"]').forEach((button) => button.addEventListener('click', () => reviewText('#aiInput', '#aiOutput', '#aiReview')));
   $$('[data-review-panel="plagiarism"]').forEach((button) => button.addEventListener('click', () => reviewText('#plagiarismInput', '#plagiarismOutput', '#plagiarismReview', textValue('#plagiarismSource'))));
   $$('[data-review-panel="polish"]').forEach((button) => button.addEventListener('click', () => reviewText('#polishInput', '#polishOutput', '#polishReview')));
@@ -3179,6 +4281,7 @@ function restoreTheme() {
 restoreTheme();
 bindActions();
 restoreDraft();
+setDataChartTableText(textValue('#dataChartDataTable'));
 syncWordLimitControls();
 routeFromHash();
 renderHistory();

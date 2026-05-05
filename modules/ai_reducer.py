@@ -161,9 +161,21 @@ class AIReducer:
         )
         return rendered['system'], rendered['prompt']
 
-    def rewrite_light(self, text: str) -> str:
+    @staticmethod
+    def _append_custom_prompt(prompt: str, custom_prompt: str = '') -> str:
+        custom = str(custom_prompt or '').strip()
+        if not custom:
+            return prompt
+        return (
+            f'{prompt.rstrip()}\n\n'
+            f'用户启用的补充提示词：\n{custom}\n\n'
+            '请在不违背上述基本任务，并保留事实、数据、公式、术语和引用编号的前提下执行。'
+        )
+
+    def rewrite_light(self, text: str, custom_prompt: str = '') -> str:
         """轻度去痕。"""
         system, prompt = self._render_rewrite_prompt(text, 'light', '轻度去痕')
+        prompt = self._append_custom_prompt(prompt, custom_prompt)
         return self.api.call_sync(
             prompt,
             system,
@@ -171,9 +183,10 @@ class AIReducer:
             usage_context=self._usage_context('rewrite_light'),
         )
 
-    def rewrite_deep(self, text: str) -> str:
+    def rewrite_deep(self, text: str, custom_prompt: str = '') -> str:
         """深度重构。"""
         system, prompt = self._render_rewrite_prompt(text, 'deep', '深度重构')
+        prompt = self._append_custom_prompt(prompt, custom_prompt)
         return self.api.call_sync(
             prompt,
             system,
@@ -181,9 +194,10 @@ class AIReducer:
             usage_context=self._usage_context('rewrite_deep'),
         )
 
-    def rewrite_academic(self, text: str) -> str:
+    def rewrite_academic(self, text: str, custom_prompt: str = '') -> str:
         """学术拟合。"""
         system, prompt = self._render_rewrite_prompt(text, 'academic', '学术拟合')
+        prompt = self._append_custom_prompt(prompt, custom_prompt)
         return self.api.call_sync(
             prompt,
             system,

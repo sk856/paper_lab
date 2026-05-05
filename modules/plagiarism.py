@@ -168,9 +168,21 @@ class PlagiarismReducer:
         )
         return rendered['system'], rendered['prompt']
 
-    def reduce_light(self, text: str, source_text: str = '') -> str:
+    @staticmethod
+    def _append_custom_prompt(prompt: str, custom_prompt: str = '') -> str:
+        custom = str(custom_prompt or '').strip()
+        if not custom:
+            return prompt
+        return (
+            f'{prompt.rstrip()}\n\n'
+            f'用户启用的补充提示词：\n{custom}\n\n'
+            '请在不违背上述基本任务，并保留事实、数据、公式、术语和引用编号的前提下执行。'
+        )
+
+    def reduce_light(self, text: str, source_text: str = '', custom_prompt: str = '') -> str:
         """轻度降重。"""
         system, prompt = self._render_reduce_prompt(text, source_text, 'light', '轻度降重')
+        prompt = self._append_custom_prompt(prompt, custom_prompt)
         return self.api.call_sync(
             prompt,
             system,
@@ -178,9 +190,10 @@ class PlagiarismReducer:
             usage_context=self._usage_context('reduce_light'),
         )
 
-    def reduce_medium(self, text: str, source_text: str = '') -> str:
+    def reduce_medium(self, text: str, source_text: str = '', custom_prompt: str = '') -> str:
         """中度降重。"""
         system, prompt = self._render_reduce_prompt(text, source_text, 'medium', '中度降重')
+        prompt = self._append_custom_prompt(prompt, custom_prompt)
         return self.api.call_sync(
             prompt,
             system,
@@ -188,9 +201,10 @@ class PlagiarismReducer:
             usage_context=self._usage_context('reduce_medium'),
         )
 
-    def reduce_deep(self, text: str, source_text: str = '') -> str:
+    def reduce_deep(self, text: str, source_text: str = '', custom_prompt: str = '') -> str:
         """深度降重。"""
         system, prompt = self._render_reduce_prompt(text, source_text, 'deep', '深度降重')
+        prompt = self._append_custom_prompt(prompt, custom_prompt)
         return self.api.call_sync(
             prompt,
             system,

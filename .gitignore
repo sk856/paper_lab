@@ -16,6 +16,7 @@ __pycache__/
 debug_*.log
 server*.log
 /logs
+/web/generated/
 /config.enc
 /config_dir.json
 /history.json
