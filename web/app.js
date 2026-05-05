@@ -1746,6 +1746,107 @@ function collectPaperSectionsPayload(includeReference = false) {
     .filter((section) => section.content && (includeReference || paperSpecialKind(section.title) !== 'reference'));
 }
 
+function collectPaperExportSections() {
+  storeCurrentPaperEditor({ skipEmptyOverwrite: true });
+  const sections = state.paperSections || [];
+  const numbers = outlineSectionNumbers(sections);
+  return sections
+    .map((section, index) => {
+      const content = paperSectionBodyContent(section.title);
+      const hasChildren = paperSectionHasChildren(section.title);
+      const kind = paperSpecialKind(section.title);
+      const number = formatOutlineSectionNumber(numbers[index] ?? '');
+      const displayTitle = number && !kind ? `${number} ${section.title}` : section.title;
+      return {
+        title: section.title,
+        displayTitle,
+        level: Math.min(Math.max(Number(section.level || 1), 1), 4),
+        kind,
+        hasChildren,
+        content: hasChildren ? '' : content,
+      };
+    })
+    .filter((section) => section.hasChildren || section.content);
+}
+
+function paperExportPayload(format = 'docx') {
+  const sections = collectPaperExportSections();
+  const content = sections
+    .map((section) => [section.displayTitle || section.title, section.content].filter(Boolean).join('\n'))
+    .filter(Boolean)
+    .join('\n\n')
+    .trim();
+  return {
+    format,
+    title: textValue('#paperTopic') || '论文导出',
+    subject: textValue('#paperSubject'),
+    paperStyle: $('#paperStyle')?.value || '',
+    referenceStyle: $('#referenceStyle')?.value || '',
+    outline: textValue('#paperOutline'),
+    sections,
+    content,
+  };
+}
+
+function downloadBlob(blob, filename) {
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement('a');
+  link.href = url;
+  link.download = filename || '论文导出';
+  document.body.appendChild(link);
+  link.click();
+  link.remove();
+  window.setTimeout(() => URL.revokeObjectURL(url), 1200);
+}
+
+function filenameFromContentDisposition(header, fallback) {
+  const value = String(header || '');
+  const utf8Match = value.match(/filename\*=UTF-8''([^;]+)/i);
+  if (utf8Match) {
+    try {
+      return decodeURIComponent(utf8Match[1]);
+    } catch (error) {
+      return utf8Match[1];
+    }
+  }
+  const asciiMatch = value.match(/filename="?([^";]+)"?/i);
+  return asciiMatch ? asciiMatch[1] : fallback;
+}
+
+async function exportPaperDocument() {
+  const format = $('#paperExportFormat')?.value || 'docx';
+  const payload = paperExportPayload(format);
+  if (!payload.sections.length && !payload.content) {
+    setState('paper', '没有可导出的论文内容', 'error');
+    return;
+  }
+  setState('paper', '正在导出论文...', 'running');
+  try {
+    const response = await fetch('/api/paper/export', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    });
+    if (!response.ok) {
+      const raw = await response.text();
+      try {
+        const parsed = raw ? JSON.parse(raw) : {};
+        throw new Error(parsed.error || `导出失败 (${response.status})`);
+      } catch (error) {
+        throw new Error(error.message || raw || `导出失败 (${response.status})`);
+      }
+    }
+    const blob = await response.blob();
+    const fallbackExt = format === 'docx' ? 'docx' : (format === 'txt' ? 'txt' : 'md');
+    const fallbackName = `${payload.title || '论文导出'}.${fallbackExt}`;
+    const filename = filenameFromContentDisposition(response.headers.get('Content-Disposition'), fallbackName);
+    downloadBlob(blob, filename);
+    setState('paper', '论文已导出', 'done');
+  } catch (error) {
+    setState('paper', `导出失败：${error.message}`, 'error');
+  }
+}
+
 function collectFullPaperText(includeReference = false) {
   const sections = collectPaperSectionsPayload(includeReference);
   return sections.map((section) => `${section.title}\n${section.content}`).join('\n\n').trim();
@@ -4122,6 +4223,7 @@ function bindActions() {
   bindModeCards();
   bindDataChartActions();
   $$('[data-paper-action]').forEach((button) => button.addEventListener('click', () => runPaperAction(button.dataset.paperAction)));
+  $('#exportPaperButton')?.addEventListener('click', exportPaperDocument);
   ['#totalWordCountAuto', '#wordCountAuto'].forEach((selector) => {
     $(selector)?.addEventListener('change', () => {
       syncWordLimitControls();

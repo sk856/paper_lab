@@ -30,6 +30,7 @@ from modules.intelligent_corrector import CATEGORY_LABELS, CATEGORY_ORDER, Intel
 from modules.plagiarism import PlagiarismReducer
 from modules.polisher import AcademicPolisher
 from modules.paper_writer import PaperWriter
+from modules.paper_exporter import export_paper_document
 from modules.provider_registry import PRESET_MAP, PRESET_OPTIONS, get_static_models, normalize_provider_type
 from modules.runtime_paths import get_runtime_paths
 from modules.reference_manager import (
@@ -1516,6 +1517,19 @@ class RequestHandler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
+    def _send_binary(self, body, filename, content_type='application/octet-stream', status=200):
+        filename = os.path.basename(str(filename or 'download.bin')).replace('\r', '').replace('\n', '')
+        safe_ascii = re.sub(r'[^A-Za-z0-9_.-]+', '_', filename) or 'download.bin'
+        quoted_utf8 = ''.join(f'%{byte:02X}' for byte in filename.encode('utf-8'))
+        data = bytes(body or b'')
+        self.send_response(status)
+        self.send_header('Content-Type', content_type)
+        self.send_header('Content-Disposition', f'attachment; filename="{safe_ascii}"; filename*=UTF-8\'\'{quoted_utf8}')
+        self.send_header('Cache-Control', 'no-store, no-cache, must-revalidate, max-age=0')
+        self.send_header('Content-Length', str(len(data)))
+        self.end_headers()
+        self.wfile.write(data)
+
     def _read_json(self):
         length = int(self.headers.get('Content-Length') or 0)
         raw = self.rfile.read(length) if length else b'{}'
@@ -1547,6 +1561,10 @@ class RequestHandler(BaseHTTPRequestHandler):
                 data = self.workbench.parse_template(payload)
             elif parsed.path == '/api/data-chart':
                 data = self.workbench.run_data_chart(payload)
+            elif parsed.path == '/api/paper/export':
+                exported = export_paper_document(payload, PROJECT_DIR, WEB_DIR)
+                self._send_binary(exported.body, exported.filename, exported.content_type)
+                return
             else:
                 self._send_json({'ok': False, 'error': 'Not found'}, status=404)
                 return

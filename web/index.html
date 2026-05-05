@@ -104,6 +104,12 @@
               <button class="secondary-button" data-paper-action="batch-write" type="button">撰写全部章节</button>
               <button class="secondary-button" data-paper-action="abstract" type="button">生成摘要</button>
               <button class="secondary-button" data-paper-action="references" type="button">整理参考文献</button>
+              <select id="paperExportFormat" class="input-box paper-export-format" aria-label="导出格式">
+                <option value="docx">Word</option>
+                <option value="markdown">Markdown</option>
+                <option value="txt">TXT</option>
+              </select>
+              <button class="secondary-button" id="exportPaperButton" type="button">导出论文</button>
             </div>
             <div class="paper-push-panel">
               <div class="paper-push-copy">

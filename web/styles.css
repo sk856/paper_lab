@@ -720,6 +720,12 @@ svg { width: 22px; height: 22px; fill: none; stroke: currentColor; stroke-width:
   flex-wrap: wrap;
   gap: 0.65rem;
   margin: 0.5rem 0 1rem;
+  align-items: center;
+}
+.paper-export-format {
+  width: 128px;
+  min-height: 42px;
+  flex: 0 0 128px;
 }
 .paper-push-panel {
   display: grid;
