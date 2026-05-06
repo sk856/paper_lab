@@ -1393,6 +1393,7 @@ class WebWorkbench:
                 target=target,
                 full_text=payload.get('fullText', '') or payload.get('text', ''),
                 user_data=payload.get('userData', ''),
+                data_file=payload.get('dataFile') if isinstance(payload.get('dataFile'), dict) else None,
             )
         if action == 'generate':
             result = data_chart.generate_chart(

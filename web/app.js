@@ -25,6 +25,7 @@ const state = {
   dataChartResult: null,
   dataChartSearchResult: null,
   dataChartApproved: false,
+  dataChartDataFile: null,
   promptTemplates: {},
   activePromptScope: '',
   selectedPromptTemplateId: '',
@@ -38,6 +39,8 @@ const state = {
 const DEFAULT_REQUEST_TIMEOUT_MS = 120000;
 const PAPER_REQUEST_TIMEOUT_MS = 210000;
 const BATCH_PAPER_REQUEST_TIMEOUT_MS = 420000;
+const DATA_CHART_SEARCH_TIMEOUT_MS = 300000;
+const DATA_CHART_GENERATE_TIMEOUT_MS = 240000;
 const BATCH_WRITE_MAX_ATTEMPTS = 3;
 
 const STORAGE_KEYS = {
@@ -164,6 +167,7 @@ function setText(selector, value) {
 
 function readNodeText(node) {
   if (!node) return '';
+  if (node.type === 'file') return '';
   if (node.type === 'checkbox') return node.checked ? '1' : '0';
   if (isPaperEditorNode(node)) return readPaperEditorText(node);
   if (node.isContentEditable) {
@@ -174,6 +178,7 @@ function readNodeText(node) {
 
 function writeNodeText(node, value) {
   if (!node) return;
+  if (node.type === 'file') return;
   if (node.type === 'checkbox') {
     node.checked = value === true || value === '1' || value === 'true' || value === 'on';
     return;
@@ -826,6 +831,7 @@ function restoreDraft() {
   state.dataChartResult = draft.dataChartResult || null;
   state.dataChartSearchResult = draft.dataChartSearchResult || null;
   state.dataChartApproved = Boolean(draft.dataChartApproved);
+  state.dataChartDataFile = null;
   state.promptTemplates = normalizePromptTemplates(draft.promptTemplates || {});
   applyFields(draft.fields);
   syncModeSelections();
@@ -835,6 +841,7 @@ function restoreDraft() {
   renderDataChartTargets();
   renderDataChartSourceList();
   renderDataChartResult();
+  updateDataChartDataFileNote();
 }
 
 function getHistoryRecords() {
@@ -2032,6 +2039,7 @@ function resetDataChartResultsForNewInput() {
   state.dataChartResult = null;
   state.dataChartSearchResult = null;
   state.dataChartApproved = false;
+  state.dataChartDataFile = null;
   setText('#dataChartQuery', '');
   setDataChartTableText('');
   renderDataChartSourceList();
@@ -2039,6 +2047,7 @@ function resetDataChartResultsForNewInput() {
   resetDataChartDiff();
   renderDataChartTargets();
   renderDataChartResult();
+  updateDataChartDataFileNote();
   updateDataChartStep(1);
 }
 
@@ -2684,7 +2693,12 @@ function currentDataChartTarget() {
 
 function dataChartArtifactType(targetOrResult = currentDataChartTarget()) {
   const value = String(targetOrResult?.artifactType || targetOrResult?.insertType || '').toLowerCase();
+  if (!targetOrResult && $('#dataChartType')?.value === 'table') return 'table';
   return value === 'table' ? 'table' : 'figure';
+}
+
+function selectedDataChartArtifactType(target = currentDataChartTarget()) {
+  return $('#dataChartType')?.value === 'table' || dataChartArtifactType(target) === 'table' ? 'table' : 'figure';
 }
 
 function dataChartTargetIntent(target = currentDataChartTarget()) {
@@ -2692,9 +2706,17 @@ function dataChartTargetIntent(target = currentDataChartTarget()) {
 }
 
 function dataChartTitleFromIntent(value, target = currentDataChartTarget()) {
+  const dataNeed = String(target?.dataNeed || '').replace(/\s+/g, '');
+  if (dataChartArtifactType(target) === 'table') {
+    const indicatorMatch = dataNeed.match(/^(.{2,24}?指标体系)/);
+    if (indicatorMatch) return `${indicatorMatch[1]}表`;
+    const variableMatch = dataNeed.match(/^(.{2,20}?(?:变量|口径|定义|数据来源))/);
+    if (variableMatch) return `${variableMatch[1]}表`;
+  }
   let text = String(value || '')
     .replace(/\s+/g, '')
-    .replace(/^(该段|本文|本段|建议|适合|应当|可以|可|需|需要|补充|展示|分析|比较|对比|绘制|生成|构建|呈现|说明|反映)/, '')
+    .replace(/^(?:该段|本文|本段|建议|适合|应当|可以|可|需|需要|提出要|提出|要|补充|展示|分析|比较|对比|绘制|生成|构建|呈现|说明|反映)+/, '')
+    .replace(/^(?:一张|一个|一份|有关|关于|用于|用来|体现|刻画|呈现)+/, '')
     .replace(/若不以.+$/, '')
     .replace(/[，。；;：:].*$/, '')
     .replace(/(数据|统计数据|图表|图|表|变化趋势|趋势|对比|分析|情况|内容|位置)$/, '')
@@ -2708,13 +2730,13 @@ function updateDataChartTitleLabel(target = currentDataChartTarget()) {
   const input = $('#dataChartTitle');
   const label = input?.closest('label')?.querySelector('span');
   const typeLabel = $('#dataChartType')?.closest('label')?.querySelector('span');
-  const isTable = dataChartArtifactType(target) === 'table';
+  const type = $('#dataChartType');
+  const isTable = dataChartArtifactType(target) === 'table' || type?.value === 'table';
   if (label) label.textContent = isTable ? '表格标题' : '图表标题';
   if (typeLabel) typeLabel.textContent = isTable ? '生成类型' : '图表类型';
-  const type = $('#dataChartType');
   if (type) {
-    type.value = isTable ? 'table' : (target?.chartType || type.value || 'bar');
-    type.disabled = isTable;
+    if (dataChartArtifactType(target) === 'table') type.value = 'table';
+    else type.value = type.value || target?.chartType || 'bar';
   }
 }
 
@@ -3058,12 +3080,12 @@ function renderDataChartResult() {
 }
 
 const DATA_CHART_TABLE_COLUMNS = [
-  { key: 'label', label: '标签', fallback: 0 },
-  { key: 'value', label: '数值', fallback: 1 },
-  { key: 'sourceName', label: '来源名称', fallback: 2 },
-  { key: 'publisher', label: '发布机构', fallback: 3 },
-  { key: 'url', label: '链接', fallback: 4 },
-  { key: 'note', label: '备注', fallback: 5 },
+  { key: 'label', label: '标签', placeholder: '指标/年份/地区', fallback: 0 },
+  { key: 'value', label: '数值', placeholder: '待补数值', fallback: 1 },
+  { key: 'sourceName', label: '来源名称', placeholder: '报告/年鉴/数据库', fallback: 2 },
+  { key: 'publisher', label: '发布机构', placeholder: '发布机构', fallback: 3 },
+  { key: 'url', label: '链接', placeholder: '核验链接', fallback: 4 },
+  { key: 'note', label: '备注', placeholder: '口径/页码/表号', fallback: 5 },
 ];
 
 function csvEscape(value) {
@@ -3093,6 +3115,13 @@ function dataChartRowsWithNumericValues(rows = dataChartEditableRows()) {
 function dataChartRowsReadyForGeneration(rows = dataChartEditableRows()) {
   return dataChartRowsWithNumericValues(rows).filter((row) => (
     String(row.sourceName || row.publisher || row.url || row.note || '').trim()
+  ));
+}
+
+function dataChartRowsReadyForTable(rows = dataChartEditableRows()) {
+  return (rows || []).filter((row) => (
+    String(row.label || '').trim()
+    && String(row.sourceName || row.publisher || row.url || row.note || row.value || '').trim()
   ));
 }
 
@@ -3162,6 +3191,52 @@ function dataChartRowsToCsv(rows) {
   return output.join('\n');
 }
 
+function updateDataChartDataFileNote() {
+  const note = $('#dataChartDataFileNote');
+  if (!note) return;
+  const file = state.dataChartDataFile;
+  if (!file) {
+    note.textContent = '可选上传 CSV、TXT 或 XLSX，供 AI 辅助检索和抽数；不上传也可以继续。';
+    return;
+  }
+  const sizeKb = Math.max(1, Math.round((Number(file.size) || 0) / 1024));
+  note.textContent = `已选择：${file.name || '数据文件'}，约 ${sizeKb} KB。AI 会把它作为辅助材料，不会强制依赖。`;
+}
+
+function readDataChartDataFile(file) {
+  if (!file) {
+    state.dataChartDataFile = null;
+    updateDataChartDataFileNote();
+    saveDraft();
+    return;
+  }
+  const maxSize = 8 * 1024 * 1024;
+  if (file.size > maxSize) {
+    state.dataChartDataFile = null;
+    updateDataChartDataFileNote();
+    setState('datachart', '辅助数据文件过大，请上传 8MB 以内的 CSV、TXT 或 XLSX。', 'error');
+    return;
+  }
+  const reader = new FileReader();
+  reader.onload = () => {
+    state.dataChartDataFile = {
+      name: file.name || 'data',
+      type: file.type || '',
+      size: file.size || 0,
+      dataUrl: String(reader.result || ''),
+    };
+    updateDataChartDataFileNote();
+    setState('datachart', '已读取辅助数据文件；下一次检索会把它作为可选材料。', 'done');
+    saveDraft();
+  };
+  reader.onerror = () => {
+    state.dataChartDataFile = null;
+    updateDataChartDataFileNote();
+    setState('datachart', '辅助数据文件读取失败，可以不上传继续检索。', 'error');
+  };
+  reader.readAsDataURL(file);
+}
+
 function dataChartEditableRows() {
   return $$('#dataChartEditableTable .data-chart-table-row').map((rowNode) => {
     const row = {};
@@ -3191,7 +3266,7 @@ function renderDataChartEditableTable(rows = []) {
           ${DATA_CHART_TABLE_COLUMNS.map((column) => `
             <label class="data-chart-table-cell">
               <span>${escapeHtml(column.label)}</span>
-              <input class="data-chart-table-input" data-data-table-cell="${column.key}" aria-label="${escapeHtml(column.label)}" placeholder="${escapeHtml(column.label)}" value="${escapeHtml(row?.[column.key] || '')}" />
+              <input class="data-chart-table-input" data-data-table-cell="${column.key}" aria-label="${escapeHtml(column.label)}" placeholder="${escapeHtml(column.placeholder || column.label)}" value="${escapeHtml(row?.[column.key] || '')}" />
             </label>
           `).join('')}
           <button class="secondary-button compact data-chart-row-remove" type="button" title="删除行">删除</button>
@@ -3320,10 +3395,11 @@ function dataChartTableSummary(data = state.dataChartSearchResult) {
   const lines = tableText.split(/\r?\n/).filter((line) => line.trim());
   const rowCount = rows.length || Math.max(0, lines.length - 1);
   const sourceNote = String(data?.sourceNote || '').trim();
+  const isTable = selectedDataChartArtifactType() === 'table';
   return [
-    sourceNote || '请审核下方数据表，确认每行数据、单位和来源后再生成图表。',
+    sourceNote || (isTable ? '请审核下方数据表，确认每行指标、口径和来源后再生成表格。' : '请审核下方数据表，确认每行数据、单位和来源后再生成图表。'),
     rowCount ? `已汇总 ${rowCount} 行候选数据。` : '尚未汇总到可作图数据。',
-    '最终用于绘图的数据以“可编辑数据表”为准，格式：标签,数值,来源/备注。',
+    isTable ? '最终用于生成论文表格的内容以“可编辑数据表”为准，数值列可留空。' : '最终用于绘图的数据以“可编辑数据表”为准，格式：标签,数值,来源/备注。',
   ].join('\n');
 }
 
@@ -3427,6 +3503,8 @@ async function searchDataChartData() {
       ...target,
       intent: intent || target.intent || target.reason || '',
       suggestion: target.suggestion || target.reason || '',
+      artifactType: selectedDataChartArtifactType(target),
+      insertType: selectedDataChartArtifactType(target),
     };
     const data = await withRunningState('datachart', 'AI 正在检索数据并整理来源...', async () => requestJson('/api/data-chart', {
       method: 'POST',
@@ -3436,20 +3514,24 @@ async function searchDataChartData() {
         query: searchQuery,
         target: payloadTarget,
         fullText: textValue('#dataChartFullText'),
+        dataFile: state.dataChartDataFile || null,
       }),
+    }, {
+      timeoutMs: DATA_CHART_SEARCH_TIMEOUT_MS,
+      timeoutMessage: `数据检索请求等待超过 ${Math.round(DATA_CHART_SEARCH_TIMEOUT_MS / 1000)} 秒仍未返回。请检查网络状态，或到「配置管理」切换接口/模型后重试。`,
     }));
     state.dataChartSearchResult = data;
     const rows = dataChartRowsFromSearch(data);
     if (rows.length) {
       setDataChartRows(rows);
-    } else if (data.tableText && !data.needsManualData) {
+    } else if (data.tableText) {
       setDataChartTableText(data.tableText);
     } else if (data.needsManualData && !textValue('#dataChartDataTable')) {
       setDataChartRows([]);
     }
     if (data.title) setText('#dataChartTitle', data.title);
     if (data.unit && !textValue('#dataChartUnit')) setText('#dataChartUnit', data.unit);
-    if ($('#dataChartType')) $('#dataChartType').value = dataChartArtifactType(target) === 'table' ? 'table' : (data.chartType || target.chartType || 'bar');
+    if ($('#dataChartType')) $('#dataChartType').value = selectedDataChartArtifactType(target) === 'table' ? 'table' : (data.chartType || target.chartType || 'bar');
     updateDataChartTitleLabel(target);
     renderDataChartSourceList(data);
     updateDataChartStep(3);
@@ -3485,27 +3567,36 @@ function fillDataChartSampleTable() {
 }
 
 async function generateDataChart() {
-  const target = currentDataChartTarget();
+  const currentTarget = currentDataChartTarget();
+  const artifactType = selectedDataChartArtifactType(currentTarget);
+  const target = currentTarget ? { ...currentTarget, artifactType, insertType: artifactType } : null;
   if (!target) {
     setState('datachart', '请先选择候选段落。', 'error');
     return;
+  }
+  if (artifactType === 'table') {
+    target.tableTitle = textValue('#dataChartTitle') || target.tableTitle || target.chartTitle || target.title || '';
   }
   syncDataChartTableFromEditable();
   if (!textValue('#dataChartDataTable')) {
     setState('datachart', '请先搜索或填写已审核的数据表。', 'error');
     return;
   }
-  if (state.dataChartSearchResult?.needsManualData && dataChartRowsReadyForGeneration().length < 2) {
-    setState('datachart', '当前检索没有得到可直接使用的数据。请在可编辑数据表中补齐至少 2 行真实数值和来源后再生成。', 'error');
-    return;
+  if (artifactType === 'table') {
+    if (dataChartRowsReadyForTable().length < 1) {
+      setState('datachart', '当前表格还没有可用行。请至少保留 1 行指标/变量及来源或备注后再生成表格。', 'error');
+      return;
+    }
+  } else if (dataChartRowsReadyForGeneration().length < 2) {
+      setState('datachart', '当前检索没有得到可直接用于绘图的数值。请在可编辑数据表中补齐至少 2 行真实数值和来源后再生成图。', 'error');
+      return;
   }
-  if (dataChartRowsLookLikeVariableCodes()) {
+  if (artifactType !== 'table' && dataChartRowsLookLikeVariableCodes()) {
     setState('datachart', '当前表格像是变量代码/控制变量清单，数值列是 1、2、3 这类序号，不是真实统计值。请重新检索或手动填写可核验数据后再生成。', 'error');
     return;
   }
   storeCurrentPaperEditor({ skipEmptyOverwrite: true });
   try {
-    const artifactType = dataChartArtifactType(target);
     const data = await withRunningState('datachart', artifactType === 'table' ? '正在生成论文表格与改写段落...' : '正在通过 Python 生成图表...', async () => requestJson('/api/data-chart', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -3519,6 +3610,9 @@ async function generateDataChart() {
         referenceStyle: textValue('#referenceStyle') || 'GB/T 7714',
         allSections: paperSectionsForReferenceSync(),
       }),
+    }, {
+      timeoutMs: DATA_CHART_GENERATE_TIMEOUT_MS,
+      timeoutMessage: `图表生成请求等待超过 ${Math.round(DATA_CHART_GENERATE_TIMEOUT_MS / 1000)} 秒仍未返回。请检查网络状态，或稍后重试。`,
     }));
     state.dataChartResult = data;
     state.dataChartApproved = false;
@@ -3601,6 +3695,12 @@ function bindDataChartActions() {
   $('#dataChartBackfill')?.addEventListener('click', backfillDataChartResult);
   $('#dataChartUseSample')?.addEventListener('click', fillDataChartSampleTable);
   $('#dataChartAddRow')?.addEventListener('click', () => addDataChartEditableRow());
+  $('#dataChartDataFile')?.addEventListener('change', (event) => readDataChartDataFile(event.target.files?.[0]));
+  $('#dataChartType')?.addEventListener('change', () => {
+    updateDataChartTitleLabel(currentDataChartTarget());
+    refreshDataChartDiff();
+    saveDraft();
+  });
   $('#dataChartApproveResult')?.addEventListener('click', approveDataChartResult);
   $('#dataChartEditResult')?.addEventListener('click', () => {
     const editor = $('#dataChartResultText');
@@ -4665,6 +4765,7 @@ function restoreSelectedHistory() {
   renderDataChartTargets();
   renderDataChartSourceList();
   renderDataChartResult();
+  updateDataChartDataFileNote();
   if (record.page === 'correction' && record.analysis?.correction) {
     renderCorrection(record.analysis.correction);
   } else if (record.page === 'correction' && record.analysis) {

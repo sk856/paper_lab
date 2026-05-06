@@ -15,6 +15,7 @@ import os
 import re
 import urllib.parse
 import urllib.request
+import zipfile
 
 from PIL import Image, ImageDraw, ImageFont
 
@@ -22,8 +23,8 @@ from PIL import Image, ImageDraw, ImageFont
 class DataChartAssistant:
     """AI-first workflow for locating chart opportunities and rendering charts."""
 
-    SEARCH_TIMEOUT = 12
-    PAGE_TIMEOUT = 14
+    SEARCH_TIMEOUT = 8
+    PAGE_TIMEOUT = 8
     USER_AGENT = (
         'Mozilla/5.0 (Windows NT 10.0; Win64; x64) '
         'AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36'
@@ -283,6 +284,8 @@ class DataChartAssistant:
         values = {}
         usable = 0
         for row in rows or []:
+            if row.get('value') is None:
+                continue
             year, series = cls._split_label_axis(row.get('label', ''))
             if not year or not series:
                 continue
@@ -311,8 +314,9 @@ class DataChartAssistant:
             return ''
         for field in ('intent', 'suggestion', 'chartTitle', 'tableTitle', 'title', 'dataNeed', 'query'):
             value = re.sub(r'\s+', '', str(target.get(field, '') or '').strip())
-            value = re.sub(r'^(该段|建议|适合|应当|可以|补充|展示|分析|比较|对比|绘制|生成)', '', value)
-            value = re.sub(r'(，|。|；|;).*$', '', value)
+            value = re.sub(r'^(?:该段|本文|本段|建议|适合|应当|可以|可|需|需要|提出要|提出|要|补充|展示|分析|比较|对比|绘制|生成|构建|呈现|说明|反映)+', '', value)
+            value = re.sub(r'^(?:一张|一个|一份|有关|关于|用于|用来|体现|刻画|呈现)+', '', value)
+            value = re.sub(r'(若不以|，|。|；|;).*$', '', value)
             value = re.sub(r'(数据|统计数据|图表|图|变化趋势|趋势|对比)$', '', value)
             if value and len(value) >= 3:
                 return value[:24]
@@ -397,6 +401,32 @@ class DataChartAssistant:
         return value[:34] or fallback
 
     @classmethod
+    def _normalize_table_title(cls, title, rows=None, target=None):
+        target = target or {}
+        value = re.sub(r'\s+', '', str(title or '').strip())
+        value = re.sub(r'(图表|数据图|统计图|折线图|柱状图|条形图|饼图|结构图|图)$', '表', value)
+        value = re.sub(r'^(?:该段|本文|本段|建议|适合|应当|可以|可|需|需要|提出要|提出|要|补充|展示|分析|比较|对比|绘制|生成|构建|呈现|说明|反映)+', '', value)
+        value = re.sub(r'^(?:一张|一个|一份|有关|关于|用于|用来|体现|刻画|呈现)+', '', value)
+        value = re.sub(r'(若不以|，|。|；|;).*$', '', value)
+        if not value or cls._title_needs_rewrite(value, rows or [], target):
+            hint = cls._target_title_hint(target)
+            data_need = re.sub(r'\s+', '', str(target.get('dataNeed', '') or ''))
+            indicator_match = re.search(r'(.{0,20}?指标体系)', data_need)
+            variable_match = re.search(r'(.{0,18}?(?:变量|口径|定义|数据来源))', data_need)
+            joined = f'{hint}{data_need}'
+            if indicator_match or any(term in joined for term in ('指标体系', '一级维度', '二级指标', '权重', '标准化方向', '指标属性')):
+                value = f'{(indicator_match.group(1) if indicator_match else hint) or "评价指标体系"}表'
+            elif variable_match or any(term in joined for term in ('变量', '口径', '定义', '数据来源')):
+                value = f'{(variable_match.group(1) if variable_match else hint) or "变量口径"}表'
+            elif hint:
+                value = f'{hint}表'
+            else:
+                value = '论文数据表'
+        if not value.endswith('表'):
+            value = f'{value}表'
+        return value[:34] or '论文数据表'
+
+    @classmethod
     def _choose_chart_type(cls, chart_type, rows, target=None):
         requested = cls._normalize_chart_type(chart_type)
         structure = cls._series_structure(rows)
@@ -410,6 +440,10 @@ class DataChartAssistant:
         return requested
 
     def _resolve_chart_metadata(self, rows, target, submitted_title, unit, chart_type):
+        artifact_type = self._normalize_artifact_type((target or {}).get('artifactType') or (target or {}).get('insertType'))
+        if artifact_type == 'table':
+            title_seed = submitted_title or (target or {}).get('tableTitle') or (target or {}).get('title') or (target or {}).get('dataNeed') or ''
+            return self._normalize_table_title(title_seed, rows, target), self._choose_chart_type(chart_type, rows, target)
         ai_title = ''
         ai_chart_type = ''
         if self.api and hasattr(self.api, 'call_json_sync'):
@@ -523,6 +557,312 @@ AI 建议标题：{(target or {}).get('chartTitle') or (target or {}).get('title
             })
         return result
 
+    @classmethod
+    def _coerce_ai_source_rows(cls, rows):
+        result = []
+        for row in rows if isinstance(rows, list) else []:
+            if not isinstance(row, dict):
+                continue
+            value = cls._parse_number(row.get('value'))
+            if value is not None:
+                continue
+            label = str(row.get('label', '') or row.get('indicator', '') or '').strip()
+            source_name = str(row.get('sourceName', '') or '').strip()
+            publisher = str(row.get('publisher', '') or '').strip()
+            url = str(row.get('url', '') or '').strip()
+            note = str(row.get('note', '') or row.get('manualHint', '') or '').strip()
+            if not any((label, source_name, publisher, url, note)):
+                continue
+            result.append({
+                'label': (label or f'待核验指标{len(result) + 1}')[:40],
+                'value': None,
+                'rawValue': '',
+                'source': cls._format_source({
+                    'sourceName': source_name,
+                    'publisher': publisher,
+                    'url': url,
+                    'note': note,
+                }),
+                'sourceName': source_name,
+                'publisher': publisher,
+                'url': url,
+                'note': note or '请核验该指标的年份、地区、口径和原始数值后填写。',
+            })
+        return result
+
+    @classmethod
+    def _coerce_ai_table_rows(cls, rows):
+        result = []
+        for row in rows if isinstance(rows, list) else []:
+            if not isinstance(row, dict):
+                continue
+            raw_value = str(row.get('value', '') or '').strip()
+            value = cls._parse_number(raw_value)
+            label = str(row.get('label', '') or row.get('indicator', '') or row.get('variable', '') or row.get('name', '') or '').strip()
+            source_name = str(row.get('sourceName', '') or '').strip()
+            publisher = str(row.get('publisher', '') or '').strip()
+            url = str(row.get('url', '') or '').strip()
+            note = str(row.get('note', '') or row.get('manualHint', '') or row.get('definition', '') or row.get('scope', '') or '').strip()
+            source = str(row.get('source', '') or '').strip()
+            if not any((label, raw_value, source_name, publisher, url, note, source)):
+                continue
+            result.append({
+                'label': (label or f'待核验指标{len(result) + 1}')[:40],
+                'value': value,
+                'rawValue': raw_value if value is not None else '',
+                'source': source or cls._format_source({
+                    'sourceName': source_name,
+                    'publisher': publisher,
+                    'url': url,
+                    'note': note,
+                }),
+                'sourceName': source_name,
+                'publisher': publisher,
+                'url': url,
+                'note': note,
+            })
+        return result
+
+    @staticmethod
+    def _target_indicator_terms(target, fallback_text=''):
+        text = ' '.join(str(part or '') for part in (
+            (target or {}).get('dataNeed') if isinstance(target, dict) else '',
+            (target or {}).get('reason') if isinstance(target, dict) else '',
+            (target or {}).get('query') if isinstance(target, dict) else '',
+            fallback_text,
+        ))
+        text = re.sub(r'(?:19|20)\d{2}\s*[—\-~至到]\s*(?:19|20)\d{2}年?', ' ', text)
+        text = re.sub(r'(?:19|20)\d{2}年?', ' ', text)
+        text = re.sub(r'(各省|省级|连续口径|面板数据|原始数值|基础指标|人工核验|上述|真正的|折线图|柱状图|若用户需要|应补充)', ' ', text)
+        stop_terms = {
+            '需要', '补充', '提供', '生成', '真正', '折线图', '柱状图', '上述', '基础指标',
+            '原始数值', '清洗', '省级', '面板数据', '人工核验', '连续口径', '数据来源',
+            '指标体系', '计算口径', '年份', '地区', '各省', '以及', '尤其', '若用户',
+        }
+        terms = []
+        chunks = re.split(r'[、,，；;。.\s]+|以及|和|与|或', text)
+        for chunk in chunks:
+            term = chunk.strip(' 的等指标数据资料来源：:；;，,。.')
+            term = re.sub(r'^(?:需|需要|补充|核验|提供|检索|生成|展示|分析)+', '', term)
+            term = re.sub(r'(?:省份|年份|地区|口径|原始|数值|数据|资料|来源)+$', '', term)
+            term = term.strip(' 的等指标数据资料来源：:；;，,。.')
+            if not term:
+                continue
+            if not term or term in stop_terms:
+                continue
+            if any(skip in term for skip in ('2011', '2022', '用户需要', '真正的', '应补充')):
+                continue
+            if len(term) > 18:
+                short_match = re.search(
+                    r'([\u4e00-\u9fffA-Za-z0-9]{2,18}(?:普及率|处理水平|受教育年限|公共服务供给|覆盖率|增长率|占比|规模|水平|年限|供给|指数|密度))',
+                    term,
+                )
+                if short_match:
+                    term = short_match.group(1)
+            if any(key in term for key in ('率', '水平', '年限', '供给', '服务', '厕所', '垃圾', '教育', '卫生', '收入', '指数', '规模', '占比', '密度')):
+                if term not in terms:
+                    terms.append(term[:24])
+            if len(terms) >= 8:
+                break
+        return terms
+
+    @staticmethod
+    def _extract_spreadsheet_xml_text(file_bytes, limit=40000):
+        try:
+            with zipfile.ZipFile(io.BytesIO(file_bytes)) as archive:
+                shared = []
+                for name in archive.namelist():
+                    if name.startswith('xl/sharedStrings') and name.endswith('.xml'):
+                        xml = archive.read(name).decode('utf-8', errors='ignore')
+                        shared = [
+                            html.unescape(re.sub(r'<[^>]+>', '', item)).strip()
+                            for item in re.findall(r'<si[^>]*>(.*?)</si>', xml, flags=re.S)
+                        ]
+                        break
+                lines = []
+                for name in archive.namelist():
+                    if not name.startswith('xl/worksheets/') or not name.endswith('.xml'):
+                        continue
+                    xml = archive.read(name).decode('utf-8', errors='ignore')
+                    for row_xml in re.findall(r'<row[^>]*>(.*?)</row>', xml, flags=re.S):
+                        cells = []
+                        for cell_xml in re.findall(r'<c\b[^>]*>.*?</c>', row_xml, flags=re.S):
+                            cell_type = re.search(r'\bt="([^"]+)"', cell_xml)
+                            value_match = re.search(r'<v[^>]*>(.*?)</v>', cell_xml, flags=re.S)
+                            inline_match = re.search(r'<is[^>]*>(.*?)</is>', cell_xml, flags=re.S)
+                            value = ''
+                            if value_match:
+                                raw = html.unescape(value_match.group(1)).strip()
+                                if cell_type and cell_type.group(1) == 's':
+                                    try:
+                                        value = shared[int(raw)]
+                                    except Exception:
+                                        value = raw
+                                else:
+                                    value = raw
+                            elif inline_match:
+                                value = html.unescape(re.sub(r'<[^>]+>', '', inline_match.group(1))).strip()
+                            cells.append(value)
+                        if any(cells):
+                            lines.append(','.join(cells))
+                        if sum(len(line) for line in lines) > limit:
+                            return '\n'.join(lines)[:limit]
+                return '\n'.join(lines)[:limit]
+        except Exception:
+            return ''
+
+    @classmethod
+    def _decode_data_file_text(cls, data_file):
+        if not isinstance(data_file, dict):
+            return ''
+        data_url = str(data_file.get('dataUrl') or data_file.get('content') or '').strip()
+        name = str(data_file.get('name') or '').strip()
+        if not data_url:
+            return ''
+        try:
+            if ',' in data_url and data_url.startswith('data:'):
+                raw = base64.b64decode(data_url.split(',', 1)[1])
+            else:
+                raw = base64.b64decode(data_url)
+        except Exception:
+            return ''
+        lower_name = name.lower()
+        if lower_name.endswith(('.xlsx', '.xlsm')):
+            text = cls._extract_spreadsheet_xml_text(raw)
+        else:
+            text = ''
+            for encoding in ('utf-8-sig', 'utf-8', 'gb18030', 'gbk'):
+                try:
+                    text = raw.decode(encoding)
+                    break
+                except Exception:
+                    continue
+        text = cls._normalize_text(text)
+        if not text:
+            return ''
+        header = f'用户上传数据文件：{name or "未命名文件"}'
+        return f'{header}\n{text[:40000]}'
+
+    @classmethod
+    def _fallback_source_rows(cls, target, evidence, *, payload=None, search_query=''):
+        source_rows = cls._coerce_ai_source_rows((payload or {}).get('rows', []) if isinstance(payload, dict) else [])
+        terms = cls._target_indicator_terms(target, f'{search_query} {(payload or {}).get("manualHint", "") if isinstance(payload, dict) else ""}')
+        if not terms:
+            terms = [cls._target_title_hint(target) or '待核验指标']
+        candidates = evidence or []
+        rows = []
+        seen = set()
+        for index, term in enumerate(terms):
+            matched = None
+            for item in candidates:
+                haystack = f'{item.get("title", "")} {item.get("snippet", "")} {item.get("content", "")}'
+                if cls._source_matches_indicator(term, item, target):
+                    matched = item
+                    break
+            if not matched:
+                matched = cls._default_source_for_indicator(term)
+            from_ai = source_rows[index] if index < len(source_rows) else {}
+            title = str((matched or {}).get('title', '') or from_ai.get('sourceName', '') or '候选数据来源').strip()
+            url = str((matched or {}).get('url', '') or from_ai.get('url', '') or '').strip()
+            publisher = from_ai.get('publisher') or (urllib.parse.urlparse(url).netloc.lower().removeprefix('www.') if url else '')
+            note_bits = [
+                str(from_ai.get('note', '') or '').strip(),
+                '请打开来源核验该指标的省份、年份、统计口径和原始数值后填写。',
+            ]
+            key = f'{term}|{url}|{title}'
+            if key in seen:
+                continue
+            seen.add(key)
+            rows.append({
+                'label': term[:40],
+                'value': None,
+                'rawValue': '',
+                'source': cls._format_source({
+                    'sourceName': title,
+                    'publisher': publisher,
+                    'url': url,
+                    'note': ' '.join(bit for bit in note_bits if bit),
+                }),
+                'sourceName': title,
+                'publisher': publisher,
+                'url': url,
+                'note': ' '.join(bit for bit in note_bits if bit),
+            })
+            if len(rows) >= 8:
+                break
+        return rows or source_rows
+
+    @staticmethod
+    def _indicator_keywords(term):
+        text = re.sub(r'\s+', '', str(term or '').lower())
+        keywords = set(re.findall(r'[\u4e00-\u9fff]{2,}|[a-z]{3,}', text))
+        aliases = {
+            '城镇化率': ('城镇化率', '常住人口城镇化率', '城镇人口比重', '统计年鉴', '统计局'),
+            '教育水平': ('教育水平', '受教育年限', '教育经费', '教育统计', '统计年鉴'),
+            '受教育年限': ('受教育年限', '平均受教育年限', '教育水平', '教育统计'),
+            '互联网普及率': ('互联网普及率', '网民规模', 'CNNIC', '互联网络发展状况统计报告'),
+            '农村卫生厕所普及率': ('农村卫生厕所', '卫生厕所普及率', '农村厕所革命', '统计年鉴'),
+            '农村生活垃圾处理水平': ('农村生活垃圾', '生活垃圾处理', '城乡建设统计年鉴', '住建部'),
+            '基层公共服务供给': ('公共服务', '基层公共服务', '财政公共服务', '统计年鉴'),
+        }
+        for key, values in aliases.items():
+            if key in term:
+                keywords.update(value.lower() for value in values)
+        return {item for item in keywords if item}
+
+    @classmethod
+    def _source_matches_indicator(cls, term, item, target=None):
+        haystack = re.sub(
+            r'\s+',
+            '',
+            f'{item.get("title", "")} {item.get("snippet", "")} {item.get("content", "")} {item.get("url", "")}'.lower(),
+        )
+        if not haystack:
+            return False
+        blocked = ('xbox', 'gamepass', '游戏', 'steam', 'playstation', 'microsoft store')
+        if any(word in haystack for word in blocked):
+            return False
+        keywords = cls._indicator_keywords(term)
+        if any(keyword and keyword in haystack for keyword in keywords):
+            return True
+        context = f'{(target or {}).get("dataNeed", "")} {(target or {}).get("query", "")}'
+        if '互联网' in context and any(word in haystack for word in ('cnnic', '互联网络', '互联网普及率', '网民规模')):
+            return True
+        if any(word in haystack for word in ('统计局', '统计年鉴', '统计公报', '国家数据', 'data.stats.gov.cn')):
+            return True
+        return False
+
+    @staticmethod
+    def _default_source_for_indicator(term):
+        text = str(term or '')
+        if '互联网' in text:
+            return {
+                'title': '中国互联网络发展状况统计报告',
+                'url': 'https://www.cnnic.net.cn/n4/2022/0401/c88-1131.html',
+                'snippet': 'CNNIC 发布的互联网普及率、网民规模等统计报告。',
+                'content': '',
+            }
+        if any(word in text for word in ('教育', '受教育')):
+            return {
+                'title': '中国教育统计年鉴/教育事业发展统计公报',
+                'url': 'http://www.moe.gov.cn/jyb_sjzl/sjzl_fztjgb/',
+                'snippet': '教育部教育统计资料，可核验教育水平、教育经费、受教育相关指标。',
+                'content': '',
+            }
+        if any(word in text for word in ('垃圾', '厕所', '公共服务', '城镇化', '收入', '农业', '农村')):
+            return {
+                'title': '中国统计年鉴/国家统计局国家数据',
+                'url': 'https://www.stats.gov.cn/sj/ndsj/',
+                'snippet': '国家统计局统计年鉴与国家数据，可核验省级年度指标口径。',
+                'content': '',
+            }
+        return {
+            'title': '国家统计局国家数据',
+            'url': 'https://data.stats.gov.cn/',
+            'snippet': '国家统计局国家数据，需按指标、地区和年份检索核验。',
+            'content': '',
+        }
+
     @staticmethod
     def _has_verifiable_source(row):
         text = ' '.join(str(row.get(field, '') or '').strip() for field in ('source', 'sourceName', 'publisher', 'url', 'note'))
@@ -536,8 +876,11 @@ AI 建议标题：{(target or {}).get('chartTitle') or (target or {}).get('title
 
     @classmethod
     def _rows_have_verifiable_sources(cls, rows):
-        usable = [row for row in rows or [] if row.get('value') is not None]
-        if len(usable) < 2:
+        usable = [
+            row for row in rows or []
+            if row.get('value') is not None or any(str(row.get(field, '') or '').strip() for field in ('source', 'sourceName', 'publisher', 'url', 'note'))
+        ]
+        if len(usable) < 1:
             return False
         return all(cls._has_verifiable_source(row) for row in usable)
 
@@ -787,7 +1130,8 @@ AI 建议标题：{(target or {}).get('chartTitle') or (target or {}).get('title
             except Exception:
                 continue
         ranked = sorted(collected, key=cls._source_quality_score, reverse=True)
-        return [item for item in ranked if cls._source_quality_score(item) > 0][:limit]
+        preferred = [item for item in ranked if cls._source_quality_score(item) > 0]
+        return (preferred or ranked)[:limit]
 
     @classmethod
     def _read_public_page(cls, url):
@@ -945,7 +1289,7 @@ AI 建议标题：{(target or {}).get('chartTitle') or (target or {}).get('title
             return None
 
     @classmethod
-    def parse_data_table(cls, table_text):
+    def parse_data_table(cls, table_text, require_numeric=True):
         text = cls._normalize_text(table_text)
         if not text:
             raise ValueError('请先填写已审核的数据表')
@@ -958,19 +1302,24 @@ AI 建议标题：{(target or {}).get('chartTitle') or (target or {}).get('title
         if not rows:
             raise ValueError('没有识别到有效数据行')
 
-        first_row = rows[0] if rows else []
-        first_value = cls._parse_number(first_row[1]) if len(first_row) >= 2 else None
-        has_header = first_value is None
-        data_rows = rows if not has_header else rows[1:]
-        header_map = cls._data_table_header_map(first_row) if has_header else {}
+        header_index = None
+        header_map = {}
+        for index, row in enumerate(rows[:3]):
+            candidate_map = cls._data_table_header_map(row)
+            if len(candidate_map) >= 2:
+                header_index = index
+                header_map = candidate_map
+                break
+        has_header = header_index is not None
+        data_rows = rows[header_index + 1:] if has_header else rows
         result = []
         for index, row in enumerate(data_rows, start=1):
-            if len(row) < 2:
+            if len(row) < 1 or len(cls._data_table_header_map(row)) >= 2:
                 continue
             label = cls._table_cell(row, header_map, 'label', 0) or f'项目{index}'
             raw_value = cls._table_cell(row, header_map, 'value', 1)
             value = cls._parse_number(raw_value)
-            if value is None:
+            if require_numeric and value is None:
                 continue
             source_name = cls._table_cell(row, header_map, 'sourceName', 2 if not has_header and len(row) >= 4 else None)
             publisher = cls._table_cell(row, header_map, 'publisher', 3 if not has_header and len(row) >= 4 else None)
@@ -986,6 +1335,8 @@ AI 建议标题：{(target or {}).get('chartTitle') or (target or {}).get('title
                     'url': url,
                     'note': note,
                 })
+            if not require_numeric and not any((label, raw_value, source_name, publisher, url, note, source)):
+                continue
             result.append({
                 'label': label[:40],
                 'value': value,
@@ -996,8 +1347,10 @@ AI 建议标题：{(target or {}).get('chartTitle') or (target or {}).get('title
                 'url': url,
                 'note': note,
             })
-        if len(result) < 2:
+        if require_numeric and len(result) < 2:
             raise ValueError('至少需要 2 行带数值的数据，例如：标签,数值')
+        if not require_numeric and not result:
+            raise ValueError('至少需要 1 行可生成表格的指标、变量或来源信息')
         return result
 
     @staticmethod
@@ -1029,7 +1382,7 @@ AI 建议标题：{(target or {}).get('chartTitle') or (target or {}).get('title
             return ''
         return str(row[index] or '').strip()
 
-    def _request_search_payload(self, api, *, artifact_type, target, search_query, chart_title_hint, full_text, evidence_note, quality_feedback=''):
+    def _request_search_payload(self, api, *, artifact_type, target, search_query, chart_title_hint, full_text, evidence_note, uploaded_data_note='', quality_feedback=''):
         feedback = ''
         intent = str(target.get('intent') or target.get('suggestion') or target.get('reason') or '').strip()
         title_hint = self._target_title_hint(target) or chart_title_hint
@@ -1038,6 +1391,19 @@ AI 建议标题：{(target or {}).get('chartTitle') or (target or {}).get('title
 
 上一次返回的数据被系统判定为不可用，原因：{quality_feedback}
 请重新检索真实统计值。不要返回变量代码、控制变量名称、指标编号、序号、变量定义或“预测方向”。如果只能找到变量说明而找不到真实数值，请返回 needsManualData=true。'''
+        if artifact_type == 'table':
+            row_requirements = (
+                '4. rows 至少 1 行；每行包含 label，并尽量填写 sourceName、publisher、url、note。'
+                '如果该表是指标体系、变量口径、数据来源或核验路径表，value 可以为空，note 应说明口径、页码、表号、定义、标准化方向或核验路径。\n'
+                '5. 只有表格确实需要呈现真实统计数值时才填写 value，单位写在 unit；不要为了凑数把序号、指标编号、变量代码或预测方向写成 value。\n'
+                '6. label 应该是指标名、变量名、年份、地区、组别或口径项等可解释对象；变量说明表可以使用变量名作为 label，但 value 应为空。\n'
+            )
+        else:
+            row_requirements = (
+                '4. rows 至少 2 行；每行包含 label、value，并尽量填写 sourceName、publisher、url、note。没有 URL 时不要因为 URL 缺失而放弃，但 note 必须说明页码、表号、统计口径或核验路径。\n'
+                '5. value 只填真实统计数值，单位写在 unit；禁止把变量编号、排序序号、分类编码、变量名称、预测方向写成 value。\n'
+                '6. label 应该是年份、地区、组别、行业、指标项等可解释对象；禁止返回 pgdp、urban、fagri、indstr、edu、internet 等变量代码作为绘图标签。\n'
+            )
         system = (
             '你是论文数据检索助手。你需要根据论文段落和检索式寻找可用于论文图表的数据，并给出清晰来源。'
             '必须优先使用用户提供的“候选网页来源”，并诚实说明来源。'
@@ -1048,12 +1414,12 @@ AI 建议标题：{(target or {}).get('chartTitle') or (target or {}).get('title
 硬性要求：
 1. 数据必须优先服务于“候选位置黑色建议/检索意图”，不要因为论文总题目而改找无关数据。
 2. 候选网页来源是后端按 AI 给出的检索方向抓取的证据；请优先从这些来源中提取或归纳可制图数据。
-3. 不要编造不存在的数据来源；候选来源不足时，可以使用你能够确认的公开权威报告、统计年鉴、政府/机构数据库或论文中的数据，但必须写明可核验的来源名称、发布机构、年份、页码/表号/检索路径。只有在无法确认真实数值时才返回 needsManualData=true。
-4. rows 至少 2 行；每行包含 label、value，并尽量填写 sourceName、publisher、url、note。没有 URL 时不要因为 URL 缺失而放弃，但 note 必须说明页码、表号、统计口径或核验路径。
-5. value 只填真实统计数值，单位写在 unit；禁止把变量编号、排序序号、分类编码、变量名称、预测方向写成 value。
-6. label 应该是年份、地区、组别、行业、指标项等可解释对象；禁止返回 pgdp、urban、fagri、indstr、edu、internet 等变量代码作为绘图标签，除非这是“变量说明表”且 value 为空。
+3. 不要编造不存在的数据来源；候选来源不足时，可以使用你能够确认的公开权威报告、统计年鉴、政府/机构数据库、用户上传数据文件或论文中的数据，但必须写明可核验的来源名称、发布机构、年份、页码/表号/检索路径。只有在无法确认真实数值时才返回 needsManualData=true。
+{row_requirements.rstrip()}
 7. sourceNote 要提示用户逐项审核真实性。
 8. title 必须直接概括数据指标、对象和时间范围，不要使用论文总题目、章节题或“影响因素”这类泛化标题。
+9. 如果提供了“用户上传数据文件摘录”，它只是辅助检索和抽数的材料；可优先从中提取真实数值和来源，但不要要求用户必须上传文件。
+10. 如果找不到连续面板的真实数值，不要只写“请用户补充”；请尽量返回 rows 作为“待核验指标来源表”，label 填指标名，value 为空，sourceName/publisher/url/note 填可核验来源或核验路径。
 {feedback}
 
 论文段落：
@@ -1069,6 +1435,9 @@ AI 建议标题：{(target or {}).get('chartTitle') or (target or {}).get('title
 
 候选网页来源 JSON：
 {evidence_note}
+
+用户上传数据文件摘录（可选）：
+{self._truncate_for_prompt(uploaded_data_note, 7000) or '未上传'}
 
 返回 JSON：
 {{
@@ -1094,16 +1463,21 @@ AI 建议标题：{(target or {}).get('chartTitle') or (target or {}).get('title
             system=system,
             temperature=0.12 if quality_feedback else 0.15,
             max_tokens=3200,
-            request_timeout=160,
+            request_timeout=220,
             schema_name='data_chart_search',
             usage_context=self._usage_context('data_chart.search.retry' if quality_feedback else 'data_chart.search'),
         )
 
-    def search_data(self, *, query='', target=None, full_text='', user_data=''):
+    def search_data(self, *, query='', target=None, full_text='', user_data='', data_file=None):
         if user_data and self._normalize_text(user_data):
-            rows = self.parse_data_table(user_data)
             artifact_type = self._normalize_artifact_type((target or {}).get('artifactType') or (target or {}).get('insertType'))
-            title = self._normalize_chart_title((target or {}).get('tableTitle') or (target or {}).get('chartTitle') or query, rows, target or {})
+            rows = self.parse_data_table(user_data, require_numeric=artifact_type != 'table')
+            title_seed = (target or {}).get('tableTitle') or (target or {}).get('chartTitle') or query
+            title = (
+                self._normalize_table_title(title_seed, rows, target or {})
+                if artifact_type == 'table'
+                else self._normalize_chart_title(title_seed, rows, target or {})
+            )
             chart_type = self._choose_chart_type((target or {}).get('chartType'), rows, target or {})
             return {
                 'artifactType': artifact_type,
@@ -1121,31 +1495,116 @@ AI 建议标题：{(target or {}).get('chartTitle') or (target or {}).get('title
         api = self._require_ai('data_chart.search')
         target = target or {}
         artifact_type = self._normalize_artifact_type(target.get('artifactType') or target.get('insertType'))
+        uploaded_data_note = self._decode_data_file_text(data_file)
+        uploaded_rows = []
+        if uploaded_data_note:
+            try:
+                uploaded_rows = self.parse_data_table(uploaded_data_note, require_numeric=artifact_type != 'table')
+            except Exception:
+                uploaded_rows = []
         intent = str(target.get('intent') or target.get('suggestion') or target.get('reason') or '').strip()
         target_title_hint = self._target_title_hint(target)
-        search_query = query or intent or target.get('query') or ''
+        query_parts = []
+        for part in (intent, query, target.get('query'), target.get('dataNeed')):
+            text = str(part or '').strip()
+            if text and text not in query_parts:
+                query_parts.append(text)
+        search_query = ' '.join(query_parts)
         chart_title_hint = str(target_title_hint or target.get('tableTitle') or target.get('chartTitle') or '').strip()
         evidence_query = ' '.join(part for part in (intent, search_query, chart_title_hint, target.get('dataNeed')) if part).strip()
         evidence_query = evidence_query or target.get('sectionTitle')
         if chart_title_hint and chart_title_hint not in evidence_query:
             evidence_query = f'{chart_title_hint} {evidence_query}'
-        evidence = self._collect_search_evidence(evidence_query, limit=6, page_limit=3)
+        evidence = self._collect_search_evidence(evidence_query, limit=5, page_limit=1)
+        if not evidence:
+            fallback_evidence = []
+            seen_urls = set()
+            for term in self._target_indicator_terms(target, search_query)[:5]:
+                for item in self._collect_search_evidence(f'{term} 省级 数据 统计 年鉴 公报', limit=2, page_limit=0):
+                    url = item.get('url')
+                    if url and url not in seen_urls:
+                        fallback_evidence.append(item)
+                        seen_urls.add(url)
+                if len(fallback_evidence) >= 6:
+                    break
+            evidence = fallback_evidence[:6]
         evidence_note = (
             json.dumps(evidence, ensure_ascii=False, indent=2)
             if evidence
             else '未抓取到可核验网页来源。若模型也无法确认真实来源，必须返回 needsManualData=true。'
         )
-        payload = self._request_search_payload(
-            api,
-            artifact_type=artifact_type,
-            target=target,
-            search_query=search_query,
-            chart_title_hint=chart_title_hint,
-            full_text=full_text,
-            evidence_note=evidence_note,
+        try:
+            payload = self._request_search_payload(
+                api,
+                artifact_type=artifact_type,
+                target=target,
+                search_query=search_query,
+                chart_title_hint=chart_title_hint,
+                full_text=full_text,
+                evidence_note=evidence_note,
+                uploaded_data_note=uploaded_data_note,
+            )
+        except Exception as exc:
+            if uploaded_rows:
+                title = (
+                    self._normalize_table_title(chart_title_hint or query, uploaded_rows, target)
+                    if artifact_type == 'table'
+                    else self._normalize_chart_title(chart_title_hint or query, uploaded_rows, target)
+                )
+                return {
+                    'artifactType': artifact_type,
+                    'tableText': self._format_table(uploaded_rows),
+                    'sourceNote': f'AI 整理数据时未返回：{exc}。已先使用上传数据文件识别出的数值，请核验来源、口径和年份后再生成图表。',
+                    'foundRows': len(uploaded_rows),
+                    'dataRows': self._public_rows(uploaded_rows),
+                    'dataSources': self._collect_row_sources(uploaded_rows),
+                    'sourceItems': self._build_source_items(uploaded_rows, evidence),
+                    'needsManualData': False,
+                    'sourceRisk': True,
+                    'chartType': self._choose_chart_type(target.get('chartType'), uploaded_rows, target),
+                    'title': title,
+                    'unit': '',
+                }
+            fallback_rows = self._fallback_source_rows(target, evidence, payload={'manualHint': str(exc)}, search_query=search_query)
+            title = (
+                self._normalize_table_title(chart_title_hint, fallback_rows, target)
+                if artifact_type == 'table'
+                else self._normalize_chart_title(chart_title_hint, fallback_rows, target)
+            )
+            return {
+                'artifactType': artifact_type,
+                'tableText': self._format_table(fallback_rows) if fallback_rows else '',
+                'sourceNote': (
+                    f'AI 整理数据时未返回：{exc}。已先整理出候选指标来源表，请打开来源核验并完善口径说明后再生成表格。'
+                    if artifact_type == 'table'
+                    else f'AI 整理数据时未返回：{exc}。已先整理出候选指标来源表，请打开来源核验并在“数值”列补齐真实数值后再生成图表。'
+                ),
+                'foundRows': 0,
+                'sourceCandidateRows': len(fallback_rows),
+                'dataRows': self._public_rows(fallback_rows),
+                'dataSources': self._collect_evidence_sources(evidence),
+                'sourceItems': self._build_source_items(fallback_rows, evidence),
+                'needsManualData': True,
+                'sourceRisk': True,
+                'chartType': self._choose_chart_type(target.get('chartType'), [], target),
+                'title': title,
+                'unit': '',
+            }
+        raw_payload_rows = payload.get('rows', []) if isinstance(payload, dict) else []
+        rows = (
+            self._coerce_ai_rows(raw_payload_rows)
+            if artifact_type != 'table'
+            else self._coerce_ai_table_rows(raw_payload_rows)
         )
-        rows = self._coerce_ai_rows(payload.get('rows', []) if isinstance(payload, dict) else [])
-        quality_issue = self._data_quality_issue(rows, target=target, payload=payload)
+        min_uploaded_rows = 1 if artifact_type == 'table' else 2
+        if len(rows) < min_uploaded_rows and len(uploaded_rows) >= min_uploaded_rows:
+            rows = uploaded_rows
+            payload = {
+                **(payload if isinstance(payload, dict) else {}),
+                'sourceNote': '已从用户上传的数据文件中识别出候选表格信息；请核验数据文件来源、口径和年份后再生成图表。',
+                'needsManualData': False,
+            }
+        quality_issue = '' if artifact_type == 'table' and not any(row.get('value') is not None for row in rows) else self._data_quality_issue(rows, target=target, payload=payload)
         if quality_issue and not bool((payload or {}).get('needsManualData')):
             retry_payload = self._request_search_payload(
                 api,
@@ -1155,17 +1614,28 @@ AI 建议标题：{(target or {}).get('chartTitle') or (target or {}).get('title
                 chart_title_hint=chart_title_hint,
                 full_text=full_text,
                 evidence_note=evidence_note,
+                uploaded_data_note=uploaded_data_note,
                 quality_feedback=quality_issue,
             )
-            retry_rows = self._coerce_ai_rows(retry_payload.get('rows', []) if isinstance(retry_payload, dict) else [])
-            retry_issue = self._data_quality_issue(retry_rows, target=target, payload=retry_payload)
-            if not retry_issue and (len(retry_rows) >= 2 or len(retry_rows) >= len(rows)):
+            retry_raw_rows = retry_payload.get('rows', []) if isinstance(retry_payload, dict) else []
+            retry_rows = (
+                self._coerce_ai_rows(retry_raw_rows)
+                if artifact_type != 'table'
+                else self._coerce_ai_table_rows(retry_raw_rows)
+            )
+            retry_issue = '' if artifact_type == 'table' and not any(row.get('value') is not None for row in retry_rows) else self._data_quality_issue(retry_rows, target=target, payload=retry_payload)
+            min_retry_rows = 1 if artifact_type == 'table' else 2
+            if not retry_issue and (len(retry_rows) >= min_retry_rows or len(retry_rows) >= len(rows)):
                 payload = retry_payload
                 rows = retry_rows
                 quality_issue = ''
         source_warning = bool(rows) and not self._rows_have_verifiable_sources(rows)
         model_needs_manual = bool((payload or {}).get('needsManualData'))
-        needs_manual = bool(quality_issue) or len(rows) < 2 or (model_needs_manual and not rows)
+        needs_manual = (
+            bool(quality_issue)
+            or (len(rows) < 1 if artifact_type == 'table' else len(rows) < 2)
+            or (model_needs_manual and not rows)
+        )
         evidence_sources = self._collect_evidence_sources(evidence)
         if needs_manual:
             source_note = str((payload or {}).get('manualHint') or (payload or {}).get('sourceNote') or '').strip()
@@ -1173,18 +1643,32 @@ AI 建议标题：{(target or {}).get('chartTitle') or (target or {}).get('title
                 source_note = f'{quality_issue} 请重新检索真实统计数据，或在下方手动录入已核验的数值、来源名称、发布机构、链接/页码。'
             else:
                 source_note = source_note or 'AI 未能确认可直接作图的数据来源，请补充真实数据与来源后再生成图表。'
-            public_rows = [] if quality_issue else self._public_rows(rows)
+            fallback_rows = []
+            if not quality_issue and len(rows) < (1 if artifact_type == 'table' else 2):
+                fallback_rows = self._fallback_source_rows(target, evidence, payload=payload, search_query=search_query)
+                if fallback_rows:
+                    source_note = (
+                        f'{source_note} 已先整理出可核验的候选指标来源表；'
+                        + ('请核验来源、口径和备注后再生成表格。' if artifact_type == 'table' else '请在“数值”列补齐真实数值后再生成图表。')
+                    )
+            public_rows = [] if quality_issue else self._public_rows(rows or fallback_rows)
             return {
                 'artifactType': artifact_type,
-                'tableText': '' if quality_issue else (self._format_table(rows) if rows else ''),
+                'tableText': '' if quality_issue else (self._format_table(rows or fallback_rows) if (rows or fallback_rows) else ''),
                 'sourceNote': source_note,
                 'foundRows': len(rows),
+                'sourceCandidateRows': len(fallback_rows),
                 'dataRows': public_rows,
                 'dataSources': evidence_sources,
-                'sourceItems': self._build_source_items([] if quality_issue else rows, evidence),
+                'sourceItems': self._build_source_items([] if quality_issue else (rows or fallback_rows), evidence),
                 'needsManualData': True,
+                'sourceRisk': bool(fallback_rows),
                 'chartType': self._choose_chart_type((payload or {}).get('chartType') or target.get('chartType'), rows, target),
-                'title': self._normalize_chart_title((payload or {}).get('title') or chart_title_hint, rows, target),
+                'title': (
+                    self._normalize_table_title((payload or {}).get('title') or chart_title_hint, rows or fallback_rows, target)
+                    if artifact_type == 'table'
+                    else self._normalize_chart_title((payload or {}).get('title') or chart_title_hint, rows or fallback_rows, target)
+                ),
                 'unit': str((payload or {}).get('unit') or '').strip(),
             }
         source_note = str((payload or {}).get('sourceNote') or 'AI 已整理数据来源；请用户核验来源、口径和年份后再生成图表。')
@@ -1206,7 +1690,11 @@ AI 建议标题：{(target or {}).get('chartTitle') or (target or {}).get('title
             'needsManualData': False,
             'sourceRisk': source_warning or model_needs_manual,
             'chartType': self._choose_chart_type((payload or {}).get('chartType') or target.get('chartType'), rows, target),
-            'title': self._normalize_chart_title((payload or {}).get('title') or chart_title_hint, rows, target),
+            'title': (
+                self._normalize_table_title((payload or {}).get('title') or chart_title_hint, rows, target)
+                if artifact_type == 'table'
+                else self._normalize_chart_title((payload or {}).get('title') or chart_title_hint, rows, target)
+            ),
             'unit': str((payload or {}).get('unit') or '').strip(),
         }
 
@@ -1350,10 +1838,10 @@ AI 建议标题：{(target or {}).get('chartTitle') or (target or {}).get('title
         return f'{prefix}1'
 
     def generate_chart(self, *, table_text='', chart_type='bar', title='', unit='', target=None):
-        rows = self.parse_data_table(table_text)
         target = target or {}
         unit = str(unit or '').strip()
         artifact_type = self._normalize_artifact_type(target.get('artifactType') or target.get('insertType'))
+        rows = self.parse_data_table(table_text, require_numeric=artifact_type != 'table')
         title, chart_type = self._resolve_chart_metadata(rows, target, title, unit, chart_type)
         if artifact_type == 'table':
             return self._generate_table_result(rows, target=target, title=title, unit=unit, chart_type=chart_type)
@@ -1515,6 +2003,9 @@ AI 建议标题：{(target or {}).get('chartTitle') or (target or {}).get('title
         analysis = cls._chart_analysis(rows, unit)
         if analysis:
             return analysis
+        source_rows = cls._rows_without_numeric_values(rows)
+        if source_rows:
+            return cls._source_table_summary(source_rows)
         return ''
 
     @classmethod
@@ -1524,10 +2015,11 @@ AI 建议标题：{(target or {}).get('chartTitle') or (target or {}).get('title
             parts = cls._structured_series_analysis(structure, unit)
             if parts:
                 return '；'.join(parts) + '。'
-        values = [float(row['value']) for row in rows or [] if row.get('value') is not None]
+        numeric_rows = cls._numeric_rows(rows)
+        values = [float(row['value']) for row in numeric_rows]
         if not values:
             return ''
-        labels = [str(row.get('label', '') or f'项目{index + 1}') for index, row in enumerate(rows or [])]
+        labels = [str(row.get('label', '') or f'项目{index + 1}') for index, row in enumerate(numeric_rows)]
         max_index = max(range(len(values)), key=lambda idx: values[idx])
         min_index = min(range(len(values)), key=lambda idx: values[idx])
         delta = values[-1] - values[0]
@@ -1538,6 +2030,34 @@ AI 建议标题：{(target or {}).get('chartTitle') or (target or {}).get('title
             f'最低值为{labels[min_index]}的{values[min_index]:g}{suffix}，'
             f'首末项相比{trend}{abs(delta):g}{suffix}。'
         )
+
+    @staticmethod
+    def _numeric_rows(rows):
+        return [row for row in rows or [] if row.get('value') is not None]
+
+    @staticmethod
+    def _rows_without_numeric_values(rows):
+        return [row for row in rows or [] if row.get('value') is None]
+
+    @classmethod
+    def _source_table_summary(cls, rows):
+        labels = [
+            str(row.get('label', '') or '').strip()
+            for row in rows or []
+            if str(row.get('label', '') or '').strip()
+        ]
+        sources = [
+            cls._short_source_label(row)
+            for row in rows or []
+            if cls._short_source_label(row)
+        ]
+        label_part = '、'.join(labels[:4]) + ('等指标' if len(labels) > 4 else '')
+        source_part = '、'.join(dict.fromkeys(sources[:3]))
+        if label_part and source_part:
+            return f'表中围绕{label_part}整理了可核验来源和口径说明，主要来源包括{source_part}。'
+        if label_part:
+            return f'表中围绕{label_part}整理了可核验来源和口径说明。'
+        return '表中整理了后续测算所需的指标、来源和口径说明。'
 
     @classmethod
     def _structured_series_analysis(cls, structure, unit=''):
@@ -1636,7 +2156,8 @@ AI 建议标题：{(target or {}).get('chartTitle') or (target or {}).get('title
         title_part = f'{label}所列的“{title}”' if title else f'{label}所列数据'
         if analysis:
             return f'根据{title_part}，{analysis}'
-        return f'根据{title_part}，相关指标在不同项目之间存在可比较差异，需要结合研究问题进一步解释其变化方向。'
+        source_summary = cls._source_table_summary(rows)
+        return f'根据{title_part}，{source_summary}该表用于明确指标选取、数据核验路径和口径约束，为后续实证测度或比较分析提供依据。'
 
     @staticmethod
     def _strip_source_prose(text):
@@ -1703,6 +2224,7 @@ AI 建议标题：{(target or {}).get('chartTitle') or (target or {}).get('title
     def _build_table_caption(self, title):
         text = self._clean_caption_title(title)
         text = re.sub(r'图表|数据图|统计图|图$', '表', text)
+        text = re.sub(r'表{2,}$', '表', text)
         return text or '论文数据表'
 
     @staticmethod
@@ -1728,16 +2250,32 @@ AI 建议标题：{(target or {}).get('chartTitle') or (target or {}).get('title
     @classmethod
     def _build_table_markdown(cls, rows, title, unit='', table_label='表1'):
         lines = [f'{table_label or "表1"} {title}']
-        if unit:
+        numeric_rows = cls._numeric_rows(rows)
+        source_table = len(numeric_rows) < 2
+        if unit and not source_table:
             lines.append(f'（单位：{unit}）')
-        lines.extend([
-            '| 指标 | 数值 |',
-            '| --- | ---: |',
-        ])
-        for row in rows or []:
-            label = cls._markdown_table_escape(row.get('label', ''))
-            value = cls._markdown_table_escape(row.get('rawValue', row.get('value', '')))
-            lines.append(f'| {label} | {value} |')
+        if source_table:
+            lines.extend([
+                '| 指标/变量 | 来源名称 | 发布机构 | 核验路径 | 口径说明 |',
+                '| --- | --- | --- | --- | --- |',
+            ])
+            for row in rows or []:
+                label = cls._markdown_table_escape(row.get('label', ''))
+                source_name = cls._markdown_table_escape(row.get('sourceName', '') or row.get('source', ''))
+                publisher = cls._markdown_table_escape(row.get('publisher', ''))
+                url = cls._markdown_table_escape(row.get('url', ''))
+                note = cls._markdown_table_escape(row.get('note', ''))
+                lines.append(f'| {label} | {source_name} | {publisher} | {url} | {note} |')
+        else:
+            lines.extend([
+                '| 指标 | 数值 | 来源/口径 |',
+                '| --- | ---: | --- |',
+            ])
+            for row in rows or []:
+                label = cls._markdown_table_escape(row.get('label', ''))
+                value = cls._markdown_table_escape(row.get('rawValue', row.get('value', '')))
+                source = cls._markdown_table_escape(row.get('note', '') or cls._short_source_label(row))
+                lines.append(f'| {label} | {value} | {source} |')
         lines.append(f'资料来源：{cls._source_note_text(rows)}')
         return '\n'.join(lines).strip()
 
@@ -1816,11 +2354,12 @@ AI 建议标题：{(target or {}).get('chartTitle') or (target or {}).get('title
     def _build_table_replacement_text(self, target, caption, table_markdown, *, rows=None, unit='', table_label='表1'):
         original = DataChartAssistant._normalize_text(target.get('originalText', '') if isinstance(target, dict) else '')
         rows = rows or []
+        has_numeric = bool(self._numeric_rows(rows))
         analysis_text = self._chart_analysis(rows, unit)
         data_points_text = self._data_points_text(rows)
         if self.api and hasattr(self.api, 'call_sync') and original:
             system = (
-                f'你是严谨的论文写作助手。请根据已确认的数据表改写原段落，必须自然引入{table_label}并补入数据分析。'
+                f'你是严谨的论文写作助手。请根据已确认的数据表改写原段落，必须自然引入{table_label}。'
                 '数据来源由系统写入表下注释和参考文献，正文不要写来源名称、URL或“数据来源为”。'
             )
             rows_payload = [
@@ -1833,7 +2372,8 @@ AI 建议标题：{(target or {}).get('chartTitle') or (target or {}).get('title
                 }
                 for row in rows
             ]
-            prompt = f'''请改写下面论文段落，使其自然引入{table_label}，并分析表中数据。
+            if has_numeric:
+                prompt = f'''请改写下面论文段落，使其自然引入{table_label}，并分析表中数据。
 
 要求：
 1. 保留原段落核心观点，但将空泛判断改为基于真实数据的分析。
@@ -1852,6 +2392,28 @@ AI 建议标题：{(target or {}).get('chartTitle') or (target or {}).get('title
 {data_points_text or '无'}
 真实数据分析：
 {analysis_text or '请根据数据行 JSON 自行归纳。'}
+数据行 JSON：
+{json.dumps(rows_payload, ensure_ascii=False)}
+
+请直接输出改写后的段落。'''
+            else:
+                source_summary = self._source_table_summary(rows)
+                prompt = f'''请改写下面论文段落，使其自然引入{table_label}。该表不是数值统计表，而是指标、变量、数据来源或口径说明表。
+
+要求：
+1. 保留原段落核心观点，但把空泛表述改成“为什么需要这些指标/变量/来源口径”的论文式说明。
+2. 正文使用“如{table_label}所示”“见{table_label}”等表述，不要输出 Markdown 表格。
+3. 正文不要写来源名称、报告名、发布机构、URL或“数据来源为/来源来自”；来源会出现在表下“资料来源”和参考文献中。
+4. 不要编造数值，不要写最高值、最低值、趋势、差距变化；应说明指标体系、变量口径、核验路径、可重复性或后续测度逻辑。
+5. 可以写成 1-2 个自然段，不要输出标题。
+6. 正文提到表时使用“{table_label}”，不要自行改成其他编号。
+
+原段落：
+{original}
+
+表题：{caption}
+表格作用概括：
+{source_summary}
 数据行 JSON：
 {json.dumps(rows_payload, ensure_ascii=False)}
 
@@ -1883,6 +2445,8 @@ AI 建议标题：{(target or {}).get('chartTitle') or (target or {}).get('title
         analysis_paragraph = cls._build_table_analysis_paragraph(rows, unit, title, table_label)
         if not text:
             return analysis_paragraph
+        if not cls._numeric_rows(rows) and table_label in text:
+            return text
         if cls._analysis_mentions_data(text, rows):
             return text
         return f'{text}\n\n{analysis_paragraph}'.strip()
