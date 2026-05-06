@@ -284,7 +284,9 @@ def _add_docx_text_block(document, lines, is_reference, qn, Pt, WD_ALIGN_PARAGRA
             continue
         bullet = re.match(r'^\s*[-*•]\s+(.+)$', stripped)
         numbered = re.match(r'^\s*\d+[.)、]\s+(.+)$', stripped)
-        caption = re.match(r'^\s*(图\s*\d+|Figure\s*\d+)', stripped, flags=re.I)
+        caption = re.match(r'^\s*((?:图|表)\s*\d+(?:\.\d+)?|Figure\s*\d+)', stripped, flags=re.I)
+        table_unit = re.match(r'^\s*[（(]单位[:：].+[）)]\s*$', stripped)
+        table_note = re.match(r'^\s*(?:资料来源|注[:：]|备注[:：])', stripped)
         if bullet:
             paragraph = document.add_paragraph(style='List Bullet')
             paragraph.add_run(_strip_inline_markdown(bullet.group(1)))
@@ -294,8 +296,12 @@ def _add_docx_text_block(document, lines, is_reference, qn, Pt, WD_ALIGN_PARAGRA
         else:
             paragraph = document.add_paragraph()
             paragraph.add_run(_strip_inline_markdown(stripped))
-        if caption:
+        if caption or table_unit:
             paragraph.alignment = WD_ALIGN_PARAGRAPH.CENTER
+        if table_note:
+            paragraph.paragraph_format.first_line_indent = Pt(0)
+            for run in paragraph.runs:
+                run.font.size = Pt(9)
         if is_reference or re.match(r'^\s*\[\d+\]', stripped):
             paragraph.paragraph_format.left_indent = Pt(21)
             paragraph.paragraph_format.first_line_indent = Pt(-21)
@@ -413,6 +419,10 @@ def _add_docx_table(document, rows, qn, Pt):
     width = max(len(row) for row in rows)
     table = document.add_table(rows=len(rows), cols=width)
     table.style = 'Table Grid'
+    try:
+        table.autofit = True
+    except Exception:
+        pass
     for row_index, row in enumerate(rows):
         for col_index in range(width):
             cell = table.cell(row_index, col_index)

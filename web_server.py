@@ -135,6 +135,10 @@ def _compact_data_chart_reference_values(entries, field, limit=6):
     seen = set()
     for entry in entries or []:
         value = re.sub(r'\s+', ' ', str((entry or {}).get(field, '') or '').strip())
+        if field != 'url':
+            value = re.sub(r'https?://\S+', '', value).strip('，,。.;； ')
+            if len(value) > 42:
+                value = value[:42].rstrip() + '…'
         if not value or value in seen:
             continue
         seen.add(value)
@@ -145,9 +149,9 @@ def _compact_data_chart_reference_values(entries, field, limit=6):
 
 
 def _combine_data_chart_reference_entries(entries):
-    publishers = _compact_data_chart_reference_values(entries, 'publisher', 4)
-    source_names = _compact_data_chart_reference_values(entries, 'sourceName', 8)
-    urls = _compact_data_chart_reference_values(entries, 'url', 3)
+    publishers = _compact_data_chart_reference_values(entries, 'publisher', 3)
+    source_names = _compact_data_chart_reference_values(entries, 'sourceName', 3)
+    urls = _compact_data_chart_reference_values(entries, 'url', 2)
     if len(publishers) == 1:
         author = publishers[0]
     elif publishers:
@@ -156,7 +160,7 @@ def _combine_data_chart_reference_entries(entries):
         author = '相关数据发布机构'
 
     if source_names:
-        title = '、'.join(source_names[:6]) + ('等' if len(source_names) > 6 else '')
+        title = '、'.join(source_names[:3]) + ('等' if len(source_names) > 3 else '')
     else:
         title = '图表数据来源汇总'
 
@@ -337,7 +341,6 @@ def _insert_data_source_citation(text, citation, reference_entries):
 
 def _caption_with_data_citation(caption, citation):
     content = re.sub(r'\s+', ' ', str(caption or '').strip())
-    citation_text = str(citation or '').strip()
     if not content:
         return content
     content = re.sub(r'\s*\[[\d,\-\s]+\]\s*$', '', content)
@@ -350,24 +353,25 @@ def _caption_with_data_citation(caption, citation):
         content = chart_type_match.group(1).strip()
     elif not re.match(r'^(?:图\s*\d+|Figure\s*\d+)\b', content, flags=re.IGNORECASE):
         content = re.split(r'[\u3002.!?！？]\s*', content, maxsplit=1)[0].strip() or content
-    if not citation_text or citation_text in content:
-        return content
-    content = re.sub(r'\s*[\u3002.!?！？]\s*$', '', content)
-    return f'{content}{citation_text}'
+    return re.sub(
+        r'[（(](?:柱状图|条形图|折线图|结构图|饼图|图表|line chart|bar chart|pie chart|chart)[）)]\s*$',
+        '',
+        content,
+        flags=re.IGNORECASE,
+    ).strip()
 
 
 def _rewrite_figure_markdown_caption(figure_markdown, citation):
     text = str(figure_markdown or '').strip()
-    citation_text = str(citation or '').strip()
-    if not text or not citation_text:
+    if not text:
         return text
     lines = text.splitlines()
     for index, line in enumerate(lines):
         stripped = line.strip()
         if re.match(r'^(?:图\s*\d+|Figure\s*\d+)\b', stripped, flags=re.IGNORECASE):
-            lines[index] = _caption_with_data_citation(stripped, citation_text)
+            lines[index] = _caption_with_data_citation(stripped, '')
             return '\n'.join(lines).strip()
-    return f'{text}\n\n图1 数据图表{citation_text}'
+    return f'{text}\n\n图1 数据图表'
 
 
 def _append_data_chart_references(all_sections, section_title, replacement_text, reference_entries, reference_style='GB/T 7714', original_text=''):
@@ -421,7 +425,7 @@ def _append_data_chart_references(all_sections, section_title, replacement_text,
     if citation_numbers:
         citation = '[' + ','.join(str(number) for number in dict.fromkeys(citation_numbers)) + ']'
 
-    content_with_citation = replacement_text
+    content_with_citation = _insert_data_source_citation(replacement_text, citation, reference_entries) if citation else replacement_text
     content_for_reference_order = f'{content_with_citation.rstrip()}\n\n{citation}'.strip() if citation else content_with_citation
 
     local_number_map = build_reference_number_map(temp_entries)
@@ -1214,6 +1218,7 @@ class WebWorkbench:
                 'model': resolve_model_display_name(cfg),
                 'active': api_id == active_id,
                 'configured': bool(str(cfg.get('key', '') or '').strip()),
+                'publicDefault': bool(cfg.get('public_default')),
             })
         return {
             'activeApi': active_id,
@@ -1240,6 +1245,7 @@ class WebWorkbench:
             'configured': bool(str(cfg.get('key', '') or '').strip()),
             'hasKey': bool(str(cfg.get('key', '') or '').strip()),
             'apiFormat': cfg.get('api_format', ''),
+            'publicDefault': bool(cfg.get('public_default')),
         }
 
     def config_payload(self, user_id=''):
@@ -1266,6 +1272,8 @@ class WebWorkbench:
     def save_api(self, payload, user_id=''):
         config = self._config(user_id)
         api_id = str(payload.get('id', '') or '').strip()
+        if config.is_public_default_api(api_id):
+            raise ValueError('公共默认接口不可编辑；如需使用自己的配置，请点击“新建接口”。')
         provider_type = normalize_provider_type(payload.get('providerType') or 'custom')
         existing = config.get_api_config(api_id) if api_id else {}
         cfg = merge_with_preset_defaults(existing, provider_type)
@@ -1396,9 +1404,9 @@ class WebWorkbench:
             )
             chart = result.get('chart') if isinstance(result, dict) else None
             if isinstance(chart, dict):
-                image_url = _persist_data_chart_image(chart.get('dataUrl'), chart.get('title') or payload.get('title', 'chart'))
-                chart['imageUrl'] = image_url
+                image_url = _persist_data_chart_image(chart.get('dataUrl'), chart.get('title') or payload.get('title', 'chart')) if chart.get('dataUrl') else ''
                 if image_url:
+                    chart['imageUrl'] = image_url
                     chart['dataUrl'] = image_url
             reference_entries = _data_chart_reference_payload(result)
             reference_result = _append_data_chart_references(
@@ -1415,9 +1423,10 @@ class WebWorkbench:
             result['updatedSections'] = reference_result['updatedSections']
             if isinstance(chart, dict):
                 title = chart.get('title') or payload.get('title') or '论文数据图表'
-                caption = _caption_with_data_citation(chart.get('caption') or title, reference_result.get('citation', ''))
+                caption = _caption_with_data_citation(chart.get('caption') or title, '')
                 chart['caption'] = caption
-                result['figureMarkdown'] = f'![{title}]({image_url})\n\n图1 {caption}'
+                figure_label = result.get('artifactLabel') or target.get('figureLabel') or target.get('artifactLabel') or '图1'
+                result['figureMarkdown'] = f'![{title}]({chart.get("dataUrl") or image_url})\n\n{figure_label} {caption}'
             result['citation'] = reference_result.get('citation', '')
             result['citationNumber'] = reference_result['citationNumber']
             return result

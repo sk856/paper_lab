@@ -414,7 +414,7 @@ def build_reference_body_from_entries(entries):
             continue
         # 优先使用条目中的编号，如果没有则使用索引
         entry_number = entry.get('number') or entry.get('new_number') or index
-        lines.append(f'[{entry_number}] {entry_text}')
+        lines.append(f'[{entry_number}]{entry_text}')
     return '\n'.join(lines).strip()
 
 

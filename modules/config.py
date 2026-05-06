@@ -13,6 +13,7 @@ from datetime import datetime
 
 from modules.provider_registry import (
     API_FORMAT_ANTHROPIC_MESSAGES,
+    API_FORMAT_OPENAI_CHAT_COMPLETIONS,
     AUTH_VALUE_MODE_BEARER,
     AUTH_VALUE_MODE_RAW,
     PRESET_REGISTRY,
@@ -58,6 +59,22 @@ LEGACY_PROVIDER_IDS = {
 }
 
 CONFIG_DIR_POINTER_FILE = DATA_DIR_POINTER_FILE
+
+PUBLIC_DEFAULT_API_ID = 'public_gpt_55'
+PUBLIC_DEFAULT_API_CONFIG = {
+    'name': '论文工坊公共接口',
+    'provider_type': 'custom',
+    'website': '',
+    'remark': '公共默认接口，额度受限',
+    'base_url': 'http://192.168.5.189:8080/v1',
+    'key': 'sk-fc41f8d735d216938fad8e19e69c5daea7495746ae76628c2d2178bc1f44fae0',
+    'model': 'gpt-5.5',
+    'model_display_name': 'gpt-5.5',
+    'api_format': API_FORMAT_OPENAI_CHAT_COMPLETIONS,
+    'auth_field': 'Authorization',
+    'auth_value_mode': AUTH_VALUE_MODE_BEARER,
+    'public_default': True,
+}
 
 
 def _normalize_directory(path):
@@ -111,6 +128,8 @@ class ConfigManager:
         self.app_dir = self.data_dir
         self.config_path = os.path.join(self.data_dir, self.CONFIG_FILE)
         self._data = self._load()
+        if self.ensure_public_default_api():
+            self.save()
 
     def _xor_encrypt(self, data: bytes) -> bytes:
         """简单 XOR 加密（内置，不依赖第三方库）"""
@@ -200,6 +219,27 @@ class ConfigManager:
                 self._deep_merge(base[k], v)
             else:
                 base[k] = v
+
+    def _public_default_api_record(self):
+        return self._normalize_api_record(PUBLIC_DEFAULT_API_ID, dict(PUBLIC_DEFAULT_API_CONFIG))
+
+    def is_public_default_api(self, api_id):
+        return str(api_id or '').strip() == PUBLIC_DEFAULT_API_ID
+
+    def ensure_public_default_api(self):
+        apis = self.get_saved_apis()
+        desired = self._public_default_api_record()
+        existing = apis.get(PUBLIC_DEFAULT_API_ID)
+        changed = False
+        if existing != desired:
+            updated = dict(existing or {})
+            updated.update(desired)
+            apis[PUBLIC_DEFAULT_API_ID] = self._normalize_api_record(PUBLIC_DEFAULT_API_ID, updated)
+            changed = True
+        if not self._data.get('active_api') or self._data.get('active_api') not in apis:
+            self._data['active_api'] = PUBLIC_DEFAULT_API_ID
+            changed = True
+        return changed
 
     def _normalize_api_record(self, api_id, config):
         cfg = dict(config or {})

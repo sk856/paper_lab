@@ -2,9 +2,10 @@
 <html lang="zh-CN">
 <head>
   <meta charset="utf-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>论文工坊 Web 工作台</title>
-  <link rel="stylesheet" href="/styles.css?v=20260506-mobile" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>论文工坊 Web 工作台</title>
+    <link rel="icon" href="data:," />
+    <link rel="stylesheet" href="/styles.css?v=20260506-mobile" />
 </head>
 <body>
   <div class="app-shell">
@@ -214,7 +215,7 @@
         <div class="page-hero compact-hero">
           <p class="eyebrow">Data Chart</p>
           <h1>数据图表</h1>
-          <p class="muted-copy">AI 阅读全文定位适合插入图表的位置，自行整理可核验数据来源；审核数据后用 Python 生成图表，并把图表与改写段落回填到论文对应位置。</p>
+          <p class="muted-copy">AI 阅读全文定位适合插入图或表的位置，自行整理可核验数据来源；审核数据后生成图表或论文表格，并把图表/表格与改写段落回填到论文对应位置。</p>
         </div>
         <section class="panel">
           <div class="panel-header-row">
@@ -224,7 +225,7 @@
           <div class="paper-actions">
             <button class="primary-button" id="dataChartFindTargets" type="button">AI 阅读全文</button>
             <button class="secondary-button" id="dataChartSearchData" type="button">AI 搜索数据</button>
-            <button class="secondary-button" id="dataChartGenerate" type="button">生成图表</button>
+            <button class="secondary-button" id="dataChartGenerate" type="button">生成图/表</button>
             <button class="secondary-button" id="dataChartBackfill" type="button">回填</button>
           </div>
         </section>
@@ -242,7 +243,7 @@
               <div><p class="eyebrow">Targets</p><h3>候选位置</h3></div>
               <span id="dataChartTargetCount" class="mini-hint">0 项</span>
             </div>
-            <div id="dataChartTargets" class="data-target-list">点击“AI 阅读全文”后，这里会列出适合插入数据图表的位置。</div>
+            <div id="dataChartTargets" class="data-target-list">点击“AI 阅读全文”后，这里会列出适合插入数据图或数据表的位置。</div>
           </div>
         </section>
 
@@ -254,7 +255,7 @@
             </div>
             <div class="paper-form-grid data-chart-form-grid">
               <label class="field-block data-query-field"><span>AI 检索方向</span><input id="dataChartQuery" class="input-box" placeholder="AI 会根据全文生成，也可补充数据范围、地区或年份" /></label>
-              <label class="field-block"><span>图表类型</span><select id="dataChartType" class="input-box"><option value="bar">柱状图</option><option value="line">折线图</option><option value="pie">结构图</option></select></label>
+              <label class="field-block"><span>图表类型</span><select id="dataChartType" class="input-box"><option value="bar">柱状图</option><option value="line">折线图</option><option value="pie">结构图</option><option value="table">表格</option></select></label>
               <label class="field-block"><span>单位</span><input id="dataChartUnit" class="input-box" placeholder="例如：%、亿元、分" /></label>
               <label class="field-block data-title-field"><span>图表标题</span><input id="dataChartTitle" class="input-box" placeholder="例如：金融科技发展水平变化趋势" /></label>
             </div>
@@ -277,7 +278,7 @@
               </div>
             </div>
             <textarea id="dataChartResultText" class="text-box result-output-editor data-result-text" hidden></textarea>
-            <p id="dataChartDiffStatus" class="muted-copy compact-copy">红色为删除，绿色为新增。图表会直接显示在差异区域内。</p>
+            <p id="dataChartDiffStatus" class="muted-copy compact-copy">红色为删除，绿色为新增。图或表会直接显示在差异区域内。</p>
             <div id="dataChartDiff" class="analysis-detail result-diff-detail data-chart-diff-detail">差异预览会显示在这里。</div>
           </div>
         </section>

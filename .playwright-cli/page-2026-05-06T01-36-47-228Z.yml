@@ -1,0 +1,187 @@
+- generic [ref=e2]:
+  - banner [ref=e3]:
+    - link "Thesis Workshop 论文工坊" [ref=e4] [cursor=pointer]:
+      - /url: "#/paper"
+      - generic [ref=e5]: Thesis Workshop
+      - generic [ref=e6]: 论文工坊
+    - navigation [ref=e7]:
+      - button "刷新模型" [ref=e8] [cursor=pointer]
+      - button "主题" [ref=e9] [cursor=pointer]
+  - complementary "Web 功能导航" [ref=e10]:
+    - button "论文写作 大纲、章节与编辑器" [ref=e11] [cursor=pointer]:
+      - img [ref=e13]
+      - generic [ref=e16]:
+        - strong [ref=e17]: 论文写作
+        - generic [ref=e18]: 大纲、章节与编辑器
+    - button "数据图表 全文定位、搜数与回填" [ref=e19] [cursor=pointer]:
+      - img [ref=e21]
+      - generic [ref=e23]:
+        - strong [ref=e24]: 数据图表
+        - generic [ref=e25]: 全文定位、搜数与回填
+    - button "降 AI 检测 去痕、核验与差异" [ref=e26] [cursor=pointer]:
+      - img [ref=e28]
+      - generic [ref=e31]:
+        - strong [ref=e32]: 降 AI 检测
+        - generic [ref=e33]: 去痕、核验与差异
+    - button "降查重率 重复源、降重与复核" [ref=e34] [cursor=pointer]:
+      - img [ref=e36]
+      - generic [ref=e39]:
+        - strong [ref=e40]: 降查重率
+        - generic [ref=e41]: 重复源、降重与复核
+    - button "学术润色 任务设置与结果预览" [ref=e42] [cursor=pointer]:
+      - img [ref=e44]
+      - generic [ref=e46]:
+        - strong [ref=e47]: 学术润色
+        - generic [ref=e48]: 任务设置与结果预览
+    - button "智能纠错 统计、预览与问题列表" [ref=e49] [cursor=pointer]:
+      - img [ref=e51]
+      - generic [ref=e53]:
+        - strong [ref=e54]: 智能纠错
+        - generic [ref=e55]: 统计、预览与问题列表
+    - button "配置管理 模式、接口与后端配置" [ref=e56] [cursor=pointer]:
+      - img [ref=e58]
+      - generic [ref=e61]:
+        - strong [ref=e62]: 配置管理
+        - generic [ref=e63]: 模式、接口与后端配置
+    - button "历史记录 版本、草稿与恢复" [ref=e64] [cursor=pointer]:
+      - img [ref=e66]
+      - generic [ref=e70]:
+        - strong [ref=e71]: 历史记录
+        - generic [ref=e72]: 版本、草稿与恢复
+  - main [ref=e73]:
+    - generic [ref=e74]:
+      - generic [ref=e75]:
+        - paragraph [ref=e76]: Paper Writer
+        - heading "论文写作" [level=1] [ref=e77]
+        - paragraph [ref=e78]: 对应桌面端论文写作页：上方是论文设置和生成动作，下方左侧管理大纲，上方右侧编辑当前章节。
+        - generic [ref=e79]: 尚未检测到可用模型配置；本地分析可用，AI 改写需要先在桌面端配置模型。
+      - generic [ref=e80]:
+        - generic [ref=e81]:
+          - generic [ref=e82]:
+            - generic [ref=e83]:
+              - paragraph [ref=e84]: Template
+              - heading "论文模板" [level=3] [ref=e85]
+            - button "清除" [ref=e86] [cursor=pointer]
+          - generic [ref=e87]:
+            - generic [ref=e88]: 上传模板
+            - generic [ref=e89]: 未上传模板
+          - generic [ref=e90]: 支持 DOC、DOCX、PDF、TXT、Markdown。上传后生成大纲会参考模板目录结构。
+          - generic [ref=e91]: 暂无目录结构
+        - generic [ref=e92]:
+          - generic [ref=e93]:
+            - generic [ref=e94]:
+              - paragraph [ref=e95]: Settings
+              - heading "论文设置" [level=3] [ref=e96]
+            - generic [ref=e97]: 待处理
+          - generic [ref=e98]:
+            - generic [ref=e99]:
+              - generic [ref=e100]: 论文题目
+              - textbox "论文题目" [ref=e101]:
+                - /placeholder: 例如：人工智能辅助学术写作的伦理风险与治理路径研究
+            - generic [ref=e102]:
+              - generic [ref=e103]: 学科/方向
+              - textbox "学科/方向" [ref=e104]:
+                - /placeholder: 例如：教育技术 / 管理学
+            - generic [ref=e105]:
+              - generic [ref=e106]: 论文类型
+              - combobox "论文类型" [ref=e107]:
+                - option "学术论文" [selected]
+                - option "毕业论文"
+                - option "综述文章"
+                - option "研究报告"
+                - option "实验报告"
+            - generic [ref=e108]:
+              - generic [ref=e109]: 引用格式
+              - combobox "引用格式" [ref=e110]:
+                - option "GB/T 7714" [selected]
+                - option "APA"
+                - option "MLA"
+                - option "Chicago"
+                - option "IEEE"
+            - generic [ref=e111]:
+              - generic [ref=e112]: 当前章节
+              - textbox "当前章节" [ref=e113]:
+                - /placeholder: 例如：第一章 绪论
+            - generic [ref=e114]:
+              - generic [ref=e115]:
+                - generic [ref=e116]: 全文目标字数
+                - generic [ref=e117]:
+                  - checkbox "自动" [checked] [ref=e118]
+                  - text: 自动
+              - spinbutton [disabled] [ref=e119]: "0"
+            - generic [ref=e120]:
+              - generic [ref=e121]:
+                - generic [ref=e122]: 单章节目标字数
+                - generic [ref=e123]:
+                  - checkbox "自动" [checked] [ref=e124]
+                  - text: 自动
+              - spinbutton [disabled] [ref=e125]: "0"
+          - generic [ref=e126]:
+            - button "生成大纲" [ref=e127] [cursor=pointer]
+            - button "撰写当前章节" [ref=e128] [cursor=pointer]
+            - button "撰写全部章节" [ref=e129] [cursor=pointer]
+            - button "生成摘要" [ref=e130] [cursor=pointer]
+            - button "整理参考文献" [ref=e131] [cursor=pointer]
+            - combobox "导出格式" [ref=e132]:
+              - option "Word" [selected]
+              - option "Markdown"
+              - option "TXT"
+            - button "导出论文" [ref=e133] [cursor=pointer]
+          - generic [ref=e134]:
+            - generic [ref=e135]:
+              - strong [ref=e136]: 推送章节到功能区
+              - generic [ref=e137]: 把整篇文章、某章/某节或单个小节送到降 AI、降重、润色、纠错页面。
+            - generic [ref=e138]:
+              - combobox "推送范围" [ref=e139]:
+                - option "整篇文章" [selected]
+              - combobox "目标功能区" [ref=e140]:
+                - option "数据图表" [selected]
+                - option "降 AI 检测"
+                - option "降查重率"
+                - option "学术润色"
+                - option "智能纠错"
+              - button "推送" [ref=e141] [cursor=pointer]
+      - generic [ref=e142]:
+        - generic [ref=e143]:
+          - generic [ref=e144]:
+            - generic [ref=e145]:
+              - paragraph [ref=e146]: Outline
+              - heading "论文大纲" [level=3] [ref=e147]
+            - button "刷新章节" [ref=e148] [cursor=pointer]
+          - textbox "生成大纲后会写入这里；也可以粘贴自己的大纲，作为章节写作依据。" [ref=e149]
+          - generic [ref=e150]:
+            - generic [ref=e151]:
+              - generic [ref=e152]: 章节导航
+              - generic [ref=e153]: 0 节
+            - generic [ref=e154]:
+              - combobox "快速跳转章节" [ref=e155]:
+                - option "快速跳转章节" [selected]
+              - searchbox "搜索章节" [ref=e156]
+            - generic [ref=e157]: 生成或粘贴大纲后，这里会显示可点击章节。
+        - generic [ref=e158]:
+          - generic [ref=e159]:
+            - generic [ref=e160]:
+              - paragraph [ref=e161]: Editor
+              - heading "当前章节编辑器" [level=3] [ref=e162]
+            - button "复制" [ref=e163] [cursor=pointer]
+          - generic [ref=e164]:
+            - button "↶" [ref=e165] [cursor=pointer]
+            - button "↷" [ref=e166] [cursor=pointer]
+            - button "A" [ref=e167] [cursor=pointer]
+            - button "■" [ref=e168] [cursor=pointer]
+            - button "B" [ref=e169] [cursor=pointer]:
+              - strong [ref=e170]: B
+            - button "I" [ref=e171] [cursor=pointer]:
+              - emphasis [ref=e172]: I
+            - button "U" [ref=e173] [cursor=pointer]:
+              - generic [ref=e174]: U
+            - button "S" [ref=e175] [cursor=pointer]:
+              - generic [ref=e176]: S
+            - button "X²" [ref=e177] [cursor=pointer]
+            - button "X₂" [ref=e178] [cursor=pointer]
+            - button "→" [ref=e179] [cursor=pointer]
+            - button "●" [ref=e180] [cursor=pointer]
+            - button "1." [ref=e181] [cursor=pointer]
+            - button "[?]" [ref=e182] [cursor=pointer]
+            - button "🔍" [ref=e183] [cursor=pointer]
+          - generic [ref=e184]: 这里对应桌面端右侧正文编辑区，可放已有章节上下文、全文正文或参考文献。生成结果也会直接写回这里。

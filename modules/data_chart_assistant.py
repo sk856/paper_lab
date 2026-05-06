@@ -135,6 +135,112 @@ class DataChartAssistant:
             })
         return payload
 
+    def _target_candidate_from_ai_item(self, item, paragraph, index, raw_count):
+        artifact_type = self._normalize_artifact_type(item.get('artifactType') or item.get('insertType') or item.get('type'))
+        chart_title = item.get('chartTitle') or item.get('tableTitle') or item.get('title')
+        reason = str(item.get('reason', '') or ('AI 判断该处适合补充数据表。' if artifact_type == 'table' else 'AI 判断该处适合补充数据图。')).strip()
+        data_need = str(item.get('dataNeed', '') or '补充可核验数据').strip()
+        intent = str(item.get('intent') or item.get('suggestion') or reason or data_need).strip()
+        if not chart_title and intent:
+            chart_title = intent
+        return {
+            'id': f'target-{paragraph.get("id")}-{artifact_type}-{index + 1}',
+            'paragraphId': paragraph.get('id'),
+            'artifactType': artifact_type,
+            'artifactLabel': self._default_artifact_label(paragraph.get('sectionTitle', ''), artifact_type),
+            'figureLabel': self._default_artifact_label(paragraph.get('sectionTitle', ''), 'figure'),
+            'tableLabel': self._default_artifact_label(paragraph.get('sectionTitle', ''), 'table'),
+            'sectionTitle': paragraph.get('sectionTitle', ''),
+            'paragraphIndex': paragraph.get('paragraphIndex', 0),
+            'excerpt': self._clean_excerpt(paragraph.get('text', '')),
+            'originalText': paragraph.get('text', '').strip(),
+            'reason': reason,
+            'intent': intent,
+            'dataNeed': data_need,
+            'query': str(item.get('query', '') or '').strip(),
+            'chartType': self._normalize_chart_type(item.get('chartType')),
+            'chartTitle': self._normalize_chart_title(chart_title, [], item),
+            'tableTitle': self._normalize_chart_title(item.get('tableTitle') or chart_title, [], item),
+            'confidence': max(0.0, min(1.0, float(item.get('confidence') or 0.6))),
+            'score': max(0, raw_count - index),
+        }
+
+    def _coerce_target_candidates(self, raw_targets, paragraph_map):
+        candidates = []
+        raw_count = len(raw_targets) if isinstance(raw_targets, list) else 0
+        for index, item in enumerate(raw_targets if isinstance(raw_targets, list) else []):
+            if not isinstance(item, dict):
+                continue
+            paragraph_id = str(item.get('paragraphId', '') or '').strip()
+            paragraph = paragraph_map.get(paragraph_id)
+            if not paragraph:
+                continue
+            candidates.append(self._target_candidate_from_ai_item(item, paragraph, index, raw_count))
+        return candidates
+
+    @staticmethod
+    def _limit_targets_preserving_table(candidates, limit):
+        max_items = max(1, int(limit or 8))
+        if len(candidates or []) <= max_items:
+            return candidates or []
+        head = list(candidates[:max_items])
+        if any(item.get('artifactType') == 'table' for item in head):
+            return head
+        table_target = next((item for item in candidates if item.get('artifactType') == 'table'), None)
+        if table_target:
+            return head[:max_items - 1] + [table_target]
+        return head
+
+    def _find_table_targets_with_ai(self, api, *, topic='', outline='', prompt_payload=None, paragraph_map=None, limit=2):
+        prompt_payload = prompt_payload or []
+        paragraph_map = paragraph_map or {}
+        prompt = f'''请再次只从“插表”角度阅读论文段落列表，找出适合插入论文数据表的位置。
+
+判断原则：
+1. 不是看到关键词就选表，而是看该段论证是否需要保留多列原始数值、指标口径、变量定义、描述性统计、相关系数、回归结果、评价指标体系或测算结果。
+2. 如果数据需要让读者逐项核对、比较多个指标或展示模型/测算结果，优先选择 table。
+3. 如果全文确实没有适合插表的位置，返回空 targets，并在 summary 中说明原因。
+4. 每个候选仍必须围绕具体段落生成 dataNeed、query 和 tableTitle；不要使用论文总题目或章节题作为标题。
+
+论文主题：{topic or '未提供'}
+论文大纲：{self._truncate_for_prompt(outline, 2400) or '未提供'}
+段落列表 JSON：
+{json.dumps(prompt_payload, ensure_ascii=False)}
+
+返回 JSON：
+{{
+  "summary": "一句话说明插表判断",
+  "targets": [
+    {{
+      "paragraphId": "S1P1",
+      "artifactType": "table",
+      "reason": "为什么这里更适合插表",
+      "dataNeed": "需要什么表格数据",
+      "query": "检索式",
+      "chartType": "bar",
+      "chartTitle": "备用图题",
+      "tableTitle": "建议表题",
+      "confidence": 0.0
+    }}
+  ]
+}}'''
+        try:
+            payload = api.call_json_sync(
+                prompt,
+                system='你是严谨的论文表格编辑。请从论证逻辑判断插表位置，不要机械按关键词选择。',
+                temperature=0.15,
+                max_tokens=1800,
+                request_timeout=120,
+                schema_name='data_chart_table_targets',
+                usage_context=self._usage_context('data_chart.find_table'),
+            )
+        except Exception:
+            return [], ''
+        raw_targets = payload.get('targets', []) if isinstance(payload, dict) else []
+        coerced = self._coerce_target_candidates(raw_targets, paragraph_map)
+        table_targets = [item for item in coerced if item.get('artifactType') == 'table']
+        return table_targets[: max(1, int(limit or 2))], str((payload or {}).get('summary') or '').strip()
+
     @staticmethod
     def _normalize_chart_type(value):
         text = str(value or '').strip().lower()
@@ -151,6 +257,13 @@ class DataChartAssistant:
         }
         text = aliases.get(text, text)
         return text if text in {'bar', 'line', 'pie'} else 'bar'
+
+    @staticmethod
+    def _normalize_artifact_type(value):
+        text = str(value or '').strip().lower()
+        if text in {'table', '表格', '插表', '数据表', '表'}:
+            return 'table'
+        return 'figure'
 
     @staticmethod
     def _split_label_axis(label):
@@ -196,9 +309,10 @@ class DataChartAssistant:
     def _target_title_hint(target):
         if not isinstance(target, dict):
             return ''
-        for field in ('chartTitle', 'title', 'dataNeed', 'query'):
+        for field in ('intent', 'suggestion', 'chartTitle', 'tableTitle', 'title', 'dataNeed', 'query'):
             value = re.sub(r'\s+', '', str(target.get(field, '') or '').strip())
-            value = re.sub(r'^(补充|展示|分析|比较|对比)', '', value)
+            value = re.sub(r'^(该段|建议|适合|应当|可以|补充|展示|分析|比较|对比|绘制|生成)', '', value)
+            value = re.sub(r'(，|。|；|;).*$', '', value)
             value = re.sub(r'(数据|统计数据|图表|图|变化趋势|趋势|对比)$', '', value)
             if value and len(value) >= 3:
                 return value[:24]
@@ -357,10 +471,35 @@ AI 建议标题：{(target or {}).get('chartTitle') or (target or {}).get('title
         url = str(row.get('url', '') or '').strip()
         note = str(row.get('note', '') or '').strip()
         parts = []
-        for value in (source_name, publisher, source, url, note):
+        for value in (source_name, publisher, url or source, note):
             if value and value not in parts:
                 parts.append(value)
         return '；'.join(parts)
+
+    @staticmethod
+    def _shorten_source_name(value, limit=34):
+        text = re.sub(r'\s+', ' ', str(value or '').strip())
+        text = re.sub(r'https?://\S+', '', text)
+        text = text.strip('，,。.;； ')
+        return text[:limit].rstrip() + ('…' if len(text) > limit else '')
+
+    @classmethod
+    def _short_source_label(cls, row):
+        source_name = cls._shorten_source_name(row.get('sourceName', ''))
+        publisher = cls._shorten_source_name(row.get('publisher', ''), 22)
+        if source_name and publisher and publisher not in source_name:
+            return f'{publisher}《{source_name}》' if '《' not in source_name else f'{publisher}{source_name}'
+        if source_name:
+            return source_name
+        if publisher:
+            return publisher
+        source = cls._shorten_source_name(row.get('source', ''))
+        if source:
+            return source
+        url = str(row.get('url', '') or '').strip()
+        if url:
+            return urllib.parse.urlparse(url).netloc.lower().removeprefix('www.')
+        return ''
 
     @classmethod
     def _coerce_ai_rows(cls, rows):
@@ -383,6 +522,94 @@ AI 建议标题：{(target or {}).get('chartTitle') or (target or {}).get('title
                 'note': str(row.get('note', '') or '').strip(),
             })
         return result
+
+    @staticmethod
+    def _has_verifiable_source(row):
+        text = ' '.join(str(row.get(field, '') or '').strip() for field in ('source', 'sourceName', 'publisher', 'url', 'note'))
+        if not text:
+            return False
+        if re.search(r'(请|待|需要).{0,8}(补充|替换|核验|确认)|真实来源|来源待|用户审核|示例|项目A|项目B|项目C', text, flags=re.IGNORECASE):
+            return False
+        if re.search(r'https?://|doi\.org|\.gov|\.edu|统计局|年鉴|公报|报告|数据库|白皮书|CNNIC|中国互联网络信息中心', text, flags=re.IGNORECASE):
+            return True
+        return bool(str(row.get('sourceName', '') or '').strip() and str(row.get('publisher', '') or '').strip())
+
+    @classmethod
+    def _rows_have_verifiable_sources(cls, rows):
+        usable = [row for row in rows or [] if row.get('value') is not None]
+        if len(usable) < 2:
+            return False
+        return all(cls._has_verifiable_source(row) for row in usable)
+
+    @staticmethod
+    def _label_looks_like_variable_code(label):
+        text = re.sub(r'\s+', '', str(label or '').strip())
+        if not text:
+            return False
+        known_codes = {
+            'pgdp', 'gdp', 'rgdp', 'urban', 'urb', 'fagri', 'agri', 'indstr', 'industry',
+            'edu', 'education', 'internet', 'net', 'fin', 'finance', 'gov', 'fdi', 'pop',
+            'labor', 'lnpgdp', 'lnurban', 'lnfagri', 'lnindstr',
+        }
+        if text.lower() in known_codes:
+            return True
+        return bool(re.fullmatch(r'[A-Za-z_][A-Za-z0-9_]{1,12}', text))
+
+    @staticmethod
+    def _values_are_small_sequence(rows):
+        values = []
+        for row in rows or []:
+            value = row.get('value')
+            try:
+                number = float(value)
+            except Exception:
+                return False
+            if abs(number - round(number)) > 1e-9:
+                return False
+            values.append(int(round(number)))
+        if len(values) < 3:
+            return False
+        if values == list(range(1, len(values) + 1)):
+            return True
+        unique = sorted(set(values))
+        return len(unique) >= 3 and unique == list(range(1, len(unique) + 1))
+
+    @classmethod
+    def _data_quality_issue(cls, rows, target=None, payload=None):
+        rows = rows or []
+        if len(rows) < 2:
+            return ''
+        labels = [str(row.get('label', '') or '').strip() for row in rows]
+        joined_labels = ' '.join(labels)
+        joined_meta = ' '.join(
+            str(row.get(field, '') or '').strip()
+            for row in rows
+            for field in ('source', 'sourceName', 'publisher', 'url', 'note')
+        )
+        context = ' '.join([
+            str((target or {}).get('chartTitle', '') or ''),
+            str((target or {}).get('tableTitle', '') or ''),
+            str((target or {}).get('dataNeed', '') or ''),
+            str((target or {}).get('query', '') or ''),
+            str((payload or {}).get('title', '') or ''),
+            str((payload or {}).get('sourceNote', '') or ''),
+        ])
+        code_count = sum(1 for label in labels if cls._label_looks_like_variable_code(label))
+        code_ratio = code_count / max(1, len(labels))
+        has_sequence = cls._values_are_small_sequence(rows)
+        meta_signal = re.search(
+            r'变量名称|变量名|变量代码|控制变量|解释变量|被解释变量|预测方向|单位建议|指标代码|变量说明|variable\s+name|control\s+variable',
+            f'{joined_meta} {context}',
+            flags=re.IGNORECASE,
+        )
+        placeholder_signal = re.search(r'项目A|项目B|项目C|请替换|请补充|真实来源|待核验|示例', f'{joined_labels} {joined_meta}')
+        if placeholder_signal:
+            return 'AI 返回的是占位数据，不是可用于论文图表的真实统计值。'
+        if code_ratio >= 0.5 and (has_sequence or meta_signal):
+            return 'AI 返回的是变量代码或控制变量清单，并把 1、2、3 等序号误当成数值；这不是可用于绘图或论文数据分析的统计数据。'
+        if has_sequence and meta_signal:
+            return 'AI 返回的是变量/指标顺序编号，不是真实观测值。'
+        return ''
 
     @staticmethod
     def _public_row(row):
@@ -513,6 +740,7 @@ AI 建议标题：{(target or {}).get('chartTitle') or (target or {}).get('title
         preferred_domains = (
             'stats.gov.cn', '.gov.cn', '.edu.cn', 'worldbank.org', 'oecd.org',
             'imf.org', 'un.org', 'who.int', 'wto.org', 'pbc.gov.cn',
+            'cnnic.net.cn', 'ndrc.gov.cn', 'mof.gov.cn', 'gov.cn',
         )
         for domain in preferred_domains:
             if host.endswith(domain) or domain in host:
@@ -520,6 +748,8 @@ AI 建议标题：{(target or {}).get('chartTitle') or (target or {}).get('title
                 break
         if any(term in text for term in ('统计局', '公报', '报告', '年鉴', '数据库', '白皮书', 'data', 'dataset', 'statistics')):
             score += 4
+        if any(term in text for term in ('论文', '期刊', '毕业论文', '万方', '知网', '维普', '影响效应', '机制分析', '编辑部')):
+            score -= 7
         blocked_domains = ('zhihu.com', 'baike.baidu.com', 'baidu.com', 'csdn.net', 'jianshu.com')
         if any(domain in host for domain in blocked_domains) or any(term in text for term in ('知乎', '百度知道', 'csdn', 'blog', '贴吧', '论坛')):
             score -= 12
@@ -583,8 +813,18 @@ AI 建议标题：{(target or {}).get('chartTitle') or (target or {}).get('title
     def _collect_search_evidence(cls, query, *, limit=5, page_limit=3):
         search_query = str(query or '').strip()
         enriched_query = search_query
-        if search_query and not any(term in search_query for term in ('数据来源', '统计数据', '报告', '数据库', '年鉴', '公报')):
+        cleaned_for_stats = False
+        if re.search(r'控制变量|变量名称|变量名|变量代码|预测方向|变量说明', search_query):
+            cleaned_query = re.sub(r'控制变量|变量名称|变量名|变量代码|预测方向|变量说明|类别|数量|分布|对比', ' ', search_query)
+            cleaned_query = re.sub(r'\s+', ' ', cleaned_query).strip()
+            if cleaned_query:
+                enriched_query = f'{cleaned_query} 年度统计数据 地区数据 真实数值'
+                cleaned_for_stats = True
+        if search_query and not cleaned_for_stats and not any(term in search_query for term in ('数据来源', '统计数据', '报告', '数据库', '年鉴', '公报')):
             enriched_query = f'{search_query} 统计数据 报告 数据来源'
+        negative_terms = ' -论文 -期刊 -毕业论文 -万方 -知网 -维普'
+        if search_query and not any(term in search_query for term in ('-论文', '-期刊', '-万方', '-知网')):
+            enriched_query = f'{enriched_query}{negative_terms}'
         results = cls._search_web_sources(enriched_query, limit=limit)
         evidence = []
         for index, item in enumerate(results):
@@ -606,19 +846,20 @@ AI 建议标题：{(target or {}).get('chartTitle') or (target or {}).get('title
         paragraph_map = {item['id']: item for item in paragraphs}
         prompt_payload = self._paragraph_prompt_payload(paragraphs)
         system = (
-            '你是论文写作中的数据图表编辑。你的任务是阅读全文，从论证逻辑出发判断哪些段落适合插入数据图表。'
-            '不要根据单个关键词机械判断；必须说明为什么该段需要数据支持，以及应使用什么数据。'
+            '你是论文写作中的数据图表编辑。你的任务是阅读全文，从论证逻辑出发判断哪些段落适合插入数据图或数据表。'
+            '不要根据单个关键词机械判断；必须说明为什么该段需要数据支持、应使用什么数据，以及更适合插图还是插表。'
         )
-        prompt = f'''请阅读下面的论文段落列表，找出最适合插入数据图表的位置。
+        prompt = f'''请阅读下面的论文段落列表，找出最适合插入数据图或数据表的位置。
 
 要求：
 1. 只从给定 paragraph id 中选择位置，不要改写原文。
-2. 优先选择“论证需要数据支撑、现状/趋势/对比/结构/实证结果需要可视化”的段落。
+2. 插图适合呈现趋势、结构、占比、组间对比和变化过程；插表适合呈现原始数据、指标口径、变量定义、相关系数、回归结果、描述性统计和多列数值。
 3. 如果全文确实没有合适位置，可以返回空 targets。
-4. 每个候选给出：paragraphId、reason、dataNeed、query、chartType、chartTitle、confidence。
+4. 每个候选给出：paragraphId、artifactType、reason、dataNeed、query、chartType、chartTitle、tableTitle、confidence。
 5. query 必须围绕该段真正需要说明的指标、对象、年份和地区生成，不要沿用论文总题目。
-6. chartTitle 必须概括“要画什么数据”，不要写论文总题目或章节题。
-7. chartType 只能是 line、bar、pie。
+6. chartTitle/tableTitle 必须概括“要呈现什么数据”，不要写论文总题目、章节题或“影响因素”这类泛化标题。
+7. artifactType 只能是 figure 或 table；chartType 只能是 line、bar、pie，插表时也给出一个备用 chartType。
+8. 至少保留 1 个插表候选；如果全文确实没有适合插表的位置，在 summary 中说明原因。
 
 论文主题：{topic or '未提供'}
 论文大纲：{self._truncate_for_prompt(outline, 2400) or '未提供'}
@@ -631,11 +872,13 @@ AI 建议标题：{(target or {}).get('chartTitle') or (target or {}).get('title
   "targets": [
     {{
       "paragraphId": "S1P1",
+      "artifactType": "figure|table",
       "reason": "为什么这里需要图表",
       "dataNeed": "需要什么数据",
       "query": "检索式",
       "chartType": "line|bar|pie",
       "chartTitle": "建议图表标题",
+      "tableTitle": "建议表格标题",
       "confidence": 0.0
     }}
   ]
@@ -650,32 +893,41 @@ AI 建议标题：{(target or {}).get('chartTitle') or (target or {}).get('title
             usage_context=self._usage_context('data_chart.find'),
         )
         raw_targets = payload.get('targets', []) if isinstance(payload, dict) else []
-        candidates = []
-        for index, item in enumerate(raw_targets[: max(1, int(limit or 8))]):
-            if not isinstance(item, dict):
-                continue
-            paragraph_id = str(item.get('paragraphId', '') or '').strip()
-            paragraph = paragraph_map.get(paragraph_id)
-            if not paragraph:
-                continue
-            candidates.append({
-                'id': f'target-{paragraph_id}',
-                'paragraphId': paragraph_id,
-                'sectionTitle': paragraph.get('sectionTitle', ''),
-                'paragraphIndex': paragraph.get('paragraphIndex', 0),
-                'excerpt': self._clean_excerpt(paragraph.get('text', '')),
-                'originalText': paragraph.get('text', '').strip(),
-                'reason': str(item.get('reason', '') or 'AI 判断该处适合补充数据图表。').strip(),
-                'dataNeed': str(item.get('dataNeed', '') or '补充可核验数据').strip(),
-                'query': str(item.get('query', '') or '').strip(),
-                'chartType': self._normalize_chart_type(item.get('chartType')),
-                'chartTitle': self._normalize_chart_title(item.get('chartTitle') or item.get('title'), [], item),
-                'confidence': max(0.0, min(1.0, float(item.get('confidence') or 0.6))),
-                'score': max(0, len(raw_targets) - index),
-            })
+        candidates = self._coerce_target_candidates(raw_targets, paragraph_map)
+        candidates = self._limit_targets_preserving_table(candidates, limit)
+        table_summary = ''
+        if candidates and not any(item.get('artifactType') == 'table' for item in candidates):
+            table_targets, table_summary = self._find_table_targets_with_ai(
+                api,
+                topic=topic,
+                outline=outline,
+                prompt_payload=prompt_payload,
+                paragraph_map=paragraph_map,
+                limit=2,
+            )
+            seen_ids = {item.get('paragraphId') for item in candidates}
+            for table_target in table_targets:
+                if table_target.get('paragraphId') in seen_ids:
+                    table_target['id'] = f'{table_target.get("id")}-table-review'
+                candidates.append(table_target)
+                seen_ids.add(table_target.get('paragraphId'))
+            candidates = self._limit_targets_preserving_table(candidates, limit)
+        if not candidates:
+            table_targets, table_summary = self._find_table_targets_with_ai(
+                api,
+                topic=topic,
+                outline=outline,
+                prompt_payload=prompt_payload,
+                paragraph_map=paragraph_map,
+                limit=2,
+            )
+            candidates = self._limit_targets_preserving_table(table_targets, limit)
+        summary = str((payload or {}).get('summary') or f'AI 已阅读全文并定位到 {len(candidates)} 个可补充数据图表的位置。')
+        if table_summary and not any(item.get('artifactType') == 'table' for item in candidates):
+            summary = f'{summary} 插表复核：{table_summary}'
         return {
             'targets': candidates,
-            'summary': str((payload or {}).get('summary') or f'AI 已阅读全文并定位到 {len(candidates)} 个可补充数据图表的位置。'),
+            'summary': summary,
         }
 
     @staticmethod
@@ -753,7 +1005,7 @@ AI 建议标题：{(target or {}).get('chartTitle') or (target or {}).get('title
         aliases = {
             'label': {'标签', '项目', '名称', '年份', '地区', '指标', 'label', 'name'},
             'value': {'数值', '值', '数据', 'value', 'number'},
-            'sourceName': {'来源名称', '报告名称', '数据库名称', '网站名称', '来源名', 'sourceName', 'source name'},
+            'sourceName': {'来源名称', '报告名称', '数据库名称', '网站名称', '来源名', 'sourceName', 'sourcename', 'source_name', 'source name'},
             'publisher': {'发布机构', '机构', '作者', 'publisher', 'organization'},
             'url': {'链接', '网址', 'url', '来源链接'},
             'note': {'备注', '页码/口径', '页码', '口径', '说明', 'note'},
@@ -777,57 +1029,40 @@ AI 建议标题：{(target or {}).get('chartTitle') or (target or {}).get('title
             return ''
         return str(row[index] or '').strip()
 
-    def search_data(self, *, query='', target=None, full_text='', user_data=''):
-        if user_data and self._normalize_text(user_data):
-            rows = self.parse_data_table(user_data)
-            title = self._normalize_chart_title((target or {}).get('chartTitle') or query, rows, target or {})
-            chart_type = self._choose_chart_type((target or {}).get('chartType'), rows, target or {})
-            return {
-                'tableText': self._format_table(rows),
-                'sourceNote': '已使用用户提供的数据表；生成图表前仍建议核对来源与单位。',
-                'foundRows': len(rows),
-                'dataRows': self._public_rows(rows),
-                'dataSources': self._collect_row_sources(rows),
-                'sourceItems': self._build_source_items(rows, []),
-                'needsManualData': False,
-                'title': title,
-                'chartType': chart_type,
-            }
+    def _request_search_payload(self, api, *, artifact_type, target, search_query, chart_title_hint, full_text, evidence_note, quality_feedback=''):
+        feedback = ''
+        intent = str(target.get('intent') or target.get('suggestion') or target.get('reason') or '').strip()
+        title_hint = self._target_title_hint(target) or chart_title_hint
+        if quality_feedback:
+            feedback = f'''
 
-        api = self._require_ai('data_chart.search')
-        target = target or {}
-        search_query = query or target.get('query') or ''
-        chart_title_hint = str(target.get('chartTitle') or '').strip()
-        evidence_query = search_query or chart_title_hint or target.get('dataNeed') or target.get('sectionTitle')
-        if chart_title_hint and chart_title_hint not in evidence_query:
-            evidence_query = f'{chart_title_hint} {evidence_query}'
-        evidence = self._collect_search_evidence(evidence_query, limit=6, page_limit=3)
-        evidence_note = (
-            json.dumps(evidence, ensure_ascii=False, indent=2)
-            if evidence
-            else '未抓取到可核验网页来源。若模型也无法确认真实来源，必须返回 needsManualData=true。'
-        )
+上一次返回的数据被系统判定为不可用，原因：{quality_feedback}
+请重新检索真实统计值。不要返回变量代码、控制变量名称、指标编号、序号、变量定义或“预测方向”。如果只能找到变量说明而找不到真实数值，请返回 needsManualData=true。'''
         system = (
             '你是论文数据检索助手。你需要根据论文段落和检索式寻找可用于论文图表的数据，并给出清晰来源。'
             '必须优先使用用户提供的“候选网页来源”，并诚实说明来源。'
             '如果候选网页来源中没有足够数据，且你无法确认真实数据来源，不要编造数值、网址、报告名或年份。'
         )
-        prompt = f'''请围绕下面论文段落，自行判断应使用哪些真实数据来制图，并返回可供用户审核的数据表。
+        prompt = f'''请围绕下面论文段落，自行判断应使用哪些真实数据来生成{"表格" if artifact_type == "table" else "图表"}，并返回可供用户审核的数据表。
 
 硬性要求：
-1. 数据必须服务于“图表要说明的问题”，不要因为论文总题目而改找无关数据。
+1. 数据必须优先服务于“候选位置黑色建议/检索意图”，不要因为论文总题目而改找无关数据。
 2. 候选网页来源是后端按 AI 给出的检索方向抓取的证据；请优先从这些来源中提取或归纳可制图数据。
-3. 不要编造不存在的数据来源；如果候选来源或你的知识都无法确认真实来源，请返回 needsManualData=true，并给出应去哪里核验。
-4. rows 至少 2 行才可作图；每行包含 label、value、sourceName、publisher、url、note。
-5. value 只填数值，单位写在 unit。
-6. sourceNote 要提示用户逐项审核真实性。
-7. title 必须直接概括数据指标、对象和时间范围，不要使用论文总题目、章节题或“影响因素”这类泛化标题。
+3. 不要编造不存在的数据来源；候选来源不足时，可以使用你能够确认的公开权威报告、统计年鉴、政府/机构数据库或论文中的数据，但必须写明可核验的来源名称、发布机构、年份、页码/表号/检索路径。只有在无法确认真实数值时才返回 needsManualData=true。
+4. rows 至少 2 行；每行包含 label、value，并尽量填写 sourceName、publisher、url、note。没有 URL 时不要因为 URL 缺失而放弃，但 note 必须说明页码、表号、统计口径或核验路径。
+5. value 只填真实统计数值，单位写在 unit；禁止把变量编号、排序序号、分类编码、变量名称、预测方向写成 value。
+6. label 应该是年份、地区、组别、行业、指标项等可解释对象；禁止返回 pgdp、urban、fagri、indstr、edu、internet 等变量代码作为绘图标签，除非这是“变量说明表”且 value 为空。
+7. sourceNote 要提示用户逐项审核真实性。
+8. title 必须直接概括数据指标、对象和时间范围，不要使用论文总题目、章节题或“影响因素”这类泛化标题。
+{feedback}
 
 论文段落：
 {self._truncate_for_prompt(target.get('originalText') or target.get('excerpt'), 1800)}
 
 数据需求：{target.get('dataNeed') or '未提供'}
-建议图题：{chart_title_hint or '未提供'}
+候选位置黑色建议/检索意图：{intent or '未提供'}
+建议图题/表题：{title_hint or '未提供'}
+候选类型：{"插表" if artifact_type == "table" else "插图"}
 检索方向：{search_query or '未提供'}
 全文上下文：
 {self._truncate_for_prompt(full_text, 6000)}
@@ -854,45 +1089,122 @@ AI 建议标题：{(target or {}).get('chartTitle') or (target or {}).get('title
   ],
   "manualHint": "如果需要用户补充，写明应补充什么"
 }}'''
-        payload = api.call_json_sync(
+        return api.call_json_sync(
             prompt,
             system=system,
-            temperature=0.15,
+            temperature=0.12 if quality_feedback else 0.15,
             max_tokens=3200,
             request_timeout=160,
             schema_name='data_chart_search',
-            usage_context=self._usage_context('data_chart.search'),
+            usage_context=self._usage_context('data_chart.search.retry' if quality_feedback else 'data_chart.search'),
         )
-        rows = self._coerce_ai_rows(payload.get('rows', []) if isinstance(payload, dict) else [])
-        needs_manual = bool((payload or {}).get('needsManualData')) or len(rows) < 2
-        evidence_sources = self._collect_evidence_sources(evidence)
-        if needs_manual:
-            template = [
-                ['标签', '数值', '来源/备注'],
-                ['项目A', '', '请替换为真实来源'],
-                ['项目B', '', '请替换为真实来源'],
-                ['项目C', '', '请替换为真实来源'],
-            ]
+
+    def search_data(self, *, query='', target=None, full_text='', user_data=''):
+        if user_data and self._normalize_text(user_data):
+            rows = self.parse_data_table(user_data)
+            artifact_type = self._normalize_artifact_type((target or {}).get('artifactType') or (target or {}).get('insertType'))
+            title = self._normalize_chart_title((target or {}).get('tableTitle') or (target or {}).get('chartTitle') or query, rows, target or {})
+            chart_type = self._choose_chart_type((target or {}).get('chartType'), rows, target or {})
             return {
-                'tableText': '\n'.join(','.join(row) for row in template),
-                'sourceNote': str((payload or {}).get('manualHint') or (payload or {}).get('sourceNote') or 'AI 未能确认可直接作图的数据来源，请补充真实数据与来源后再生成图表。'),
+                'artifactType': artifact_type,
+                'tableText': self._format_table(rows),
+                'sourceNote': '已使用用户提供的数据表；生成图表前仍建议核对来源与单位。',
                 'foundRows': len(rows),
                 'dataRows': self._public_rows(rows),
+                'dataSources': self._collect_row_sources(rows),
+                'sourceItems': self._build_source_items(rows, []),
+                'needsManualData': False,
+                'title': title,
+                'chartType': chart_type,
+            }
+
+        api = self._require_ai('data_chart.search')
+        target = target or {}
+        artifact_type = self._normalize_artifact_type(target.get('artifactType') or target.get('insertType'))
+        intent = str(target.get('intent') or target.get('suggestion') or target.get('reason') or '').strip()
+        target_title_hint = self._target_title_hint(target)
+        search_query = query or intent or target.get('query') or ''
+        chart_title_hint = str(target_title_hint or target.get('tableTitle') or target.get('chartTitle') or '').strip()
+        evidence_query = ' '.join(part for part in (intent, search_query, chart_title_hint, target.get('dataNeed')) if part).strip()
+        evidence_query = evidence_query or target.get('sectionTitle')
+        if chart_title_hint and chart_title_hint not in evidence_query:
+            evidence_query = f'{chart_title_hint} {evidence_query}'
+        evidence = self._collect_search_evidence(evidence_query, limit=6, page_limit=3)
+        evidence_note = (
+            json.dumps(evidence, ensure_ascii=False, indent=2)
+            if evidence
+            else '未抓取到可核验网页来源。若模型也无法确认真实来源，必须返回 needsManualData=true。'
+        )
+        payload = self._request_search_payload(
+            api,
+            artifact_type=artifact_type,
+            target=target,
+            search_query=search_query,
+            chart_title_hint=chart_title_hint,
+            full_text=full_text,
+            evidence_note=evidence_note,
+        )
+        rows = self._coerce_ai_rows(payload.get('rows', []) if isinstance(payload, dict) else [])
+        quality_issue = self._data_quality_issue(rows, target=target, payload=payload)
+        if quality_issue and not bool((payload or {}).get('needsManualData')):
+            retry_payload = self._request_search_payload(
+                api,
+                artifact_type=artifact_type,
+                target=target,
+                search_query=search_query,
+                chart_title_hint=chart_title_hint,
+                full_text=full_text,
+                evidence_note=evidence_note,
+                quality_feedback=quality_issue,
+            )
+            retry_rows = self._coerce_ai_rows(retry_payload.get('rows', []) if isinstance(retry_payload, dict) else [])
+            retry_issue = self._data_quality_issue(retry_rows, target=target, payload=retry_payload)
+            if not retry_issue and (len(retry_rows) >= 2 or len(retry_rows) >= len(rows)):
+                payload = retry_payload
+                rows = retry_rows
+                quality_issue = ''
+        source_warning = bool(rows) and not self._rows_have_verifiable_sources(rows)
+        model_needs_manual = bool((payload or {}).get('needsManualData'))
+        needs_manual = bool(quality_issue) or len(rows) < 2 or (model_needs_manual and not rows)
+        evidence_sources = self._collect_evidence_sources(evidence)
+        if needs_manual:
+            source_note = str((payload or {}).get('manualHint') or (payload or {}).get('sourceNote') or '').strip()
+            if quality_issue:
+                source_note = f'{quality_issue} 请重新检索真实统计数据，或在下方手动录入已核验的数值、来源名称、发布机构、链接/页码。'
+            else:
+                source_note = source_note or 'AI 未能确认可直接作图的数据来源，请补充真实数据与来源后再生成图表。'
+            public_rows = [] if quality_issue else self._public_rows(rows)
+            return {
+                'artifactType': artifact_type,
+                'tableText': '' if quality_issue else (self._format_table(rows) if rows else ''),
+                'sourceNote': source_note,
+                'foundRows': len(rows),
+                'dataRows': public_rows,
                 'dataSources': evidence_sources,
-                'sourceItems': self._build_source_items(rows, evidence),
+                'sourceItems': self._build_source_items([] if quality_issue else rows, evidence),
                 'needsManualData': True,
                 'chartType': self._choose_chart_type((payload or {}).get('chartType') or target.get('chartType'), rows, target),
                 'title': self._normalize_chart_title((payload or {}).get('title') or chart_title_hint, rows, target),
                 'unit': str((payload or {}).get('unit') or '').strip(),
             }
+        source_note = str((payload or {}).get('sourceNote') or 'AI 已整理数据来源；请用户核验来源、口径和年份后再生成图表。')
+        if model_needs_manual:
+            source_note = source_note or str((payload or {}).get('manualHint') or '').strip()
+            if '审核' not in source_note and '核验' not in source_note:
+                source_note = f'{source_note}；请用户审核真实性后再生成图表。'
+        if source_warning:
+            warning = '部分行缺少完整链接、页码或发布机构，已保留到可编辑数据表，请用户按来源逐项核验后再生成图表。'
+            source_note = f'{source_note}；{warning}' if source_note else warning
         return {
+            'artifactType': artifact_type,
             'tableText': self._format_table(rows),
-            'sourceNote': str((payload or {}).get('sourceNote') or 'AI 已整理数据来源；请用户核验来源、口径和年份后再生成图表。'),
+            'sourceNote': source_note,
             'foundRows': len(rows),
             'dataRows': self._public_rows(rows),
             'dataSources': self._merge_sources(self._collect_row_sources(rows), evidence_sources),
             'sourceItems': self._build_source_items(rows, evidence),
             'needsManualData': False,
+            'sourceRisk': source_warning or model_needs_manual,
             'chartType': self._choose_chart_type((payload or {}).get('chartType') or target.get('chartType'), rows, target),
             'title': self._normalize_chart_title((payload or {}).get('title') or chart_title_hint, rows, target),
             'unit': str((payload or {}).get('unit') or '').strip(),
@@ -1018,17 +1330,40 @@ AI 建议标题：{(target or {}).get('chartTitle') or (target or {}).get('title
             ])
         return output.getvalue().strip()
 
+    @staticmethod
+    def _target_artifact_label(target, kind='figure'):
+        if not isinstance(target, dict):
+            return '表1' if kind == 'table' else '图1'
+        field_names = ('tableLabel', 'artifactLabel') if kind == 'table' else ('figureLabel', 'artifactLabel')
+        for field in field_names:
+            value = re.sub(r'\s+', '', str(target.get(field, '') or '').strip())
+            if value:
+                return value
+        return DataChartAssistant._default_artifact_label(target.get('sectionTitle', ''), kind)
+
+    @staticmethod
+    def _default_artifact_label(section_title='', kind='figure'):
+        prefix = '表' if kind == 'table' else '图'
+        match = re.match(r'^\s*(\d+)(?:\.\d+)*', str(section_title or '').strip())
+        if match:
+            return f'{prefix}{match.group(1)}.1'
+        return f'{prefix}1'
+
     def generate_chart(self, *, table_text='', chart_type='bar', title='', unit='', target=None):
         rows = self.parse_data_table(table_text)
         target = target or {}
         unit = str(unit or '').strip()
+        artifact_type = self._normalize_artifact_type(target.get('artifactType') or target.get('insertType'))
         title, chart_type = self._resolve_chart_metadata(rows, target, title, unit, chart_type)
+        if artifact_type == 'table':
+            return self._generate_table_result(rows, target=target, title=title, unit=unit, chart_type=chart_type)
         image = self._render_chart(rows, chart_type=chart_type, title=title, unit=unit)
         data_url = self._image_to_data_url(image)
         caption = self._build_caption(rows, chart_type, title, unit)
-        replacement = self._build_replacement_text(target, caption, rows=rows, title=title, unit=unit, chart_type=chart_type)
+        figure_label = self._target_artifact_label(target, 'figure')
+        replacement = self._build_replacement_text(target, caption, rows=rows, title=title, unit=unit, chart_type=chart_type, figure_label=figure_label)
         reference_entries = self._reference_entries_from_rows(rows)
-        figure_markdown = f'![{title}]({data_url})\n\n图1 {caption}'
+        figure_markdown = f'![{title}]({data_url})\n\n{figure_label} {caption}'
         return {
             'chart': {
                 'dataUrl': data_url,
@@ -1040,6 +1375,33 @@ AI 建议标题：{(target or {}).get('chartTitle') or (target or {}).get('title
             },
             'replacementText': replacement,
             'figureMarkdown': figure_markdown,
+            'artifactType': 'figure',
+            'artifactLabel': figure_label,
+            'sectionTitle': target.get('sectionTitle', '') if isinstance(target, dict) else '',
+            'originalText': target.get('originalText', '') if isinstance(target, dict) else '',
+            'summary': self._chart_summary(rows, unit),
+            'referenceEntries': reference_entries,
+        }
+
+    def _generate_table_result(self, rows, *, target=None, title='', unit='', chart_type='bar'):
+        target = target or {}
+        caption = self._build_table_caption(title)
+        table_label = self._target_artifact_label(target, 'table')
+        table_markdown = self._build_table_markdown(rows, caption, unit, table_label=table_label)
+        replacement = self._build_table_replacement_text(target, caption, table_markdown, rows=rows, unit=unit, table_label=table_label)
+        reference_entries = self._reference_entries_from_rows(rows)
+        return {
+            'artifactType': 'table',
+            'artifactLabel': table_label,
+            'table': {
+                'title': caption,
+                'caption': caption,
+                'unit': unit,
+                'rows': rows,
+            },
+            'chart': None,
+            'replacementText': replacement,
+            'tableMarkdown': table_markdown,
             'sectionTitle': target.get('sectionTitle', '') if isinstance(target, dict) else '',
             'originalText': target.get('originalText', '') if isinstance(target, dict) else '',
             'summary': self._chart_summary(rows, unit),
@@ -1078,7 +1440,8 @@ AI 建议标题：{(target or {}).get('chartTitle') or (target or {}).get('title
         result = []
         seen = set()
         for value in values or []:
-            text = re.sub(r'\s+', ' ', str(value or '').strip())
+            raw = str(value or '').strip()
+            text = raw if raw.startswith(('http://', 'https://')) else DataChartAssistant._shorten_source_name(raw, 42)
             if not text or text in seen:
                 continue
             seen.add(text)
@@ -1089,9 +1452,9 @@ AI 建议标题：{(target or {}).get('chartTitle') or (target or {}).get('title
 
     @classmethod
     def _combined_reference_entry(cls, entries):
-        publishers = cls._compact_source_list([entry.get('publisher', '') for entry in entries], limit=4)
-        source_names = cls._compact_source_list([entry.get('sourceName', '') for entry in entries], limit=8)
-        urls = cls._compact_source_list([entry.get('url', '') for entry in entries], limit=3)
+        publishers = cls._compact_source_list([entry.get('publisher', '') for entry in entries], limit=3)
+        source_names = cls._compact_source_list([entry.get('sourceName', '') for entry in entries], limit=3)
+        urls = cls._compact_source_list([entry.get('url', '') for entry in entries], limit=2)
         if len(publishers) == 1:
             author = publishers[0]
         elif publishers:
@@ -1100,8 +1463,8 @@ AI 建议标题：{(target or {}).get('chartTitle') or (target or {}).get('title
             author = '相关数据发布机构'
 
         if source_names:
-            title = '、'.join(source_names[:6])
-            if len(source_names) > 6:
+            title = '、'.join(source_names[:3])
+            if len(source_names) > 3:
                 title += '等'
         else:
             title = '图表数据来源汇总'
@@ -1124,20 +1487,26 @@ AI 建议标题：{(target or {}).get('chartTitle') or (target or {}).get('title
         }
 
     @staticmethod
+    def _clean_reference_part(value):
+        text = re.sub(r'\s+', ' ', str(value or '').strip())
+        text = text.strip('，,。.;； ')
+        return text
+
+    @staticmethod
     def _reference_entry_from_row(row):
-        source_name = str(row.get('sourceName', '') or '').strip()
-        publisher = str(row.get('publisher', '') or '').strip()
+        source_name = DataChartAssistant._clean_reference_part(row.get('sourceName', ''))
+        publisher = DataChartAssistant._clean_reference_part(row.get('publisher', ''))
         url = str(row.get('url', '') or '').strip()
-        note = str(row.get('note', '') or '').strip()
-        source = str(row.get('source', '') or '').strip()
+        note = DataChartAssistant._clean_reference_part(row.get('note', ''))
+        source = DataChartAssistant._clean_reference_part(row.get('source', ''))
         title = source_name or source or url or '数据来源'
         author = publisher or '数据发布机构'
         if url:
-            suffix = f'[EB/OL]. {url}.'
+            suffix = f'[R/OL]. {url}.'
         else:
             suffix = '[R].'
         entry = f'{author}. {title}{suffix}'
-        if note and note not in entry:
+        if note and note not in entry and not url.startswith(note):
             entry = f'{entry} {note}'
         return re.sub(r'\s+', ' ', entry).strip()
 
@@ -1252,12 +1621,22 @@ AI 建议标题：{(target or {}).get('chartTitle') or (target or {}).get('title
         return checked >= min(1, len(rows or []))
 
     @classmethod
-    def _build_data_analysis_paragraph(cls, rows, source_text='', unit='', title=''):
+    def _build_data_analysis_paragraph(cls, rows, source_text='', unit='', title='', figure_label='图1'):
         analysis = cls._chart_analysis(rows, unit)
-        title_part = f'图1所示的“{title}”' if title else '图1所示数据'
+        label = figure_label or '图1'
+        title_part = f'{label}所示的“{title}”' if title else f'{label}所示数据'
         if analysis:
             return f'如{title_part}，{analysis}'
         return f'如{title_part}，相关指标呈现出可比较的差异特征，需要结合研究问题进一步解释其变化方向。'
+
+    @classmethod
+    def _build_table_analysis_paragraph(cls, rows, unit='', title='', table_label='表1'):
+        analysis = cls._chart_analysis(rows, unit)
+        label = table_label or '表1'
+        title_part = f'{label}所列的“{title}”' if title else f'{label}所列数据'
+        if analysis:
+            return f'根据{title_part}，{analysis}'
+        return f'根据{title_part}，相关指标在不同项目之间存在可比较差异，需要结合研究问题进一步解释其变化方向。'
 
     @staticmethod
     def _strip_source_prose(text):
@@ -1286,9 +1665,9 @@ AI 建议标题：{(target or {}).get('chartTitle') or (target or {}).get('title
         return ''.join(kept).strip()
 
     @classmethod
-    def _ensure_rewritten_has_data_analysis(cls, rewritten, rows, source_text='', unit='', title=''):
+    def _ensure_rewritten_has_data_analysis(cls, rewritten, rows, source_text='', unit='', title='', figure_label='图1'):
         text = cls._normalize_text(cls._strip_source_prose(rewritten))
-        analysis_paragraph = cls._build_data_analysis_paragraph(rows, source_text, unit, title)
+        analysis_paragraph = cls._build_data_analysis_paragraph(rows, source_text, unit, title, figure_label)
         if not text:
             return analysis_paragraph
         if cls._analysis_mentions_data(text, rows):
@@ -1299,6 +1678,7 @@ AI 建议标题：{(target or {}).get('chartTitle') or (target or {}).get('title
     def _clean_caption_title(title):
         text = re.sub(r'\s+', ' ', str(title or '论文数据图表').strip())
         text = re.sub(r'^\s*(?:图\s*\d+|Figure\s*\d+)\s*', '', text, flags=re.IGNORECASE)
+        text = re.sub(r'^\s*表\s*\d+(?:\.\d+)?\s*', '', text, flags=re.IGNORECASE)
         text = re.sub(r'\s*\[[\d,\-\s]+\]\s*$', '', text)
         chart_type_match = re.match(
             r'^(.+?[（(](?:柱状图|条形图|折线图|结构图|饼图|图表|line chart|bar chart|pie chart|chart)[）)])',
@@ -1306,18 +1686,62 @@ AI 建议标题：{(target or {}).get('chartTitle') or (target or {}).get('title
             flags=re.IGNORECASE,
         )
         if chart_type_match:
-            return chart_type_match.group(1).strip()
+            text = chart_type_match.group(1).strip()
+        text = re.sub(
+            r'[（(](?:柱状图|条形图|折线图|结构图|饼图|图表|line chart|bar chart|pie chart|chart)[）)]\s*$',
+            '',
+            text,
+            flags=re.IGNORECASE,
+        ).strip()
         first_sentence = re.split(r'[。.!?！？]\s*', text, maxsplit=1)[0].strip()
         return first_sentence or '论文数据图表'
 
     def _build_caption(self, rows, chart_type, title, unit):
-        chart_name = {'bar': '柱状图', 'line': '折线图', 'pie': '结构图'}.get(chart_type, '图表')
         clean_title = self._clean_caption_title(title)
-        if re.search(r'[（(](?:柱状图|条形图|折线图|结构图|饼图|图表|line chart|bar chart|pie chart|chart)[）)]\s*$', clean_title, flags=re.IGNORECASE):
-            return clean_title
-        return f'{clean_title}（{chart_name}）'
+        return clean_title
 
-    def _build_replacement_text(self, target, caption, *, rows=None, title='', unit='', chart_type='bar'):
+    def _build_table_caption(self, title):
+        text = self._clean_caption_title(title)
+        text = re.sub(r'图表|数据图|统计图|图$', '表', text)
+        return text or '论文数据表'
+
+    @staticmethod
+    def _markdown_table_escape(value):
+        return str(value if value is not None else '').replace('|', '\\|').strip()
+
+    @classmethod
+    def _source_note_text(cls, rows):
+        sources = []
+        seen = set()
+        total_unique = 0
+        for row in rows or []:
+            text = cls._short_source_label(row)
+            if not text or text in seen:
+                continue
+            seen.add(text)
+            total_unique += 1
+            if len(sources) < 2:
+                sources.append(text)
+        suffix = '等' if total_unique > len(sources) else ''
+        return '；'.join(sources) + suffix if sources else '用户审核后的数据表'
+
+    @classmethod
+    def _build_table_markdown(cls, rows, title, unit='', table_label='表1'):
+        lines = [f'{table_label or "表1"} {title}']
+        if unit:
+            lines.append(f'（单位：{unit}）')
+        lines.extend([
+            '| 指标 | 数值 |',
+            '| --- | ---: |',
+        ])
+        for row in rows or []:
+            label = cls._markdown_table_escape(row.get('label', ''))
+            value = cls._markdown_table_escape(row.get('rawValue', row.get('value', '')))
+            lines.append(f'| {label} | {value} |')
+        lines.append(f'资料来源：{cls._source_note_text(rows)}')
+        return '\n'.join(lines).strip()
+
+    def _build_replacement_text(self, target, caption, *, rows=None, title='', unit='', chart_type='bar', figure_label='图1'):
         original = DataChartAssistant._normalize_text(target.get('originalText', '') if isinstance(target, dict) else '')
         rows = rows or []
         source_text = self._source_summary(rows)
@@ -1340,7 +1764,7 @@ AI 建议标题：{(target or {}).get('chartTitle') or (target or {}).get('title
                 }
                 for row in rows
             ]
-            prompt = f'''请改写下面论文段落，使其自然引入图1，并分析图表数据。
+            prompt = f'''请改写下面论文段落，使其自然引入{figure_label}，并分析图表数据。
 
 要求：
 1. 保留原段落核心观点，但语言更连贯。
@@ -1349,6 +1773,7 @@ AI 建议标题：{(target or {}).get('chartTitle') or (target or {}).get('title
 4. 必须解释最高值、最低值、趋势、差距变化或结构占比中至少两类信息；多序列数据要说明各序列的首末变化。
 5. 如果删除原段落中的模糊分析，必须用真实数据重写该分析，不能只留下“请先准备原文与处理结果”等占位句。
 6. 可以写成 1-2 个自然段，不要输出标题，不要输出 Markdown 图片。
+7. 正文提到图时使用“{figure_label}”，不要自行改成其他编号。
 
 原段落：
 {original}
@@ -1378,22 +1803,96 @@ AI 建议标题：{(target or {}).get('chartTitle') or (target or {}).get('title
                 )
                 rewritten = self._normalize_text(rewritten)
                 if rewritten:
-                    return self._ensure_rewritten_has_data_analysis(rewritten, rows, source_text, unit, title)
+                    return self._ensure_rewritten_has_data_analysis(rewritten, rows, source_text, unit, title, figure_label)
             except Exception:
                 pass
-        intro = self._build_data_analysis_paragraph(rows, source_text, unit, title)
+        intro = self._build_data_analysis_paragraph(rows, source_text, unit, title, figure_label)
         if not original:
             return intro
-        if '图1' in original or '如图' in original:
+        if figure_label in original or '如图' in original:
             return f'{original}\n\n{intro}'
         return f'{original}\n\n为增强上述论证的数据支撑，本文补充可视化结果。{intro}'
+
+    def _build_table_replacement_text(self, target, caption, table_markdown, *, rows=None, unit='', table_label='表1'):
+        original = DataChartAssistant._normalize_text(target.get('originalText', '') if isinstance(target, dict) else '')
+        rows = rows or []
+        analysis_text = self._chart_analysis(rows, unit)
+        data_points_text = self._data_points_text(rows)
+        if self.api and hasattr(self.api, 'call_sync') and original:
+            system = (
+                f'你是严谨的论文写作助手。请根据已确认的数据表改写原段落，必须自然引入{table_label}并补入数据分析。'
+                '数据来源由系统写入表下注释和参考文献，正文不要写来源名称、URL或“数据来源为”。'
+            )
+            rows_payload = [
+                {
+                    'label': row.get('label'),
+                    'value': row.get('value'),
+                    'rawValue': row.get('rawValue', row.get('value')),
+                    'sourceName': row.get('sourceName', ''),
+                    'publisher': row.get('publisher', ''),
+                }
+                for row in rows
+            ]
+            prompt = f'''请改写下面论文段落，使其自然引入{table_label}，并分析表中数据。
+
+要求：
+1. 保留原段落核心观点，但将空泛判断改为基于真实数据的分析。
+2. 正文使用“如{table_label}所示”“见{table_label}”等论文表述，不要输出 Markdown 表格。
+3. 正文不要写来源名称、报告名、发布机构、URL或“数据来源为/来源来自”；来源会出现在表下“资料来源”和参考文献中。
+4. 必须直接引用关键数值，并解释最高值、最低值、趋势、差距变化或结构占比中至少两类信息。
+5. 可以写成 1-2 个自然段，不要输出标题。
+6. 正文提到表时使用“{table_label}”，不要自行改成其他编号。
+
+原段落：
+{original}
+
+表题：{caption}
+单位：{unit or '未注明'}
+真实数据点：
+{data_points_text or '无'}
+真实数据分析：
+{analysis_text or '请根据数据行 JSON 自行归纳。'}
+数据行 JSON：
+{json.dumps(rows_payload, ensure_ascii=False)}
+
+请直接输出改写后的段落。'''
+            try:
+                rewritten = self.api.call_sync(
+                    prompt,
+                    system=system,
+                    temperature=0.35,
+                    max_tokens=1800,
+                    request_timeout=120,
+                    usage_context=self._usage_context('data_chart.table_rewrite'),
+                )
+                rewritten = self._normalize_text(rewritten)
+                if rewritten:
+                    return self._ensure_rewritten_has_table_analysis(rewritten, rows, unit, caption, table_label)
+            except Exception:
+                pass
+        intro = self._build_table_analysis_paragraph(rows, unit, caption, table_label)
+        if not original:
+            return intro
+        if table_label in original or '如表' in original or '见表' in original:
+            return f'{original}\n\n{intro}'
+        return f'{original}\n\n为增强上述论证的数据支撑，本文补充{table_label}。{intro}'
+
+    @classmethod
+    def _ensure_rewritten_has_table_analysis(cls, rewritten, rows, unit='', title='', table_label='表1'):
+        text = cls._normalize_text(cls._strip_source_prose(rewritten))
+        analysis_paragraph = cls._build_table_analysis_paragraph(rows, unit, title, table_label)
+        if not text:
+            return analysis_paragraph
+        if cls._analysis_mentions_data(text, rows):
+            return text
+        return f'{text}\n\n{analysis_paragraph}'.strip()
 
     @staticmethod
     def _source_summary(rows, limit=4):
         sources = []
         seen = set()
         for row in rows or []:
-            source = str(row.get('source', '') or '').strip()
+            source = DataChartAssistant._short_source_label(row)
             if not source or source in seen:
                 continue
             sources.append(source)
