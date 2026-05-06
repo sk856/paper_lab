@@ -1,11 +1,11 @@
-; 纸研社 Inno Setup 安装脚本
+; 论文工坊 Inno Setup 安装脚本
 ; 需要 Inno Setup 6.0+
 
-#define MyAppName "纸研社"
+#define MyAppName "论文工坊"
 #ifndef MyAppVersion
 #define MyAppVersion "1.2.3"
 #endif
-#define MyAppPublisher "PaperLab"
+#define MyAppPublisher "ThesisWorkshop"
 #define MyAppURL "https://github.com/Abnerla/AI_paper"
 #define MyAppExeName "AI_Paper.exe"
 

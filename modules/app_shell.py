@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-纸研社桌面应用主壳（窗口、导航与各页面挂载）。
+论文工坊桌面应用主壳（窗口、导航与各页面挂载）。
 """
 
 import os
@@ -308,7 +308,7 @@ class WindowControlButton(tk.Canvas):
 
 
 class SmartPaperTool:
-    """纸研社主程序"""
+    """论文工坊主程序"""
 
     def __init__(self):
         enable_high_dpi()
@@ -434,7 +434,7 @@ class SmartPaperTool:
         self.runtime_paths = runtime_paths or refresh_runtime_paths()
         self.logs_dir = self.runtime_paths.logs_dir
         self.temp_dir = self.runtime_paths.temp_dir
-        self.log_path = os.path.join(self.logs_dir, 'paperlab.log')
+        self.log_path = os.path.join(self.logs_dir, 'thesisworkshop.log')
 
     def _configure_scaling(self):
         """根据实际 DPI 让 Tk 使用正确的字体和控件缩放。"""
@@ -1932,10 +1932,10 @@ class SmartPaperTool:
         if tray_image is None:
             return None
 
-        open_item = pystray.MenuItem('打开纸研社', lambda _icon, _item: self._restore_from_tray())
+        open_item = pystray.MenuItem('打开论文工坊', lambda _icon, _item: self._restore_from_tray())
         quit_item = pystray.MenuItem('退出', lambda _icon, _item: self._quit_from_tray())
-        self._tray_icon = pystray.Icon('paperlab', tray_image, APP_NAME, menu=pystray.Menu(open_item, quit_item))
-        self._tray_thread = threading.Thread(target=self._tray_icon.run, name='PaperLabTray', daemon=True)
+        self._tray_icon = pystray.Icon('thesisworkshop', tray_image, APP_NAME, menu=pystray.Menu(open_item, quit_item))
+        self._tray_thread = threading.Thread(target=self._tray_icon.run, name='ThesisWorkshopTray', daemon=True)
         self._tray_thread.start()
         return self._tray_icon
 
@@ -3201,7 +3201,7 @@ class SmartPaperTool:
 
     def _create_dialog_shell(self, title, geometry='1600x1200'):
         window = tk.Toplevel(self.root)
-        window.title(f'纸研社 - {title}')
+        window.title(f'论文工坊 - {title}')
         window.configure(bg=COLORS['bg_main'])
         window.transient(self.root)
         window.resizable(False, False)
@@ -3287,7 +3287,7 @@ class SmartPaperTool:
             parsed = urllib.parse.urlsplit(str(source or '').strip())
             if parsed.scheme in {'http', 'https'}:
                 request = urllib.request.Request(source, method='GET')
-                request.add_header('User-Agent', 'PaperLab/1.0')
+                request.add_header('User-Agent', 'ThesisWorkshop/1.0')
                 request.add_header('Cache-Control', 'no-cache')
                 with urllib.request.urlopen(request, timeout=10) as response:
                     raw_bytes = response.read()
@@ -3419,7 +3419,7 @@ class SmartPaperTool:
     def _show_announcement(self):
         window, content, footer = self._create_info_dialog_shell('系统公告', '860x680', min_width=720, min_height=560)
 
-        tk.Label(content, text='纸研社', font=FONTS['title'], fg=COLORS['text_main'], bg=COLORS['card_bg']).pack(anchor='w', fill=tk.X, pady=(0, 8))
+        tk.Label(content, text='论文工坊', font=FONTS['title'], fg=COLORS['text_main'], bg=COLORS['card_bg']).pack(anchor='w', fill=tk.X, pady=(0, 8))
 
         loading_label = tk.Label(content, text='正在加载公告内容...', font=FONTS['body'], fg=COLORS['text_sub'], bg=COLORS['card_bg'], anchor='w')
         loading_label.pack(anchor='w', fill=tk.X)
@@ -3567,10 +3567,10 @@ class SmartPaperTool:
     def _show_tutorial(self):
         window, content, footer = self._create_info_dialog_shell('使用教程', '920x720', min_width=760, min_height=600)
 
-        tk.Label(content, text='纸研社使用教程', font=FONTS['title'], fg=COLORS['text_main'], bg=COLORS['card_bg']).pack(anchor='w', fill=tk.X, pady=(0, 10))
+        tk.Label(content, text='论文工坊使用教程', font=FONTS['title'], fg=COLORS['text_main'], bg=COLORS['card_bg']).pack(anchor='w', fill=tk.X, pady=(0, 10))
 
         tutorial_text = (
-            '纸研社按论文处理流程组织功能，建议按下面顺序使用：\n\n'
+            '论文工坊按论文处理流程组织功能，建议按下面顺序使用：\n\n'
             '1. 先进入“模型配置”，填写 API Key、接口地址和模型名称，保存后完成连接测试。\n'
             '2. 再进入“论文写作”，导入文稿或新建草稿，整理大纲并按章节生成、补写正文。\n'
             '3. 论文写作页中的内容可以继续送入“学术润色”“降AI检测”“降查重率”“智能纠错”，按实际需要逐步优化表达、降低风险并检查问题。\n'
@@ -3597,9 +3597,9 @@ class SmartPaperTool:
         ).pack(anchor='e')
 
     def _show_about_dialog(self):
-        window, content, footer = self._create_info_dialog_shell('关于纸研社', '760x620', min_width=620, min_height=500)
+        window, content, footer = self._create_info_dialog_shell('关于论文工坊', '760x620', min_width=620, min_height=500)
 
-        tk.Label(content, text='纸研社', font=FONTS['title'], fg=COLORS['text_main'], bg=COLORS['card_bg']).pack(anchor='w', fill=tk.X, pady=(0, 8))
+        tk.Label(content, text='论文工坊', font=FONTS['title'], fg=COLORS['text_main'], bg=COLORS['card_bg']).pack(anchor='w', fill=tk.X, pady=(0, 8))
 
         loading_label = tk.Label(content, text='正在加载...', font=FONTS['body'], fg=COLORS['text_sub'], bg=COLORS['card_bg'], anchor='w')
         loading_label.pack(anchor='w', fill=tk.X)
@@ -4293,7 +4293,7 @@ class SmartPaperTool:
         zip_bytes = self._collect_runtime_backup_zip_bytes()
         data_timestamp = self._get_local_data_timestamp()
         return {
-            'format': 'paperlab-backup-v1',
+            'format': 'thesisworkshop-backup-v1',
             'app_name': APP_NAME,
             'app_version': APP_VERSION,
             'exported_at': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
@@ -4304,7 +4304,8 @@ class SmartPaperTool:
         }
 
     def _restore_runtime_from_payload(self, payload):
-        if not isinstance(payload, dict) or payload.get('format') != 'paperlab-backup-v1':
+        valid_formats = {'thesisworkshop-backup-v1', 'paperlab-backup-v1'}
+        if not isinstance(payload, dict) or payload.get('format') not in valid_formats:
             raise ValueError('备份文件格式无效，无法识别。')
         encoded = str(payload.get('payload_base64', '') or '').strip()
         if not encoded:
@@ -4351,7 +4352,7 @@ class SmartPaperTool:
             raise ValueError('WebDAV 地址必须以 http:// 或 https:// 开头。')
         if raw.endswith('.json'):
             return raw
-        return raw.rstrip('/') + '/paperlab_backup.json'
+        return raw.rstrip('/') + '/thesisworkshop_backup.json'
 
     def _webdav_request(self, method, target_url, username='', password='', payload=None, timeout=20):
         request = urllib.request.Request(target_url, data=payload, method=method)
@@ -4566,7 +4567,7 @@ class SmartPaperTool:
 
         tk.Label(
             header,
-            text='纸研社设置中心',
+            text='论文工坊设置中心',
             font=FONTS['title'],
             fg=COLORS['text_main'],
             bg=COLORS['card_bg'],
@@ -4921,7 +4922,7 @@ class SmartPaperTool:
             width=16,
         )
 
-        add_toggle(general_page, '开机启动', '登录 Windows 后自动启动纸研社。保存设置后会同步当前用户的系统启动项。', launch_on_startup_var)
+        add_toggle(general_page, '开机启动', '登录 Windows 后自动启动论文工坊。保存设置后会同步当前用户的系统启动项。', launch_on_startup_var)
         add_toggle(general_page, '静默启动', '用于开机启动场景，启动后以较安静的最小化方式进入后台。', silent_startup_var)
         add_toggle(
             general_page,
@@ -5265,7 +5266,7 @@ class SmartPaperTool:
         add_actions(
             advanced_page,
             '清理临时文件',
-            '清理纸研社运行期间生成的临时目录内容，不影响模型配置、历史记录与导出文件。',
+            '清理论文工坊运行期间生成的临时目录内容，不影响模型配置、历史记录与导出文件。',
             [
                 {'text': '立即清理', 'style': 'danger', 'command': clear_temp},
                 {'text': '打开'
@@ -5314,7 +5315,7 @@ class SmartPaperTool:
                 parent=window,
                 title='导出备份数据',
                 defaultextension='.json',
-                initialfile=f'paperlab_backup_{now}.json',
+                initialfile=f'thesisworkshop_backup_{now}.json',
                 filetypes=[('JSON 文件', '*.json')],
             )
             if not save_path:
@@ -5549,7 +5550,7 @@ class SmartPaperTool:
             [
                 {'text': '系统公告', 'style': 'secondary', 'command': self._show_announcement},
                 {'text': '使用教程', 'style': 'secondary', 'command': self._show_tutorial},
-                {'text': '关于纸研社', 'style': 'secondary', 'command': self._show_about_dialog},
+                {'text': '关于论文工坊', 'style': 'secondary', 'command': self._show_about_dialog},
             ],
         )
 

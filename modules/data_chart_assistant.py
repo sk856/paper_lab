@@ -1048,6 +1048,15 @@ AI 建议标题：{(target or {}).get('chartTitle') or (target or {}).get('title
 
     @classmethod
     def _reference_entries_from_rows(cls, rows):
+        records = cls._reference_source_records(rows)
+        if not records:
+            return []
+        if len(records) == 1:
+            return [records[0]]
+        return [cls._combined_reference_entry(records)]
+
+    @classmethod
+    def _reference_source_records(cls, rows):
         entries = []
         seen = set()
         for row in rows or []:
@@ -1063,6 +1072,56 @@ AI 建议标题：{(target or {}).get('chartTitle') or (target or {}).get('title
                 'url': str(row.get('url', '') or '').strip(),
             })
         return entries
+
+    @staticmethod
+    def _compact_source_list(values, limit=6):
+        result = []
+        seen = set()
+        for value in values or []:
+            text = re.sub(r'\s+', ' ', str(value or '').strip())
+            if not text or text in seen:
+                continue
+            seen.add(text)
+            result.append(text)
+            if len(result) >= limit:
+                break
+        return result
+
+    @classmethod
+    def _combined_reference_entry(cls, entries):
+        publishers = cls._compact_source_list([entry.get('publisher', '') for entry in entries], limit=4)
+        source_names = cls._compact_source_list([entry.get('sourceName', '') for entry in entries], limit=8)
+        urls = cls._compact_source_list([entry.get('url', '') for entry in entries], limit=3)
+        if len(publishers) == 1:
+            author = publishers[0]
+        elif publishers:
+            author = '；'.join(publishers[:3]) + ('等' if len(publishers) > 3 else '')
+        else:
+            author = '相关数据发布机构'
+
+        if source_names:
+            title = '、'.join(source_names[:6])
+            if len(source_names) > 6:
+                title += '等'
+        else:
+            title = '图表数据来源汇总'
+
+        if urls:
+            suffix = f'[R/OL]. {urls[0]}.'
+            if len(urls) > 1:
+                suffix += f' 另见：{"；".join(urls[1:])}.'
+        else:
+            suffix = '[R].'
+
+        text = re.sub(r'\s+', ' ', f'{author}. {title}{suffix}').strip()
+        return {
+            'text': text,
+            'sourceName': title,
+            'publisher': author,
+            'url': urls[0] if urls else '',
+            'source': text,
+            'note': '同一图表的数据来源已按发布机构和报告名称合并引用，逐行原始来源保留在可编辑数据表中。',
+        }
 
     @staticmethod
     def _reference_entry_from_row(row):
@@ -1084,71 +1143,212 @@ AI 建议标题：{(target or {}).get('chartTitle') or (target or {}).get('title
 
     @classmethod
     def _chart_summary(cls, rows, unit=''):
+        analysis = cls._chart_analysis(rows, unit)
+        if analysis:
+            return analysis
+        return ''
+
+    @classmethod
+    def _chart_analysis(cls, rows, unit=''):
         structure = cls._series_structure(rows)
         if structure:
-            parts = []
-            years = structure.get('years', [])
-            for series in (structure.get('series') or [])[:5]:
-                values_by_year = structure.get('values', {}).get(series, {})
-                points = [(year, values_by_year[year]) for year in years if year in values_by_year]
-                if not points:
-                    continue
-                first_year, first_value = points[0]
-                last_year, last_value = points[-1]
-                if len(points) == 1:
-                    parts.append(f'{series}在{first_year}为{float(first_value):g}{unit}')
-                    continue
-                delta = float(last_value) - float(first_value)
-                if '差距' in series:
-                    trend = '扩大' if delta > 0 else '缩小' if delta < 0 else '基本持平'
-                else:
-                    trend = '升至' if delta > 0 else '降至' if delta < 0 else '保持在'
-                if trend in {'升至', '降至'}:
-                    parts.append(f'{series}由{first_year}的{float(first_value):g}{unit}{trend}{last_year}的{float(last_value):g}{unit}')
-                elif trend == '保持在':
-                    parts.append(f'{series}在{first_year}至{last_year}基本保持在{float(last_value):g}{unit}')
-                else:
-                    parts.append(f'{series}由{first_year}的{float(first_value):g}{unit}{trend}至{last_year}的{float(last_value):g}{unit}')
+            parts = cls._structured_series_analysis(structure, unit)
             if parts:
                 return '；'.join(parts) + '。'
-        values = [float(row['value']) for row in rows]
-        labels = [row['label'] for row in rows]
+        values = [float(row['value']) for row in rows or [] if row.get('value') is not None]
+        if not values:
+            return ''
+        labels = [str(row.get('label', '') or f'项目{index + 1}') for index, row in enumerate(rows or [])]
         max_index = max(range(len(values)), key=lambda idx: values[idx])
         min_index = min(range(len(values)), key=lambda idx: values[idx])
         delta = values[-1] - values[0]
         suffix = unit or ''
         trend = '上升' if delta > 0 else '下降' if delta < 0 else '基本持平'
         return (
-            f'最高值：{labels[max_index]} {values[max_index]:g}{suffix}；'
-            f'最低值：{labels[min_index]} {values[min_index]:g}{suffix}；'
-            f'首末变化：{trend} {abs(delta):g}{suffix}。'
+            f'最高值为{labels[max_index]}的{values[max_index]:g}{suffix}，'
+            f'最低值为{labels[min_index]}的{values[min_index]:g}{suffix}，'
+            f'首末项相比{trend}{abs(delta):g}{suffix}。'
         )
 
+    @classmethod
+    def _structured_series_analysis(cls, structure, unit=''):
+        parts = []
+        years = structure.get('years', [])
+        for series in (structure.get('series') or [])[:5]:
+            values_by_year = structure.get('values', {}).get(series, {})
+            points = [(year, values_by_year[year]) for year in years if year in values_by_year]
+            if not points:
+                continue
+            first_year, first_value = points[0]
+            last_year, last_value = points[-1]
+            if len(points) == 1:
+                parts.append(f'{series}在{first_year}为{float(first_value):g}{unit}')
+                continue
+            delta = float(last_value) - float(first_value)
+            if '差距' in series:
+                trend = '扩大' if delta > 0 else '缩小' if delta < 0 else '基本持平'
+            else:
+                trend = '升至' if delta > 0 else '降至' if delta < 0 else '保持在'
+            if trend in {'升至', '降至'}:
+                parts.append(f'{series}由{first_year}的{float(first_value):g}{unit}{trend}{last_year}的{float(last_value):g}{unit}')
+            elif trend == '保持在':
+                parts.append(f'{series}在{first_year}至{last_year}基本保持在{float(last_value):g}{unit}')
+            else:
+                parts.append(f'{series}由{first_year}的{float(first_value):g}{unit}{trend}至{last_year}的{float(last_value):g}{unit}')
+        gap_text = cls._structured_gap_analysis(structure, unit)
+        if gap_text:
+            parts.append(gap_text)
+        return parts
+
+    @classmethod
+    def _structured_gap_analysis(cls, structure, unit=''):
+        series_names = structure.get('series') or []
+        years = structure.get('years') or []
+        values = structure.get('values') or {}
+        explicit_gap = next((name for name in series_names if '差距' in name), '')
+        if explicit_gap:
+            return ''
+        urban = next((name for name in series_names if any(term in name for term in ('城镇', '城市'))), '')
+        rural = next((name for name in series_names if '农村' in name), '')
+        if not urban or not rural:
+            return ''
+        gap_points = []
+        for year in years:
+            if year in values.get(urban, {}) and year in values.get(rural, {}):
+                gap_points.append((year, float(values[urban][year]) - float(values[rural][year])))
+        if len(gap_points) < 2:
+            return ''
+        first_year, first_gap = gap_points[0]
+        last_year, last_gap = gap_points[-1]
+        delta = last_gap - first_gap
+        trend = '扩大' if delta > 0 else '缩小' if delta < 0 else '基本持平'
+        return f'{urban}与{rural}差距由{first_year}的{first_gap:g}{unit}{trend}至{last_year}的{last_gap:g}{unit}'
+
+    @classmethod
+    def _data_points_text(cls, rows, limit=18):
+        points = []
+        for row in rows or []:
+            label = str(row.get('label', '') or '').strip()
+            value = row.get('rawValue', row.get('value', ''))
+            if label and value != '':
+                points.append(f'{label}={value}')
+            if len(points) >= limit:
+                break
+        return '；'.join(points)
+
+    @classmethod
+    def _analysis_mentions_data(cls, text, rows):
+        value_text = str(text or '')
+        checked = 0
+        for row in rows or []:
+            raw_value = str(row.get('rawValue', row.get('value', '')) or '').strip()
+            if not raw_value:
+                continue
+            normalized = raw_value.rstrip('0').rstrip('.') if '.' in raw_value else raw_value
+            if raw_value in value_text or (normalized and normalized in value_text):
+                checked += 1
+            if checked >= 2:
+                return True
+        return checked >= min(1, len(rows or []))
+
+    @classmethod
+    def _build_data_analysis_paragraph(cls, rows, source_text='', unit='', title=''):
+        analysis = cls._chart_analysis(rows, unit)
+        title_part = f'图1所示的“{title}”' if title else '图1所示数据'
+        if analysis:
+            return f'如{title_part}，{analysis}'
+        return f'如{title_part}，相关指标呈现出可比较的差异特征，需要结合研究问题进一步解释其变化方向。'
+
+    @staticmethod
+    def _strip_source_prose(text):
+        sentences = re.split(r'([。！？!?]\s*)', str(text or ''))
+        if len(sentences) <= 1:
+            return re.sub(
+                r'(?:数据来源|来源(?:为|于|来自)|资料来源|source\s*:?).*?$',
+                '',
+                str(text or ''),
+                flags=re.IGNORECASE | re.MULTILINE,
+            ).strip()
+        kept = []
+        for index in range(0, len(sentences), 2):
+            sentence = sentences[index]
+            punctuation = sentences[index + 1] if index + 1 < len(sentences) else ''
+            compact = re.sub(r'\s+', '', sentence)
+            lowered = sentence.lower()
+            source_only = (
+                re.search(r'(数据来源|资料来源|来源(?:为|于|来自)|上述数据来源|source\s*:?)', sentence, flags=re.IGNORECASE)
+                or 'http://' in lowered
+                or 'https://' in lowered
+            )
+            if source_only:
+                continue
+            kept.append(sentence + punctuation)
+        return ''.join(kept).strip()
+
+    @classmethod
+    def _ensure_rewritten_has_data_analysis(cls, rewritten, rows, source_text='', unit='', title=''):
+        text = cls._normalize_text(cls._strip_source_prose(rewritten))
+        analysis_paragraph = cls._build_data_analysis_paragraph(rows, source_text, unit, title)
+        if not text:
+            return analysis_paragraph
+        if cls._analysis_mentions_data(text, rows):
+            return text
+        return f'{text}\n\n{analysis_paragraph}'.strip()
+
+    @staticmethod
+    def _clean_caption_title(title):
+        text = re.sub(r'\s+', ' ', str(title or '论文数据图表').strip())
+        text = re.sub(r'^\s*(?:图\s*\d+|Figure\s*\d+)\s*', '', text, flags=re.IGNORECASE)
+        text = re.sub(r'\s*\[[\d,\-\s]+\]\s*$', '', text)
+        chart_type_match = re.match(
+            r'^(.+?[（(](?:柱状图|条形图|折线图|结构图|饼图|图表|line chart|bar chart|pie chart|chart)[）)])',
+            text,
+            flags=re.IGNORECASE,
+        )
+        if chart_type_match:
+            return chart_type_match.group(1).strip()
+        first_sentence = re.split(r'[。.!?！？]\s*', text, maxsplit=1)[0].strip()
+        return first_sentence or '论文数据图表'
+
     def _build_caption(self, rows, chart_type, title, unit):
-        summary = self._chart_summary(rows, unit)
         chart_name = {'bar': '柱状图', 'line': '折线图', 'pie': '结构图'}.get(chart_type, '图表')
-        return f'{title}（{chart_name}）。{summary}'
+        clean_title = self._clean_caption_title(title)
+        if re.search(r'[（(](?:柱状图|条形图|折线图|结构图|饼图|图表|line chart|bar chart|pie chart|chart)[）)]\s*$', clean_title, flags=re.IGNORECASE):
+            return clean_title
+        return f'{clean_title}（{chart_name}）'
 
     def _build_replacement_text(self, target, caption, *, rows=None, title='', unit='', chart_type='bar'):
         original = DataChartAssistant._normalize_text(target.get('originalText', '') if isinstance(target, dict) else '')
         rows = rows or []
         source_text = self._source_summary(rows)
+        analysis_text = self._chart_analysis(rows, unit)
+        data_points_text = self._data_points_text(rows)
         if self.api and hasattr(self.api, 'call_sync') and original:
             system = (
-                '你是论文写作助手。请根据已确认的数据和图表说明改写原段落，加入数据分析，并在段落中说明数据来源。'
-                '必须保持原段落论点，不要扩写成多个无关段落。'
+                '你是严谨的论文写作助手。请根据已确认的真实数据改写原段落，必须补入数据分析。'
+                '如果原段落有空泛、模糊或占位式表述，可以删改，但删改后必须用真实数据解释替代。'
+                '数据来源由系统写入参考文献并自动添加引用编号，正文不要写来源名称、URL或“数据来源为”。'
             )
             rows_payload = [
-                {'label': row.get('label'), 'value': row.get('value'), 'source': row.get('source', '')}
+                {
+                    'label': row.get('label'),
+                    'value': row.get('value'),
+                    'rawValue': row.get('rawValue', row.get('value')),
+                    'sourceName': row.get('sourceName', ''),
+                    'publisher': row.get('publisher', ''),
+                    'source': row.get('source', ''),
+                }
                 for row in rows
             ]
             prompt = f'''请改写下面论文段落，使其自然引入图1，并分析图表数据。
 
 要求：
 1. 保留原段落核心观点，但语言更连贯。
-2. 必须在段落中说明数据来源，来源来自“来源信息”，不要虚构。
-3. 必须包含对最高值、最低值、趋势/差异/结构的解释。
-4. 可以写成 1-2 个自然段，不要输出标题，不要输出 Markdown 图片。
+2. 正文只写论文式分析，不要写数据来源、来源名称、报告名、发布机构、URL或“数据来源为/来源来自”等说明；来源将由系统写入参考文献并用引用编号标注。
+3. 必须直接引用“真实数据分析”中的关键数值，不得只写“持续改善、差异明显、数字基础条件改善”等泛泛判断。
+4. 必须解释最高值、最低值、趋势、差距变化或结构占比中至少两类信息；多序列数据要说明各序列的首末变化。
+5. 如果删除原段落中的模糊分析，必须用真实数据重写该分析，不能只留下“请先准备原文与处理结果”等占位句。
+6. 可以写成 1-2 个自然段，不要输出标题，不要输出 Markdown 图片。
 
 原段落：
 {original}
@@ -1157,9 +1357,13 @@ AI 建议标题：{(target or {}).get('chartTitle') or (target or {}).get('title
 图表类型：{chart_type}
 图表说明：{caption}
 单位：{unit or '未注明'}
+真实数据点：
+{data_points_text or '无'}
+真实数据分析：
+{analysis_text or '请根据数据行 JSON 自行归纳。'}
 数据行 JSON：
 {json.dumps(rows_payload, ensure_ascii=False)}
-来源信息：
+参考文献信息（仅供系统写入参考文献，不要出现在正文中）：
 {source_text or '用户提供的数据表，来源待用户审核。'}
 
 请直接输出改写后的段落。'''
@@ -1174,14 +1378,10 @@ AI 建议标题：{(target or {}).get('chartTitle') or (target or {}).get('title
                 )
                 rewritten = self._normalize_text(rewritten)
                 if rewritten:
-                    return rewritten
+                    return self._ensure_rewritten_has_data_analysis(rewritten, rows, source_text, unit, title)
             except Exception:
                 pass
-        intro = f'结合图1可以看出，{caption}'
-        if source_text:
-            intro += f' 数据来源为：{source_text}。'
-        else:
-            intro += ' 数据来源为用户审核后的数据表。'
+        intro = self._build_data_analysis_paragraph(rows, source_text, unit, title)
         if not original:
             return intro
         if '图1' in original or '如图' in original:

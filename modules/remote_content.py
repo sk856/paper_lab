@@ -145,7 +145,7 @@ class RemoteContentManager:
         """发起 HTTP GET 请求并解析 JSON（附加时间戳绕过 CDN 缓存）"""
         bust = f'{"&" if "?" in url else "?"}t={int(time.time())}'
         req = urllib.request.Request(url + bust, method='GET')
-        req.add_header('User-Agent', 'PaperLab/1.0')
+        req.add_header('User-Agent', 'ThesisWorkshop/1.0')
         req.add_header('Cache-Control', 'no-cache')
         with urllib.request.urlopen(req, timeout=FETCH_TIMEOUT) as resp:
             raw = resp.read()

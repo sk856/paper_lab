@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-纸研社首页
+论文工坊首页
 """
 
 import json
@@ -1332,7 +1332,7 @@ class HomePage:
         except Exception:
             hero_logo = tk.Label(
                 self.hero_visual.inner,
-                text='纸研社',
+                text='论文工坊',
                 font=FONTS['subtitle'],
                 fg=COLORS['text_main'],
                 bg=COLORS['card_bg'],
@@ -1356,7 +1356,7 @@ class HomePage:
             0,
             0,
             anchor='nw',
-            text='纸研社',
+            text='论文工坊',
             font=hero_title_font,
             fill=COLORS['text_main'],
         )
@@ -3363,7 +3363,7 @@ class HomePage:
         self.hero_text.configure(width=text_width)
         self.hero_text.itemconfigure(
             self.hero_title_item,
-            text='纸研社',
+            text='论文工坊',
             font=(FONTS['hero'][0], 28, 'bold'),
             fill=COLORS['text_main'],
         )

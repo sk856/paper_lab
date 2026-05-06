@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""Local web UI for 纸研社."""
+"""Local web UI for 论文工坊."""
 
 from __future__ import annotations
 
@@ -11,6 +11,7 @@ import json
 import mimetypes
 import os
 import re
+import secrets
 import shutil
 import subprocess
 import sys
@@ -56,6 +57,10 @@ PROJECT_DIR = os.path.dirname(os.path.abspath(__file__))
 WEB_DIR = os.path.join(PROJECT_DIR, 'web')
 DATA_CHART_ASSET_DIR = os.path.join(WEB_DIR, 'generated', 'charts')
 SERVER_ERROR_LOG = os.path.join(PROJECT_DIR, 'server_errors.log')
+WEB_USER_COOKIE = 'thesisworkshop_web_user'
+LEGACY_WEB_USER_COOKIES = ('paperlab_web_user',)
+WEB_USER_COOKIE_MAX_AGE = 60 * 60 * 24 * 365
+WEB_USERS_DIR_NAME = 'web_users'
 
 
 def _write_server_error_log(exc, payload=None):
@@ -77,6 +82,11 @@ def _safe_asset_slug(value):
     text = re.sub(r'[^A-Za-z0-9_-]+', '-', str(value or '').strip())
     text = re.sub(r'-+', '-', text).strip('-')
     return text[:36] or 'chart'
+
+
+def _safe_web_user_id(value):
+    text = re.sub(r'[^A-Za-z0-9_-]+', '', str(value or '').strip())
+    return text if 18 <= len(text) <= 80 else ''
 
 
 def _persist_data_chart_image(data_url, title='chart'):
@@ -115,7 +125,54 @@ def _data_chart_reference_payload(result):
                 if value:
                     payload[field] = value
         entries.append(payload)
+    if len(entries) > 3:
+        return [_combine_data_chart_reference_entries(entries)]
     return entries
+
+
+def _compact_data_chart_reference_values(entries, field, limit=6):
+    values = []
+    seen = set()
+    for entry in entries or []:
+        value = re.sub(r'\s+', ' ', str((entry or {}).get(field, '') or '').strip())
+        if not value or value in seen:
+            continue
+        seen.add(value)
+        values.append(value)
+        if len(values) >= limit:
+            break
+    return values
+
+
+def _combine_data_chart_reference_entries(entries):
+    publishers = _compact_data_chart_reference_values(entries, 'publisher', 4)
+    source_names = _compact_data_chart_reference_values(entries, 'sourceName', 8)
+    urls = _compact_data_chart_reference_values(entries, 'url', 3)
+    if len(publishers) == 1:
+        author = publishers[0]
+    elif publishers:
+        author = '；'.join(publishers[:3]) + ('等' if len(publishers) > 3 else '')
+    else:
+        author = '相关数据发布机构'
+
+    if source_names:
+        title = '、'.join(source_names[:6]) + ('等' if len(source_names) > 6 else '')
+    else:
+        title = '图表数据来源汇总'
+
+    suffix = f'[R/OL]. {urls[0]}.' if urls else '[R].'
+    if len(urls) > 1:
+        suffix += f' 另见：{"；".join(urls[1:])}.'
+    text = normalize_reference_entry_text(f'{author}. {title}{suffix}')
+    return {
+        'text': text,
+        'key': reference_entry_key(text),
+        'sourceName': title,
+        'publisher': author,
+        'url': urls[0] if urls else '',
+        'source': text,
+        'note': '同一图表的数据来源已合并引用，逐行来源保留在数据表中。',
+    }
 
 
 _DATA_CHART_SOURCE_SIGNAL_RE = re.compile(
@@ -210,6 +267,15 @@ def _data_chart_sentence_has_citation(sentence, citation):
     return str(citation or '') in str(sentence or '')
 
 
+def _data_chart_sentence_has_chart_analysis(sentence):
+    text = str(sentence or '')
+    if re.search(r'图\s*\d+|如图|图表|可视化', text):
+        return True
+    if re.search(r'\d+(?:\.\d+)?\s*(?:%|％|个百分点|点|亿元|万人|万人次|次|个|项)', text):
+        return True
+    return bool(re.search(r'最高值|最低值|首末|差距|升至|降至|扩大|缩小|占比|结构|趋势', text))
+
+
 def _insert_citation_at_sentence_end(text, start, end, citation):
     sentence = text[start:end]
     stripped_end = start + len(sentence.rstrip())
@@ -243,12 +309,20 @@ def _insert_data_source_citation(text, citation, reference_entries):
 
     working = re.sub(r'\s*' + re.escape(citation_text) + r'\s*$', '', content.rstrip())
     spans = list(_data_chart_sentence_spans(working))
+    if any(_data_chart_sentence_has_citation(sentence, citation_text) for _, _, sentence in spans):
+        return working
+
+    for start, end, sentence in reversed(spans):
+        stripped = sentence.strip()
+        if not stripped or stripped.startswith('![') or stripped.startswith('<img'):
+            continue
+        if _data_chart_sentence_has_chart_analysis(sentence):
+            return _insert_citation_at_sentence_end(working, start, end, citation_text)
+
     for start, end, sentence in spans:
         stripped = sentence.strip()
         if stripped.startswith('![') or stripped.startswith('<img'):
             continue
-        if _data_chart_sentence_has_citation(sentence, citation_text):
-            return working
         if _data_chart_sentence_has_source(sentence, source_terms):
             return _insert_citation_at_sentence_end(working, start, end, citation_text)
 
@@ -259,6 +333,41 @@ def _insert_data_source_citation(text, citation, reference_entries):
         return _insert_citation_at_sentence_end(working, start, end, citation_text)
 
     return f'{working.rstrip()}{citation_text}'
+
+
+def _caption_with_data_citation(caption, citation):
+    content = re.sub(r'\s+', ' ', str(caption or '').strip())
+    citation_text = str(citation or '').strip()
+    if not content:
+        return content
+    content = re.sub(r'\s*\[[\d,\-\s]+\]\s*$', '', content)
+    chart_type_match = re.match(
+        r'^(.+?[（(](?:柱状图|条形图|折线图|结构图|饼图|图表|line chart|bar chart|pie chart|chart)[）)])',
+        content,
+        flags=re.IGNORECASE,
+    )
+    if chart_type_match:
+        content = chart_type_match.group(1).strip()
+    elif not re.match(r'^(?:图\s*\d+|Figure\s*\d+)\b', content, flags=re.IGNORECASE):
+        content = re.split(r'[\u3002.!?！？]\s*', content, maxsplit=1)[0].strip() or content
+    if not citation_text or citation_text in content:
+        return content
+    content = re.sub(r'\s*[\u3002.!?！？]\s*$', '', content)
+    return f'{content}{citation_text}'
+
+
+def _rewrite_figure_markdown_caption(figure_markdown, citation):
+    text = str(figure_markdown or '').strip()
+    citation_text = str(citation or '').strip()
+    if not text or not citation_text:
+        return text
+    lines = text.splitlines()
+    for index, line in enumerate(lines):
+        stripped = line.strip()
+        if re.match(r'^(?:图\s*\d+|Figure\s*\d+)\b', stripped, flags=re.IGNORECASE):
+            lines[index] = _caption_with_data_citation(stripped, citation_text)
+            return '\n'.join(lines).strip()
+    return f'{text}\n\n图1 数据图表{citation_text}'
 
 
 def _append_data_chart_references(all_sections, section_title, replacement_text, reference_entries, reference_style='GB/T 7714', original_text=''):
@@ -312,7 +421,8 @@ def _append_data_chart_references(all_sections, section_title, replacement_text,
     if citation_numbers:
         citation = '[' + ','.join(str(number) for number in dict.fromkeys(citation_numbers)) + ']'
 
-    content_with_citation = _insert_data_source_citation(replacement_text, citation, reference_entries)
+    content_with_citation = replacement_text
+    content_for_reference_order = f'{content_with_citation.rstrip()}\n\n{citation}'.strip() if citation else content_with_citation
 
     local_number_map = build_reference_number_map(temp_entries)
     key_to_text = {}
@@ -332,11 +442,11 @@ def _append_data_chart_references(all_sections, section_title, replacement_text,
     original = str(original_text or '').strip()
     if current_section_content:
         if original and original in current_section_content:
-            current_content_for_order = current_section_content.replace(original, content_with_citation, 1)
+            current_content_for_order = current_section_content.replace(original, content_for_reference_order, 1)
         else:
-            current_content_for_order = f'{current_section_content.rstrip()}\n\n{content_with_citation}'.strip()
+            current_content_for_order = f'{current_section_content.rstrip()}\n\n{content_for_reference_order}'.strip()
     else:
-        current_content_for_order = content_with_citation
+        current_content_for_order = content_for_reference_order
     ordered_keys = []
     seen_keys = set()
 
@@ -396,6 +506,7 @@ def _append_data_chart_references(all_sections, section_title, replacement_text,
             'entryCount': len(full_entries),
         },
         'updatedSections': updated_sections,
+        'citation': rewrite_citations_with_entry_map(citation, combined_current_map) if citation else '',
         'citationNumber': next((entry.get('new_number') for entry in local_number_map.values() if entry.get('new_number')), None),
     }
 
@@ -993,20 +1104,110 @@ def _parse_template_headings(filename, mime_type, data):
 class WebWorkbench:
     def __init__(self):
         runtime_paths = get_runtime_paths()
-        self.config = ConfigManager(runtime_paths.base_data_root)
-        self.api_client = APIClient(self.config)
-        self.ai_reducer = AIReducer(self.api_client)
-        self.plagiarism = PlagiarismReducer(self.api_client)
-        self.polisher = AcademicPolisher(self.api_client)
-        self.paper_writer = PaperWriter(self.api_client)
-        self.corrector = IntelligentCorrector(self.api_client)
-        self.data_chart = DataChartAssistant(self.api_client)
+        self.runtime_paths = runtime_paths
+        self.base_user_data_root = os.path.join(runtime_paths.base_data_root, WEB_USERS_DIR_NAME)
+        os.makedirs(self.base_user_data_root, exist_ok=True)
+        self._session_lock = threading.RLock()
+        self._sessions = {}
+        self._default_session = self._create_session(runtime_paths.base_data_root)
 
-    def status(self):
-        active_id = self.config.active_api
-        active_cfg = self.config.get_api_config(active_id) if active_id else {}
+    def _create_session(self, data_root):
+        config = ConfigManager(data_root)
+        api_client = APIClient(config)
+        return {
+            'config': config,
+            'api_client': api_client,
+            'ai_reducer': AIReducer(api_client),
+            'plagiarism': PlagiarismReducer(api_client),
+            'polisher': AcademicPolisher(api_client),
+            'paper_writer': PaperWriter(api_client),
+            'corrector': IntelligentCorrector(api_client),
+            'data_chart': DataChartAssistant(api_client),
+        }
+
+    def _session_for_user(self, user_id=''):
+        safe_id = _safe_web_user_id(user_id)
+        if not safe_id:
+            return self._default_session
+        with self._session_lock:
+            session = self._sessions.get(safe_id)
+            if session:
+                return session
+            data_root = os.path.join(self.base_user_data_root, safe_id)
+            os.makedirs(data_root, exist_ok=True)
+            session = self._create_session(data_root)
+            self._sessions[safe_id] = session
+            return session
+
+    def _config(self, user_id=''):
+        return self._session_for_user(user_id)['config']
+
+    def _api_client(self, user_id=''):
+        return self._session_for_user(user_id)['api_client']
+
+    def _ai_reducer(self, user_id=''):
+        return self._session_for_user(user_id)['ai_reducer']
+
+    def _plagiarism(self, user_id=''):
+        return self._session_for_user(user_id)['plagiarism']
+
+    def _polisher(self, user_id=''):
+        return self._session_for_user(user_id)['polisher']
+
+    def _paper_writer(self, user_id=''):
+        return self._session_for_user(user_id)['paper_writer']
+
+    def _corrector(self, user_id=''):
+        return self._session_for_user(user_id)['corrector']
+
+    def _data_chart(self, user_id=''):
+        return self._session_for_user(user_id)['data_chart']
+
+    @property
+    def config(self):
+        return self._default_session['config']
+
+    @property
+    def api_client(self):
+        return self._default_session['api_client']
+
+    @property
+    def ai_reducer(self):
+        return self._default_session['ai_reducer']
+
+    @property
+    def plagiarism(self):
+        return self._default_session['plagiarism']
+
+    @property
+    def polisher(self):
+        return self._default_session['polisher']
+
+    @property
+    def paper_writer(self):
+        return self._default_session['paper_writer']
+
+    @property
+    def corrector(self):
+        return self._default_session['corrector']
+
+    @property
+    def data_chart(self):
+        return self._default_session['data_chart']
+
+    def user_metadata(self, user_id=''):
+        safe_id = _safe_web_user_id(user_id)
+        return {
+            'userScopedConfig': bool(safe_id),
+            'userIdSuffix': safe_id[-6:] if safe_id else '',
+        }
+
+    def status(self, user_id=''):
+        config = self._config(user_id)
+        active_id = config.active_api
+        active_cfg = config.get_api_config(active_id) if active_id else {}
         providers = []
-        for api_id, cfg in self.config.list_saved_apis():
+        for api_id, cfg in config.list_saved_apis():
             providers.append({
                 'id': api_id,
                 'name': cfg.get('name') or api_id,
@@ -1020,9 +1221,11 @@ class WebWorkbench:
             'activeModel': resolve_model_display_name(active_cfg) if active_cfg else '',
             'configured': bool(active_id and active_cfg and str(active_cfg.get('key', '') or '').strip()),
             'providers': providers,
+            **self.user_metadata(user_id),
         }
 
-    def _public_api_record(self, api_id, cfg):
+    def _public_api_record(self, api_id, cfg, user_id=''):
+        config = self._config(user_id)
         provider_type = normalize_provider_type(cfg.get('provider_type') or api_id)
         return {
             'id': api_id,
@@ -1033,13 +1236,14 @@ class WebWorkbench:
             'model': cfg.get('model', ''),
             'modelDisplayName': resolve_model_display_name(cfg),
             'timeout': cfg.get('timeout', ''),
-            'active': api_id == self.config.active_api,
+            'active': api_id == config.active_api,
             'configured': bool(str(cfg.get('key', '') or '').strip()),
             'hasKey': bool(str(cfg.get('key', '') or '').strip()),
             'apiFormat': cfg.get('api_format', ''),
         }
 
-    def config_payload(self):
+    def config_payload(self, user_id=''):
+        config = self._config(user_id)
         presets = []
         for preset_id, label, defaults in PRESET_OPTIONS:
             presets.append({
@@ -1049,19 +1253,21 @@ class WebWorkbench:
                 'staticModels': get_static_models(preset_id),
             })
         records = [
-            self._public_api_record(api_id, cfg)
-            for api_id, cfg in self.config.list_saved_apis()
+            self._public_api_record(api_id, cfg, user_id=user_id)
+            for api_id, cfg in config.list_saved_apis()
         ]
         return {
-            'activeApi': self.config.active_api,
+            'activeApi': config.active_api,
             'providers': records,
             'presets': presets,
+            **self.user_metadata(user_id),
         }
 
-    def save_api(self, payload):
+    def save_api(self, payload, user_id=''):
+        config = self._config(user_id)
         api_id = str(payload.get('id', '') or '').strip()
         provider_type = normalize_provider_type(payload.get('providerType') or 'custom')
-        existing = self.config.get_api_config(api_id) if api_id else {}
+        existing = config.get_api_config(api_id) if api_id else {}
         cfg = merge_with_preset_defaults(existing, provider_type)
 
         for src, dst in (
@@ -1094,32 +1300,35 @@ class WebWorkbench:
         if not str(cfg.get('model', '') or '').strip():
             raise ValueError('请选择或填写模型 ID')
 
-        duplicate_id = self.config.find_api_id_by_name(cfg.get('name', ''), exclude_api_id=api_id or None)
+        duplicate_id = config.find_api_id_by_name(cfg.get('name', ''), exclude_api_id=api_id or None)
         if duplicate_id:
             raise ValueError('接口名称已存在，请换一个名称')
 
-        target_id = api_id or self.config.generate_api_id()
-        self.config.set_api_config(target_id, cfg)
+        target_id = api_id or config.generate_api_id()
+        config.set_api_config(target_id, cfg)
         if bool(payload.get('activate', True)):
-            self.config.active_api = target_id
-        self.config.save()
+            config.active_api = target_id
+        config.save()
         return {
-            'record': self._public_api_record(target_id, self.config.get_api_config(target_id)),
-            'config': self.config_payload(),
+            'record': self._public_api_record(target_id, config.get_api_config(target_id), user_id=user_id),
+            'config': self.config_payload(user_id),
         }
 
-    def activate_api(self, payload):
+    def activate_api(self, payload, user_id=''):
+        config = self._config(user_id)
         api_id = str(payload.get('id', '') or '').strip()
-        if not self.config.get_api_config(api_id):
+        if not config.get_api_config(api_id):
             raise ValueError('接口不存在')
-        self.config.active_api = api_id
-        self.config.save()
-        return self.config_payload()
+        config.active_api = api_id
+        config.save()
+        return self.config_payload(user_id)
 
-    def fetch_models_for_payload(self, payload):
+    def fetch_models_for_payload(self, payload, user_id=''):
+        config = self._config(user_id)
+        api_client = self._api_client(user_id)
         api_id = str(payload.get('id', '') or '').strip()
         provider_type = normalize_provider_type(payload.get('providerType') or 'custom')
-        existing = self.config.get_api_config(api_id) if api_id else {}
+        existing = config.get_api_config(api_id) if api_id else {}
         cfg = merge_with_preset_defaults(existing, provider_type)
         for src, dst in (
             ('name', 'name'),
@@ -1133,7 +1342,7 @@ class WebWorkbench:
                 cfg[dst] = str(payload.get(src, '') or '').strip()
         if str(payload.get('key', '') or '').strip():
             cfg['key'] = str(payload.get('key', '') or '').strip()
-        models = self.api_client.fetch_models(api_id or provider_type, cfg=cfg)
+        models = api_client.fetch_models(api_id or provider_type, cfg=cfg)
         return {'models': models}
 
     def parse_template(self, payload):
@@ -1158,11 +1367,12 @@ class WebWorkbench:
             'headings': headings,
         }
 
-    def run_data_chart(self, payload):
+    def run_data_chart(self, payload, user_id=''):
+        data_chart = self._data_chart(user_id)
         action = str(payload.get('action', '') or '').strip()
         target = payload.get('target') if isinstance(payload.get('target'), dict) else {}
         if action == 'find':
-            return self.data_chart.find_targets(
+            return data_chart.find_targets(
                 payload.get('fullText', '') or payload.get('text', ''),
                 topic=payload.get('topic', ''),
                 outline=payload.get('outline', ''),
@@ -1170,14 +1380,14 @@ class WebWorkbench:
                 limit=payload.get('limit', 8),
             )
         if action == 'search':
-            return self.data_chart.search_data(
+            return data_chart.search_data(
                 query=payload.get('query', ''),
                 target=target,
                 full_text=payload.get('fullText', '') or payload.get('text', ''),
                 user_data=payload.get('userData', ''),
             )
         if action == 'generate':
-            result = self.data_chart.generate_chart(
+            result = data_chart.generate_chart(
                 table_text=payload.get('tableText', ''),
                 chart_type=payload.get('chartType', 'bar'),
                 title=payload.get('title', ''),
@@ -1190,9 +1400,6 @@ class WebWorkbench:
                 chart['imageUrl'] = image_url
                 if image_url:
                     chart['dataUrl'] = image_url
-                title = chart.get('title') or payload.get('title') or '论文数据图表'
-                caption = chart.get('caption') or ''
-                result['figureMarkdown'] = f'![{title}]({image_url})\n\n图1 {caption}'
             reference_entries = _data_chart_reference_payload(result)
             reference_result = _append_data_chart_references(
                 payload.get('allSections', []),
@@ -1206,21 +1413,34 @@ class WebWorkbench:
             result['referenceEntries'] = reference_entries
             result['references'] = reference_result['references']
             result['updatedSections'] = reference_result['updatedSections']
+            if isinstance(chart, dict):
+                title = chart.get('title') or payload.get('title') or '论文数据图表'
+                caption = _caption_with_data_citation(chart.get('caption') or title, reference_result.get('citation', ''))
+                chart['caption'] = caption
+                result['figureMarkdown'] = f'![{title}]({image_url})\n\n图1 {caption}'
+            result['citation'] = reference_result.get('citation', '')
             result['citationNumber'] = reference_result['citationNumber']
             return result
         raise ValueError('未知数据图表操作')
 
-    def analyze(self, text):
-        ai = self.ai_reducer.scan_ai_features(text)
-        repeat = self.plagiarism.simulate_repeat_risk(text)
-        citation = self.plagiarism.check_citation_format(text)
+    def analyze(self, text, user_id=''):
+        ai_reducer = self._ai_reducer(user_id)
+        plagiarism = self._plagiarism(user_id)
+        ai = ai_reducer.scan_ai_features(text)
+        repeat = plagiarism.simulate_repeat_risk(text)
+        citation = plagiarism.check_citation_format(text)
         return {
             'ai': ai,
             'repeat': repeat,
             'citation': citation,
         }
 
-    def run_action(self, payload):
+    def run_action(self, payload, user_id=''):
+        ai_reducer = self._ai_reducer(user_id)
+        plagiarism = self._plagiarism(user_id)
+        polisher = self._polisher(user_id)
+        paper_writer = self._paper_writer(user_id)
+        corrector = self._corrector(user_id)
         action = str(payload.get('action', '') or '').strip()
         text = str(payload.get('text', '') or '').strip()
         source_text = str(payload.get('sourceText', '') or '').strip()
@@ -1229,10 +1449,10 @@ class WebWorkbench:
             raise ValueError('请输入需要处理的文本')
 
         if action == 'analyze':
-            return {'result': '', 'analysis': self.analyze(text)}
+            return {'result': '', 'analysis': self.analyze(text, user_id)}
         if action == 'polish':
             mode = str(payload.get('polishMode', 'full') or 'full')
-            result = self.polisher.run_task(
+            result = polisher.run_task(
                 text,
                 task_type=str(payload.get('taskType', '章节正文') or '章节正文'),
                 polish_type=mode,
@@ -1241,30 +1461,30 @@ class WebWorkbench:
                 notes=str(payload.get('notes', '') or ''),
                 custom_prompt=custom_prompt,
             )
-            return {'result': result, 'analysis': self.analyze(result)}
+            return {'result': result, 'analysis': self.analyze(result, user_id)}
         if action == 'ai-light':
-            result = self.ai_reducer.rewrite_light(text, custom_prompt=custom_prompt)
-            return {'result': result, 'analysis': self.analyze(result)}
+            result = ai_reducer.rewrite_light(text, custom_prompt=custom_prompt)
+            return {'result': result, 'analysis': self.analyze(result, user_id)}
         if action == 'ai-deep':
-            result = self.ai_reducer.rewrite_deep(text, custom_prompt=custom_prompt)
-            return {'result': result, 'analysis': self.analyze(result)}
+            result = ai_reducer.rewrite_deep(text, custom_prompt=custom_prompt)
+            return {'result': result, 'analysis': self.analyze(result, user_id)}
         if action == 'ai-academic':
-            result = self.ai_reducer.rewrite_academic(text, custom_prompt=custom_prompt)
-            return {'result': result, 'analysis': self.analyze(result)}
+            result = ai_reducer.rewrite_academic(text, custom_prompt=custom_prompt)
+            return {'result': result, 'analysis': self.analyze(result, user_id)}
         if action == 'repeat-light':
-            result = self.plagiarism.reduce_light(text, source_text=source_text, custom_prompt=custom_prompt)
-            return {'result': result, 'analysis': self.analyze(result)}
+            result = plagiarism.reduce_light(text, source_text=source_text, custom_prompt=custom_prompt)
+            return {'result': result, 'analysis': self.analyze(result, user_id)}
         if action == 'repeat-medium':
-            result = self.plagiarism.reduce_medium(text, source_text=source_text, custom_prompt=custom_prompt)
-            return {'result': result, 'analysis': self.analyze(result)}
+            result = plagiarism.reduce_medium(text, source_text=source_text, custom_prompt=custom_prompt)
+            return {'result': result, 'analysis': self.analyze(result, user_id)}
         if action == 'repeat-deep':
-            result = self.plagiarism.reduce_deep(text, source_text=source_text, custom_prompt=custom_prompt)
-            return {'result': result, 'analysis': self.analyze(result)}
+            result = plagiarism.reduce_deep(text, source_text=source_text, custom_prompt=custom_prompt)
+            return {'result': result, 'analysis': self.analyze(result, user_id)}
         if action == 'citation':
-            return {'result': '', 'analysis': {'citation': self.plagiarism.check_citation_format(text)}}
+            return {'result': '', 'analysis': {'citation': plagiarism.check_citation_format(text)}}
         if action == 'correction':
             citation_style = str(payload.get('citationStyle', 'auto') or 'auto')
-            run = self.corrector.analyze_text(text, citation_style=citation_style)
+            run = corrector.analyze_text(text, citation_style=citation_style)
             return {
                 'result': run.corrected_text,
                 'analysis': {
@@ -1289,7 +1509,7 @@ class WebWorkbench:
             template_structure = payload.get('templateStructure')
             if not topic:
                 raise ValueError('请输入论文题目')
-            result = self.paper_writer.generate_outline(
+            result = paper_writer.generate_outline(
                 topic,
                 style=paper_style,
                 reference_style=reference_style,
@@ -1315,7 +1535,7 @@ class WebWorkbench:
                 raise ValueError('请输入章节标题')
 
             # Generate section content
-            raw_result = self.paper_writer.write_section(
+            raw_result = paper_writer.write_section(
                 outline,
                 section_title,
                 context=context,
@@ -1382,8 +1602,8 @@ class WebWorkbench:
                 }
         if action == 'abstract':
             language = str(payload.get('language', '中文') or '中文')
-            result = self.paper_writer.write_abstract(text, language=language)
-            return {'result': result, 'analysis': self.analyze(result)}
+            result = paper_writer.write_abstract(text, language=language)
+            return {'result': result, 'analysis': self.analyze(result, user_id)}
         if action == 'references':
             reference_style = str(payload.get('referenceStyle', 'GB/T 7714') or 'GB/T 7714')
             all_sections = payload.get('allSections', [])
@@ -1402,10 +1622,10 @@ class WebWorkbench:
                         'citationCount': result['citation_count'],
                     },
                     'updatedSections': result['updated_sections'],
-                    'analysis': {'citation': self.plagiarism.check_citation_format(result['reference_content'])},
+                    'analysis': {'citation': plagiarism.check_citation_format(result['reference_content'])},
                 }
-            result = self.paper_writer.format_references(text, style=reference_style)
-            return {'result': result, 'analysis': {'citation': self.plagiarism.check_citation_format(result)}}
+            result = paper_writer.format_references(text, style=reference_style)
+            return {'result': result, 'analysis': {'citation': plagiarism.check_citation_format(result)}}
         if action == 'batch_write':
             outline = str(payload.get('outline', '') or '').strip()
             reference_style = str(payload.get('referenceStyle', 'GB/T 7714') or 'GB/T 7714')
@@ -1442,7 +1662,7 @@ class WebWorkbench:
                 if not section_title:
                     continue
                 try:
-                    result = self.paper_writer.write_section(
+                    result = paper_writer.write_section(
                         outline,
                         section_title,
                         context=context,
@@ -1508,12 +1728,45 @@ class RequestHandler(BaseHTTPRequestHandler):
     def log_message(self, format, *args):
         return
 
+    def _cookie_pairs(self):
+        pairs = {}
+        for chunk in str(self.headers.get('Cookie') or '').split(';'):
+            if '=' not in chunk:
+                continue
+            key, value = chunk.split('=', 1)
+            pairs[key.strip()] = value.strip()
+        return pairs
+
+    def _web_user_id(self):
+        pairs = self._cookie_pairs()
+        current = _safe_web_user_id(pairs.get(WEB_USER_COOKIE, ''))
+        if current:
+            return current, False
+        for cookie_name in LEGACY_WEB_USER_COOKIES:
+            current = _safe_web_user_id(pairs.get(cookie_name, ''))
+            if current:
+                return current, True
+        return secrets.token_urlsafe(32), True
+
+    def _send_user_cookie(self, user_id):
+        safe_id = _safe_web_user_id(user_id)
+        if not safe_id:
+            return
+        cookie = (
+            f'{WEB_USER_COOKIE}={safe_id}; Max-Age={WEB_USER_COOKIE_MAX_AGE}; '
+            'Path=/; HttpOnly; SameSite=Lax'
+        )
+        self.send_header('Set-Cookie', cookie)
+
     def _send_json(self, payload, status=200):
         body = json.dumps(payload, ensure_ascii=False).encode('utf-8')
         self.send_response(status)
         self.send_header('Content-Type', 'application/json; charset=utf-8')
         self.send_header('Cache-Control', 'no-store, no-cache, must-revalidate, max-age=0')
         self.send_header('Content-Length', str(len(body)))
+        user_id = getattr(self, '_current_web_user_id', '')
+        if getattr(self, '_set_web_user_cookie', False):
+            self._send_user_cookie(user_id)
         self.end_headers()
         self.wfile.write(body)
 
@@ -1527,6 +1780,9 @@ class RequestHandler(BaseHTTPRequestHandler):
         self.send_header('Content-Disposition', f'attachment; filename="{safe_ascii}"; filename*=UTF-8\'\'{quoted_utf8}')
         self.send_header('Cache-Control', 'no-store, no-cache, must-revalidate, max-age=0')
         self.send_header('Content-Length', str(len(data)))
+        user_id = getattr(self, '_current_web_user_id', '')
+        if getattr(self, '_set_web_user_cookie', False):
+            self._send_user_cookie(user_id)
         self.end_headers()
         self.wfile.write(data)
 
@@ -1537,30 +1793,36 @@ class RequestHandler(BaseHTTPRequestHandler):
 
     def do_GET(self):
         parsed = urlparse(self.path)
+        user_id, is_new_user = self._web_user_id()
+        self._current_web_user_id = user_id
+        self._set_web_user_cookie = is_new_user
         if parsed.path == '/api/status':
-            self._send_json({'ok': True, 'data': self.workbench.status()})
+            self._send_json({'ok': True, 'data': self.workbench.status(user_id)})
             return
         if parsed.path == '/api/config':
-            self._send_json({'ok': True, 'data': self.workbench.config_payload()})
+            self._send_json({'ok': True, 'data': self.workbench.config_payload(user_id)})
             return
         self._serve_static(parsed.path)
 
     def do_POST(self):
         parsed = urlparse(self.path)
+        user_id, is_new_user = self._web_user_id()
+        self._current_web_user_id = user_id
+        self._set_web_user_cookie = is_new_user
         try:
             payload = self._read_json()
             if parsed.path == '/api/run':
-                data = self.workbench.run_action(payload)
+                data = self.workbench.run_action(payload, user_id)
             elif parsed.path == '/api/config/save':
-                data = self.workbench.save_api(payload)
+                data = self.workbench.save_api(payload, user_id)
             elif parsed.path == '/api/config/activate':
-                data = self.workbench.activate_api(payload)
+                data = self.workbench.activate_api(payload, user_id)
             elif parsed.path == '/api/config/models':
-                data = self.workbench.fetch_models_for_payload(payload)
+                data = self.workbench.fetch_models_for_payload(payload, user_id)
             elif parsed.path == '/api/template/parse':
                 data = self.workbench.parse_template(payload)
             elif parsed.path == '/api/data-chart':
-                data = self.workbench.run_data_chart(payload)
+                data = self.workbench.run_data_chart(payload, user_id)
             elif parsed.path == '/api/paper/export':
                 exported = export_paper_document(payload, PROJECT_DIR, WEB_DIR)
                 self._send_binary(exported.body, exported.filename, exported.content_type)
@@ -1588,12 +1850,15 @@ class RequestHandler(BaseHTTPRequestHandler):
         self.send_header('Content-Type', content_type)
         self.send_header('Cache-Control', 'no-store, no-cache, must-revalidate, max-age=0')
         self.send_header('Content-Length', str(len(body)))
+        user_id = getattr(self, '_current_web_user_id', '')
+        if getattr(self, '_set_web_user_cookie', False):
+            self._send_user_cookie(user_id)
         self.end_headers()
         self.wfile.write(body)
 
 
 def main():
-    parser = argparse.ArgumentParser(description='纸研社 Web 工作台')
+    parser = argparse.ArgumentParser(description='论文工坊 Web 工作台')
     parser.add_argument('--host', default='127.0.0.1')
     parser.add_argument('--port', type=int, default=8765)
     parser.add_argument('--no-open', action='store_true')
@@ -1602,7 +1867,7 @@ def main():
     RequestHandler.workbench = WebWorkbench()
     server = ThreadingHTTPServer((args.host, args.port), RequestHandler)
     url = f'http://{args.host}:{args.port}/'
-    print(f'[web] 纸研社 Web 工作台已启动: {url}')
+    print(f'[web] 论文工坊 Web 工作台已启动: {url}')
     if not args.no_open:
         threading.Timer(0.5, lambda: webbrowser.open(url)).start()
     try:

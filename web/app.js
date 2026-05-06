@@ -41,9 +41,17 @@ const BATCH_PAPER_REQUEST_TIMEOUT_MS = 420000;
 const BATCH_WRITE_MAX_ATTEMPTS = 3;
 
 const STORAGE_KEYS = {
+  draft: 'thesisworkshop-web-draft-v3',
+  history: 'thesisworkshop-web-history-v2',
+};
+
+const LEGACY_STORAGE_KEYS = {
   draft: 'paperlab-web-draft-v3',
   history: 'paperlab-web-history-v2',
+  theme: 'paperlab-web-theme',
 };
+
+const THEME_STORAGE_KEY = 'thesisworkshop-web-theme';
 
 const FIELD_SELECTORS = [
   '#paperTopic', '#paperSubject', '#paperStyle', '#referenceStyle', '#sectionTitle', '#totalWordCountAuto', '#totalWordCount', '#wordCountAuto', '#wordCount', '#paperOutline', '#paperContext', '#paperResult',
@@ -102,6 +110,47 @@ const DEFAULT_PROMPT_TEMPLATES = {
 
 const $ = (selector) => document.querySelector(selector);
 const $$ = (selector) => Array.from(document.querySelectorAll(selector));
+
+function storageGet(key) {
+  try {
+    return localStorage.getItem(key);
+  } catch (error) {
+    console.warn('读取本地数据失败', error);
+    return null;
+  }
+}
+
+function storageSet(key, value) {
+  try {
+    localStorage.setItem(key, value);
+    return true;
+  } catch (error) {
+    console.warn('保存本地数据失败', error);
+    return false;
+  }
+}
+
+function storageRemove(key) {
+  try {
+    localStorage.removeItem(key);
+  } catch (error) {
+    console.warn('清理旧本地数据失败', error);
+  }
+}
+
+function cloneHistoryValue(value) {
+  if (value === undefined) return undefined;
+  try {
+    if (typeof structuredClone === 'function') return structuredClone(value);
+  } catch (error) {
+    // Fall back to JSON cloning below.
+  }
+  try {
+    return JSON.parse(JSON.stringify(value));
+  } catch (error) {
+    return value;
+  }
+}
 
 function textValue(selector) {
   const node = $(selector);
@@ -439,7 +488,7 @@ function writePaperEditorText(editor, value, options = {}) {
 
 function readStoredJson(key, fallback) {
   try {
-    const raw = localStorage.getItem(key);
+    const raw = storageGet(key);
     return raw ? JSON.parse(raw) : fallback;
   } catch (error) {
     return fallback;
@@ -447,10 +496,24 @@ function readStoredJson(key, fallback) {
 }
 
 function writeStoredJson(key, value) {
-  try {
-    localStorage.setItem(key, JSON.stringify(value));
-  } catch (error) {
-    console.warn('保存本地数据失败', error);
+  storageSet(key, JSON.stringify(value));
+}
+
+function migrateLegacyStorage() {
+  Object.entries(STORAGE_KEYS).forEach(([name, key]) => {
+    const oldKey = LEGACY_STORAGE_KEYS[name];
+    if (!oldKey || storageGet(key) !== null) return;
+    const oldValue = storageGet(oldKey);
+    if (oldValue === null) return;
+    if (storageSet(key, oldValue)) {
+      storageRemove(oldKey);
+    }
+  });
+  if (storageGet(THEME_STORAGE_KEY) === null) {
+    const oldTheme = storageGet(LEGACY_STORAGE_KEYS.theme);
+    if (oldTheme !== null && storageSet(THEME_STORAGE_KEY, oldTheme)) {
+      storageRemove(LEGACY_STORAGE_KEYS.theme);
+    }
   }
 }
 
@@ -718,7 +781,7 @@ function saveDraft() {
 }
 
 function restoreDraft() {
-  const draft = readStoredJson(STORAGE_KEYS.draft, null);
+  const draft = readStoredJson(STORAGE_KEYS.draft, null) || readStoredJson(LEGACY_STORAGE_KEYS.draft, null);
   if (!draft || !draft.fields) return;
   state.modes = { ...state.modes, ...(draft.modes || {}) };
   state.selectedPaperSection = draft.selectedPaperSection || '';
@@ -745,7 +808,7 @@ function restoreDraft() {
 }
 
 function getHistoryRecords() {
-  const records = readStoredJson(STORAGE_KEYS.history, []);
+  const records = readStoredJson(STORAGE_KEYS.history, null) || readStoredJson(LEGACY_STORAGE_KEYS.history, []);
   return Array.isArray(records) ? records : [];
 }
 
@@ -768,24 +831,25 @@ function createHistoryRecord(page, operation, data = {}) {
     page,
     module: PAGE_LABELS[page] || page,
     operation,
-    title: topic || data.title || previewText(input || output, 42) || operation,
+    title: data.title || topic || previewText(input || output, 42) || operation,
     time: new Date().toISOString(),
     input,
     output,
-    fields,
+    fields: cloneHistoryValue(data.fields || fields),
     modes: { ...state.modes },
-    selectedPaperSection: state.selectedPaperSection,
-    paperEditorSection: state.paperEditorSection,
-    paperSectionContents: { ...state.paperSectionContents },
-    paperSectionContentSources: { ...state.paperSectionContentSources },
-    paperReferenceSnapshot: state.paperReferenceSnapshot,
-    paperTemplate: state.paperTemplate,
-    dataChartTargets: state.dataChartTargets,
-    selectedDataChartTargetId: state.selectedDataChartTargetId,
-    dataChartResult: state.dataChartResult,
-    dataChartSearchResult: state.dataChartSearchResult,
-    dataChartApproved: state.dataChartApproved,
-    analysis: data.analysis || state.lastAnalysis || null,
+    selectedPaperSection: data.selectedPaperSection ?? state.selectedPaperSection,
+    paperEditorSection: data.paperEditorSection ?? state.paperEditorSection,
+    paperSectionContents: cloneHistoryValue(data.paperSectionContents || state.paperSectionContents || {}),
+    paperSectionContentSources: cloneHistoryValue(data.paperSectionContentSources || state.paperSectionContentSources || {}),
+    paperReferenceSnapshot: data.paperReferenceSnapshot ?? state.paperReferenceSnapshot,
+    paperPushTargets: cloneHistoryValue(data.paperPushTargets || state.paperPushTargets || {}),
+    paperTemplate: cloneHistoryValue(data.paperTemplate || state.paperTemplate),
+    dataChartTargets: cloneHistoryValue(data.dataChartTargets || state.dataChartTargets || []),
+    selectedDataChartTargetId: data.selectedDataChartTargetId ?? state.selectedDataChartTargetId,
+    dataChartResult: cloneHistoryValue(data.dataChartResult || state.dataChartResult),
+    dataChartSearchResult: cloneHistoryValue(data.dataChartSearchResult || state.dataChartSearchResult),
+    dataChartApproved: data.dataChartApproved ?? state.dataChartApproved,
+    analysis: cloneHistoryValue(data.analysis || state.lastAnalysis || null),
   };
 }
 
@@ -829,7 +893,7 @@ function requestTimeoutMessage(timeoutMs) {
 async function requestJson(url, options = {}, requestOptions = {}) {
   const timeoutMs = Number(requestOptions.timeoutMs ?? DEFAULT_REQUEST_TIMEOUT_MS);
   const timeoutMessage = requestOptions.timeoutMessage || requestTimeoutMessage(timeoutMs);
-  const fetchOptions = { ...options };
+  const fetchOptions = { credentials: 'same-origin', ...options };
   const controller = timeoutMs > 0 ? new AbortController() : null;
   let timeoutId = null;
 
@@ -1147,6 +1211,12 @@ function diffText(before, after) {
   return diffTextBySegments(oldText, newText);
 }
 
+function addedTextDiff(after) {
+  const newText = String(after || '').trim();
+  if (!newText) return '';
+  return `<span class="diff-added">${escapeHtml(newText)}</span>`;
+}
+
 function plainDiffText(before, after) {
   const oldText = before || '';
   const newText = after || '';
@@ -1240,6 +1310,15 @@ function setResultEditMode(scope, editing) {
   if (doneButton) doneButton.hidden = true;
   refreshPanelDiff(scope);
   saveDraft();
+}
+
+function bindRequiredAction(selector, event, handler) {
+  const node = $(selector);
+  if (!node) {
+    console.warn(`页面缺少控件：${selector}`);
+    return;
+  }
+  node.addEventListener(event, handler);
 }
 
 function resetResultEditMode(scope) {
@@ -1824,6 +1903,7 @@ async function exportPaperDocument() {
   try {
     const response = await fetch('/api/paper/export', {
       method: 'POST',
+      credentials: 'same-origin',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(payload),
     });
@@ -2455,8 +2535,62 @@ function writePaperContentToSection(title, content, options = {}) {
   return target;
 }
 
-function replacePaperSectionParagraph(sectionTitle, originalText, replacementText) {
-  const target = findPaperSectionTitleLike(sectionTitle) || ensurePaperSection(sectionTitle);
+function removeRepeatedTextOccurrence(text, chunk) {
+  const content = String(text || '');
+  const needle = String(chunk || '').trim();
+  if (!needle) return content;
+  const first = content.indexOf(needle);
+  if (first < 0) return content;
+  let cursor = first + needle.length;
+  let result = content.slice(0, cursor);
+  while (cursor < content.length) {
+    const next = content.indexOf(needle, cursor);
+    if (next < 0) {
+      result += content.slice(cursor);
+      break;
+    }
+    result += content.slice(cursor, next).replace(/\n{2,}\s*$/g, '\n\n');
+    cursor = next + needle.length;
+  }
+  return result.replace(/\n{3,}/g, '\n\n').trim();
+}
+
+function dataChartLooksLikeBackfilledBlock(block) {
+  const text = String(block || '').trim();
+  if (!text) return false;
+  if (parseMarkdownImageLine(text)) return true;
+  return /^(?:图\s*\d+|Figure\s*\d+)/i.test(text)
+    || /(?:如图|见图|图\s*\d+\s*所示|figure\s*\d+)/i.test(text)
+    || /(?:最高值|最低值|首末项|升至|降至|扩大|缩小|差距|占比|变化趋势|可视化结果)/.test(text);
+}
+
+function replacePaperParagraphByIndex(existing, paragraphIndex, replacement) {
+  const blocks = String(existing || '')
+    .replace(/\r\n/g, '\n')
+    .replace(/\r/g, '\n')
+    .split(/\n{2,}/)
+    .map((block) => block.trim())
+    .filter(Boolean);
+  const index = Number(paragraphIndex);
+  if (!Number.isInteger(index) || index < 0 || index >= blocks.length) return '';
+
+  let end = index + 1;
+  while (
+    end < blocks.length
+    && end - index < 8
+    && dataChartLooksLikeBackfilledBlock(blocks[end])
+  ) {
+    end += 1;
+  }
+  return [
+    ...blocks.slice(0, index),
+    replacement,
+    ...blocks.slice(end),
+  ].filter(Boolean).join('\n\n').trim();
+}
+
+function replacePaperSectionParagraph(sectionTitle, originalText, replacementText, options = {}) {
+  const target = findPaperSectionTitleLike(sectionTitle);
   if (!target) return { ok: false, message: '没有找到可回填的章节' };
   const existing = state.paperSectionContents?.[target] || '';
   const original = String(originalText || '').trim();
@@ -2466,11 +2600,22 @@ function replacePaperSectionParagraph(sectionTitle, originalText, replacementTex
   if (original && existing.includes(original)) {
     next = existing.replace(original, replacement);
   } else if (existing.includes(replacement)) {
-    return { ok: true, title: target, alreadyFilled: true };
-  } else if (existing) {
-    next = `${existing}\n\n${replacement}`;
+    next = removeRepeatedTextOccurrence(existing, replacement);
+  } else if (options.previousText && existing.includes(String(options.previousText).trim())) {
+    next = existing.replace(String(options.previousText).trim(), replacement);
+  } else if (Number.isInteger(Number(options.paragraphIndex))) {
+    next = replacePaperParagraphByIndex(existing, Number(options.paragraphIndex), replacement);
   } else {
-    next = replacement;
+    return {
+      ok: false,
+      message: '没有在章节中找到原段落，已停止回填以避免追加重复内容。请重新“AI 阅读全文”定位后再回填。',
+    };
+  }
+  if (!next) {
+    return {
+      ok: false,
+      message: '没有在章节中找到可替换的位置，已停止回填以避免追加重复内容。请重新“AI 阅读全文”定位后再回填。',
+    };
   }
   writePaperContentToSection(target, next);
   return { ok: true, title: target };
@@ -2569,9 +2714,51 @@ function dataChartFigureMarkdown(result = state.dataChartResult) {
   return String(result?.figureMarkdown || '').trim();
 }
 
+function dataChartCitationText(result = state.dataChartResult) {
+  const explicit = String(result?.citation || '').trim();
+  if (explicit) return explicit;
+  const number = String(result?.citationNumber || '').trim();
+  return number ? `[${number}]` : '';
+}
+
+function normalizeDataChartFigureCaption(caption, citation = '') {
+  const text = String(caption || '').replace(/\s+/g, ' ').trim();
+  if (!text) return '';
+  const match = text.match(/^((?:图\s*\d+|Figure\s*\d+)\s+.+?[）)](?:\s*\[[\d,\-\s]+\])?)(?:[。.!?！？]\s*.*)?$/i);
+  const cleaned = match
+    ? match[1].trim()
+    : text.replace(/([）)](?:\s*\[[\d,\-\s]+\])?)[。.!?！？]\s*.*$/i, '$1').trim();
+  const cite = String(citation || '').trim();
+  return cite && !cleaned.includes(cite) && /[）)]$/.test(cleaned) ? `${cleaned}${cite}` : cleaned;
+}
+
+function normalizeDataChartFigureMarkdown(figureMarkdown, result = state.dataChartResult) {
+  const text = String(figureMarkdown || '').trim();
+  if (!text) return '';
+  const citation = dataChartCitationText(result);
+  return text.split(/\r?\n/).map((line) => {
+    const stripped = line.trim();
+    if (/^(?:图\s*\d+|Figure\s*\d+)\b/i.test(stripped)) {
+      return normalizeDataChartFigureCaption(stripped, citation);
+    }
+    return line;
+  }).join('\n').trim();
+}
+
+function normalizeDataChartBackfillTextContent(text, result = state.dataChartResult) {
+  const citation = dataChartCitationText(result);
+  return String(text || '').split(/\r?\n/).map((line) => {
+    const stripped = line.trim();
+    if (/^(?:图\s*\d+|Figure\s*\d+)\b/i.test(stripped)) {
+      return normalizeDataChartFigureCaption(stripped, citation);
+    }
+    return line;
+  }).join('\n').replace(/\n{3,}/g, '\n\n').trim();
+}
+
 function dataChartComposedBackfillText(result = state.dataChartResult) {
   const replacement = String(result?.replacementText || '').trim();
-  const figure = dataChartFigureMarkdown(result);
+  const figure = normalizeDataChartFigureMarkdown(dataChartFigureMarkdown(result), result);
   if (!replacement) return figure;
   if (!figure) return replacement;
   const paragraphs = replacement.split(/\n{2,}/).map((part) => part.trim()).filter(Boolean);
@@ -2584,12 +2771,36 @@ function dataChartComposedBackfillText(result = state.dataChartResult) {
 }
 
 function dataChartBackfillText() {
-  return textValue('#dataChartResultText');
+  return normalizeDataChartBackfillTextContent(textValue('#dataChartResultText'), state.dataChartResult);
+}
+
+function dataChartHistoryStateSnapshot() {
+  storeCurrentPaperEditor({ skipEmptyOverwrite: true, markUser: state.paperEditorDirty });
+  const output = collectPaperSectionsPayload(true)
+    .map((section) => `${section.title}\n${section.content}`)
+    .join('\n\n')
+    .trim();
+  return {
+    output,
+    fields: captureFields(),
+    selectedPaperSection: state.selectedPaperSection,
+    paperEditorSection: state.paperEditorSection,
+    paperSectionContents: { ...state.paperSectionContents },
+    paperSectionContentSources: { ...state.paperSectionContentSources },
+    paperReferenceSnapshot: state.paperReferenceSnapshot,
+    paperPushTargets: state.paperPushTargets,
+    paperTemplate: state.paperTemplate,
+    dataChartTargets: state.dataChartTargets,
+    selectedDataChartTargetId: state.selectedDataChartTargetId,
+    dataChartResult: state.dataChartResult,
+    dataChartSearchResult: state.dataChartSearchResult,
+    dataChartApproved: state.dataChartApproved,
+  };
 }
 
 function dataChartReplacementText(result = state.dataChartResult) {
   const stored = textValue('#dataChartResultText');
-  if (stored) return stored;
+  if (stored) return normalizeDataChartBackfillTextContent(stored, result);
   return dataChartComposedBackfillText(result);
 }
 
@@ -2603,13 +2814,13 @@ function dataChartTextWithoutFigures(text) {
 }
 
 function dataChartFigureParts(result = state.dataChartResult) {
-  const figure = dataChartFigureMarkdown(result);
+  const figure = normalizeDataChartFigureMarkdown(dataChartFigureMarkdown(result), result);
   if (!figure) return { image: null, caption: '' };
   const lines = figure.split(/\r?\n/);
   const imageLine = lines.find((line) => parseMarkdownImageLine(line));
   return {
     image: parseMarkdownImageLine(imageLine || ''),
-    caption: lines.filter((line) => line.trim() && line !== imageLine).join('\n').trim(),
+    caption: normalizeDataChartFigureCaption(lines.filter((line) => line.trim() && line !== imageLine).join('\n').trim(), dataChartCitationText(result)),
   };
 }
 
@@ -2658,7 +2869,7 @@ function refreshDataChartDiff() {
   if (figureHtml) {
     const split = splitDataChartTextAroundFigure(after);
     if (split.found) {
-      const tailHtml = split.after ? diffText('', split.after) : '';
+      const tailHtml = split.after ? addedTextDiff(split.after) : '';
       diffNode.innerHTML = `${diffText(before, split.before)}${figureHtml}${tailHtml}`;
       return;
     }
@@ -2783,7 +2994,10 @@ function renderDataChartEditableTable(rows = []) {
       ${normalizedRows.map((row, index) => `
         <div class="data-chart-table-row" data-data-table-row="${index}">
           ${DATA_CHART_TABLE_COLUMNS.map((column) => `
-            <input class="data-chart-table-input" data-data-table-cell="${column.key}" value="${escapeHtml(row?.[column.key] || '')}" />
+            <label class="data-chart-table-cell">
+              <span>${escapeHtml(column.label)}</span>
+              <input class="data-chart-table-input" data-data-table-cell="${column.key}" aria-label="${escapeHtml(column.label)}" placeholder="${escapeHtml(column.label)}" value="${escapeHtml(row?.[column.key] || '')}" />
+            </label>
           `).join('')}
           <button class="secondary-button compact data-chart-row-remove" type="button" title="删除行">删除</button>
         </div>
@@ -3094,13 +3308,12 @@ async function generateDataChart() {
     $('#dataChartResultText')?.setAttribute('hidden', '');
     renderDataChartResult();
     updateDataChartStep(4);
-    setState('datachart', '图表已生成，正在回填到论文对应位置...', 'running');
+    setState('datachart', '图表已生成，请核对差异内容后点击“回填”写入论文。', 'done');
     addHistoryRecord('datachart', '生成数据图表', {
       inputSelector: '#dataChartDataTable',
       outputSelector: '#dataChartResultText',
       output: backfillText,
     });
-    backfillDataChartResult({ stayOnDataChart: true });
     saveDraft();
   } catch (error) {
     setState('datachart', `生成图表失败：${error.message}`, 'error');
@@ -3126,12 +3339,30 @@ function backfillDataChartResult(options = {}) {
   }
   state.dataChartApproved = true;
   const replacement = dataChartBackfillText();
-  const refTitle = applyDataChartReferenceResult(state.dataChartResult);
-  const outcome = replacePaperSectionParagraph(target.sectionTitle, target.originalText, replacement);
+  const beforeSnapshot = dataChartHistoryStateSnapshot();
+  const previousText = dataChartComposedBackfillText(state.dataChartResult);
+  const outcome = replacePaperSectionParagraph(target.sectionTitle, target.originalText, replacement, {
+    paragraphIndex: target.paragraphIndex,
+    previousText: previousText && previousText !== replacement ? previousText : '',
+  });
   if (!outcome.ok) {
     setState('datachart', outcome.message || '回填失败', 'error');
     return;
   }
+  const refTitle = applyDataChartReferenceResult(state.dataChartResult);
+  const afterSnapshot = dataChartHistoryStateSnapshot();
+  addHistoryRecord('datachart', '图表回填前', {
+    title: `图表回填前：${outcome.title}`,
+    input: beforeSnapshot.output,
+    output: beforeSnapshot.output,
+    ...beforeSnapshot,
+  });
+  addHistoryRecord('datachart', '图表回填后', {
+    title: `图表回填后：${outcome.title}`,
+    input: beforeSnapshot.output,
+    output: afterSnapshot.output || replacement,
+    ...afterSnapshot,
+  });
   loadPaperSection(outcome.title);
   renderPaperSections();
   const refHint = refTitle ? `，并更新 ${refTitle}` : '';
@@ -3687,13 +3918,26 @@ async function requestPaperRun(payload, options = {}) {
 }
 
 async function runPaperAbstract(payload) {
-  const cn = await requestPaperRun({ ...payload, language: '中文' });
-  const output = cn?.result ? `# 中文摘要\n${cn.result}` : '';
+  const bilingual = await requestPaperRun({ ...payload, language: '中英文' });
+  let output = String(bilingual?.result || '').trim();
+  if (!output) throw new Error('摘要生成结果为空');
+  let sections = splitGeneratedAbstractSections(output);
+  if (!sections.hasMarkers) output = `# 中文摘要\n${output}`;
+  sections = splitGeneratedAbstractSections(output);
+  if (!sections.cn) {
+    const cn = await requestPaperRun({ ...payload, language: '中文' });
+    if (cn?.result) output = `# 中文摘要\n${cn.result}\n\n${output}`;
+  }
+  sections = splitGeneratedAbstractSections(output);
+  if (!sections.en) {
+    const en = await requestPaperRun({ ...payload, language: '英文' });
+    if (en?.result) output = `${output}\n\n# 英文摘要\n${en.result}`;
+  }
   if (!output) throw new Error('摘要生成结果为空');
   writeAbstractResultToSections(output);
   syncPaperOutlineFromSections();
   loadPaperSection(findPaperSectionByKind('cn_abstract') || '中文摘要');
-  state.lastAnalysis = cn?.analysis || null;
+  state.lastAnalysis = bilingual?.analysis || null;
   return { result: output, analysis: state.lastAnalysis, failed: '' };
 }
 
@@ -4185,6 +4429,8 @@ function restoreSelectedHistory() {
   state.paperEditorSection = record.paperEditorSection || state.selectedPaperSection || '';
   state.paperSectionContents = record.paperSectionContents || {};
   state.paperSectionContentSources = record.paperSectionContentSources || {};
+  state.paperReferenceSnapshot = record.paperReferenceSnapshot || '';
+  state.paperPushTargets = record.paperPushTargets || {};
   state.lastAnalysis = record.analysis || null;
   state.paperTemplate = record.paperTemplate || null;
   state.dataChartTargets = Array.isArray(record.dataChartTargets) ? record.dataChartTargets : [];
@@ -4240,8 +4486,8 @@ function bindActions() {
     uploadPaperTemplateFile(event.target.files?.[0]);
   });
   $('#clearPaperTemplate')?.addEventListener('click', clearPaperTemplate);
-  $('#refreshOutlineSections').addEventListener('click', () => refreshPaperSections(true));
-  $('#paperOutline').addEventListener('input', () => refreshPaperSections(false));
+  bindRequiredAction('#refreshOutlineSections', 'click', () => refreshPaperSections(true));
+  bindRequiredAction('#paperOutline', 'input', () => refreshPaperSections(false));
   $('#paperSectionJump')?.addEventListener('change', (event) => {
     const title = event.target.value;
     if (title) selectPaperSection(title);
@@ -4252,7 +4498,7 @@ function bindActions() {
   });
   $('#paperPushButton')?.addEventListener('click', pushPaperSelectionToWorkspace);
   $('#correctionAutoFixButton')?.addEventListener('click', handleSelectedCorrectionAutoFix);
-  $('#sectionTitle').addEventListener('input', () => {
+  bindRequiredAction('#sectionTitle', 'input', () => {
     const title = textValue('#sectionTitle');
     if (title) {
       state.selectedPaperSection = title;
@@ -4260,7 +4506,7 @@ function bindActions() {
     renderPaperSections();
     saveDraft();
   });
-  $('#paperContext').addEventListener('input', () => {
+  bindRequiredAction('#paperContext', 'input', () => {
     storeCurrentPaperEditor({ markUser: true });
     saveDraft();
   });
@@ -4296,11 +4542,11 @@ function bindActions() {
   $$('[data-backfill-panel]').forEach((button) => button.addEventListener('click', () => {
     backfillProcessedPanel(button.dataset.backfillPanel);
   }));
-  $('#refreshStatus').addEventListener('click', () => loadStatus().catch((error) => {
+  bindRequiredAction('#refreshStatus', 'click', () => loadStatus().catch((error) => {
     if ($('#modelStatus')) $('#modelStatus').textContent = error.message;
   }));
-  $('#refreshConfig').addEventListener('click', () => loadStatus().catch((error) => { $('#providerList').textContent = error.message; }));
-  $('#configProviderType').addEventListener('change', () => {
+  bindRequiredAction('#refreshConfig', 'click', () => loadStatus().catch((error) => { if ($('#providerList')) $('#providerList').textContent = error.message; }));
+  bindRequiredAction('#configProviderType', 'change', () => {
     state.editingApiId = '';
     $('#configName').value = '';
     $('#configBaseUrl').value = '';
@@ -4308,12 +4554,12 @@ function bindActions() {
     $('#configModelDisplayName').value = '';
     applyPresetToForm();
   });
-  $('#newConfigApi').addEventListener('click', () => {
+  bindRequiredAction('#newConfigApi', 'click', () => {
     fillConfigForm(null);
     applyPresetToForm();
     setState('config', '待保存');
   });
-  $('#saveConfigApi').addEventListener('click', async () => {
+  bindRequiredAction('#saveConfigApi', 'click', async () => {
     setState('config', '正在保存...', 'running');
     try {
       const data = await requestJson('/api/config/save', {
@@ -4331,7 +4577,7 @@ function bindActions() {
       $('#configMessage').textContent = error.message;
     }
   });
-  $('#fetchConfigModels').addEventListener('click', async () => {
+  bindRequiredAction('#fetchConfigModels', 'click', async () => {
     setState('config', '正在获取模型...', 'running');
     try {
       const data = await requestJson('/api/config/models', {
@@ -4350,14 +4596,14 @@ function bindActions() {
       $('#configMessage').textContent = error.message;
     }
   });
-  $('#refreshHistory').addEventListener('click', renderHistory);
-  $('#restoreHistory').addEventListener('click', restoreSelectedHistory);
-  $('#clearHistory').addEventListener('click', clearHistoryRecords);
-  $('#themeToggle').addEventListener('click', () => {
+  bindRequiredAction('#refreshHistory', 'click', renderHistory);
+  bindRequiredAction('#restoreHistory', 'click', restoreSelectedHistory);
+  bindRequiredAction('#clearHistory', 'click', clearHistoryRecords);
+  bindRequiredAction('#themeToggle', 'click', () => {
     const root = document.documentElement;
     const next = root.dataset.theme === 'dark' ? 'light' : 'dark';
     root.dataset.theme = next;
-    localStorage.setItem('paperlab-web-theme', next);
+    storageSet(THEME_STORAGE_KEY, next);
   });
   window.addEventListener('hashchange', routeFromHash);
 }
@@ -4376,17 +4622,27 @@ function clearPanel(scope) {
 }
 
 function restoreTheme() {
-  const saved = localStorage.getItem('paperlab-web-theme');
+  const saved = storageGet(THEME_STORAGE_KEY) || storageGet(LEGACY_STORAGE_KEYS.theme);
   document.documentElement.dataset.theme = saved === 'dark' ? 'dark' : 'light';
 }
 
-restoreTheme();
-bindActions();
-restoreDraft();
-setDataChartTableText(textValue('#dataChartDataTable'));
-syncWordLimitControls();
-routeFromHash();
-renderHistory();
+function safeStartupStep(label, callback) {
+  try {
+    return callback();
+  } catch (error) {
+    console.error(`${label}失败`, error);
+    return null;
+  }
+}
+
+safeStartupStep('本地数据迁移', migrateLegacyStorage);
+safeStartupStep('主题恢复', restoreTheme);
+safeStartupStep('事件绑定', bindActions);
+safeStartupStep('草稿恢复', restoreDraft);
+safeStartupStep('数据表恢复', () => setDataChartTableText(textValue('#dataChartDataTable')));
+safeStartupStep('字数设置恢复', syncWordLimitControls);
+safeStartupStep('页面路由恢复', routeFromHash);
+safeStartupStep('历史记录恢复', renderHistory);
 loadStatus().catch((error) => {
   if ($('#modelStatus')) $('#modelStatus').textContent = error.message;
   renderProviders(null);
@@ -4533,7 +4789,7 @@ function initRichTextEditor() {
   });
 }
 
-initRichTextEditor();
+safeStartupStep('富文本编辑器初始化', initRichTextEditor);
 loadConfig().catch((error) => {
   if ($('#providerList')) $('#providerList').textContent = error.message;
 });

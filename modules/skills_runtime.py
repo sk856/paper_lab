@@ -857,7 +857,7 @@ class OpenSkillsAdapterSkill:
         raise SkillValidationError(f'入口模块不存在：{module_name}')
 
     def _build_module_spec(self, skill_id, entry_file, module_name):
-        module_key = f'paperlab_skill_{str(skill_id).replace(".", "_").replace("-", "_")}_{module_name.replace(".", "_")}'
+        module_key = f'thesisworkshop_skill_{str(skill_id).replace(".", "_").replace("-", "_")}_{module_name.replace(".", "_")}'
         if os.path.basename(entry_file) == '__init__.py':
             return importlib.util.spec_from_file_location(
                 module_key,
@@ -1427,7 +1427,7 @@ class OpenSkillsAdapterSkill:
         try:
             zip_path = os.path.join(temp_dir, 'skill.zip')
             request = urllib.request.Request(download_url, method='GET')
-            request.add_header('User-Agent', f'PaperLab/{APP_VERSION}')
+            request.add_header('User-Agent', f'ThesisWorkshop/{APP_VERSION}')
             with urllib.request.urlopen(request, timeout=30) as response, open(zip_path, 'wb') as handle:
                 shutil.copyfileobj(response, handle)
             return self.install_skill_from_zip(zip_path)

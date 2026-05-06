@@ -146,6 +146,7 @@ class PaperWriter:
 
     def write_abstract(self, full_text, language='中文'):
         """生成摘要。"""
+        language = str(language or '中文').strip()
         system, prompt = self._render_scene(
             'paper_write.abstract',
             {
@@ -153,6 +154,23 @@ class PaperWriter:
                 'language': language,
             },
         )
+        if language in {'中英文', '中文+英文', '中英双语', '双语', 'bilingual', 'Bilingual'}:
+            prompt = (
+                f'{prompt}\n\n'
+                '【双语摘要强制要求】\n'
+                '本次必须同时输出中文摘要和英文摘要，且英文摘要不得省略。\n'
+                '严格使用以下四个块，顺序不可改变：\n'
+                '【摘要】<中文摘要正文，200-300字>\n'
+                '【关键词】词1；词2；词3；词4；词5\n'
+                '[Abstract] <English abstract, 150-250 words>\n'
+                '[Keywords] keyword1; keyword2; keyword3; keyword4; keyword5\n'
+            )
+        elif language in {'英文', 'English', 'english', 'en'}:
+            prompt = (
+                f'{prompt}\n\n'
+                '【英文摘要强制要求】\n'
+                '本次只输出英文摘要和英文关键词，严格使用 [Abstract] 与 [Keywords] 两个块，不要输出中文。'
+            )
         return self.api.call_sync(
             prompt,
             system,

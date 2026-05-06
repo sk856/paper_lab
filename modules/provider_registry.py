@@ -208,7 +208,7 @@ _PRESET_DEFINITIONS = (
         'extra_headers_hint': (
             '填写 JSON 对象，为 OpenAI 兼容请求追加自定义请求头。'
             'OpenRouter 常见字段包括 HTTP-Referer、X-Title。'
-            '示例：{"HTTP-Referer": "https://your-app.example", "X-Title": "纸研社"}'
+            '示例：{"HTTP-Referer": "https://your-app.example", "X-Title": "论文工坊"}'
         ),
         'credential_hint': '',
     },

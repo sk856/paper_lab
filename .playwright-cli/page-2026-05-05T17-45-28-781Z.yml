@@ -1,0 +1,109 @@
+- generic [ref=e2]:
+  - banner [ref=e3]:
+    - link "Local Paper Studio 纸研社" [ref=e4] [cursor=pointer]:
+      - /url: "#/paper"
+      - generic [ref=e5]: Local Paper Studio
+      - generic [ref=e6]: 纸研社
+    - navigation [ref=e7]:
+      - button "刷新模型" [ref=e8] [cursor=pointer]
+      - button "主题" [ref=e9] [cursor=pointer]
+  - complementary "Web 功能导航" [ref=e10]:
+    - button "论文写作 大纲、章节与编辑器" [ref=e11] [cursor=pointer]:
+      - img [ref=e13]
+      - generic [ref=e16]:
+        - strong [ref=e17]: 论文写作
+        - generic [ref=e18]: 大纲、章节与编辑器
+    - button "数据图表 全文定位、搜数与回填" [ref=e19] [cursor=pointer]:
+      - img [ref=e21]
+      - generic [ref=e23]:
+        - strong [ref=e24]: 数据图表
+        - generic [ref=e25]: 全文定位、搜数与回填
+    - button "降 AI 检测 去痕、核验与差异" [ref=e26] [cursor=pointer]:
+      - img [ref=e28]
+      - generic [ref=e31]:
+        - strong [ref=e32]: 降 AI 检测
+        - generic [ref=e33]: 去痕、核验与差异
+    - button "降查重率 重复源、降重与复核" [ref=e34] [cursor=pointer]:
+      - img [ref=e36]
+      - generic [ref=e39]:
+        - strong [ref=e40]: 降查重率
+        - generic [ref=e41]: 重复源、降重与复核
+    - button "学术润色 任务设置与结果预览" [ref=e42] [cursor=pointer]:
+      - img [ref=e44]
+      - generic [ref=e46]:
+        - strong [ref=e47]: 学术润色
+        - generic [ref=e48]: 任务设置与结果预览
+    - button "智能纠错 统计、预览与问题列表" [ref=e49] [cursor=pointer]:
+      - img [ref=e51]
+      - generic [ref=e53]:
+        - strong [ref=e54]: 智能纠错
+        - generic [ref=e55]: 统计、预览与问题列表
+    - button "配置管理 模式、接口与后端配置" [ref=e56] [cursor=pointer]:
+      - img [ref=e58]
+      - generic [ref=e61]:
+        - strong [ref=e62]: 配置管理
+        - generic [ref=e63]: 模式、接口与后端配置
+    - button "历史记录 版本、草稿与恢复" [ref=e64] [cursor=pointer]:
+      - img [ref=e66]
+      - generic [ref=e70]:
+        - strong [ref=e71]: 历史记录
+        - generic [ref=e72]: 版本、草稿与恢复
+  - main [ref=e73]:
+    - text: 这里对应桌面端右侧正文编辑区，可放已有章节上下文、全文正文或参考文献。生成结果也会直接写回这里。
+    - generic [ref=e74]:
+      - generic [ref=e75]:
+        - paragraph [ref=e76]: AI Reduce
+        - heading "AI 痕迹消除" [level=1] [ref=e77]
+        - paragraph [ref=e78]: 对应桌面端降 AI 检测页：模式选择、原文/结果、结果核验与差异预览都在本功能台内完成。
+      - generic [ref=e79]:
+        - generic [ref=e80]:
+          - generic [ref=e81]:
+            - paragraph [ref=e82]: Mode
+            - heading "AI痕迹消除·改写模式" [level=3] [ref=e83]
+          - generic [ref=e84]: 待处理
+        - generic [ref=e85]:
+          - button "轻度去痕 微调词汇与语序，保留原文 90% 核心内容。" [ref=e86] [cursor=pointer]:
+            - strong [ref=e87]: 轻度去痕
+            - generic [ref=e88]: 微调词汇与语序，保留原文 90% 核心内容。
+          - button "深度重构 调整句式结构与段落逻辑，模拟真人写作路径。" [ref=e89] [cursor=pointer]:
+            - strong [ref=e90]: 深度重构
+            - generic [ref=e91]: 调整句式结构与段落逻辑，模拟真人写作路径。
+          - button "学术拟合 对标学科论文写作习惯，优化严谨性。" [ref=e92] [cursor=pointer]:
+            - strong [ref=e93]: 学术拟合
+            - generic [ref=e94]: 对标学科论文写作习惯，优化严谨性。
+        - generic [ref=e95]:
+          - button "开始执行" [ref=e96] [cursor=pointer]
+          - button "提示词" [ref=e97] [cursor=pointer]
+          - button "结果复核" [ref=e98] [cursor=pointer]
+          - button "刷新差异" [ref=e99] [cursor=pointer]
+      - generic [ref=e100]:
+        - generic [ref=e101]:
+          - generic [ref=e102]:
+            - generic [ref=e103]:
+              - paragraph [ref=e104]: Input
+              - heading "待处理原文" [level=3] [ref=e105]
+            - button "清空" [ref=e106] [cursor=pointer]
+          - textbox "请粘贴需要消除 AI 痕迹的论文段落/全文。" [ref=e107]
+        - generic [ref=e108]:
+          - generic [ref=e109]:
+            - generic [ref=e110]:
+              - paragraph [ref=e111]: Output
+              - heading "去痕处理结果" [level=3] [ref=e112]
+            - button "回填" [ref=e113] [cursor=pointer]
+          - textbox "处理完成后，结果将显示在此处。" [ref=e114]
+      - generic [ref=e115]:
+        - generic [ref=e116]:
+          - generic [ref=e117]:
+            - generic [ref=e118]:
+              - paragraph [ref=e119]: Review
+              - heading "检测结果摘要" [level=3] [ref=e120]
+            - button "结果复核" [ref=e121] [cursor=pointer]
+          - generic [ref=e122]: 完成去痕效果复核后，此处将展示 AI 生成概率、去痕效果评估与核心问题汇总。
+        - generic [ref=e123]:
+          - generic [ref=e124]:
+            - generic [ref=e125]:
+              - paragraph [ref=e126]: Diff
+              - heading "差异预览" [level=3] [ref=e127]
+            - generic [ref=e128]: 红色为删除，绿色为新增
+          - paragraph [ref=e129]: 点击“刷新差异”，即可查看原文与处理结果的逐句差异对比。
+          - generic [ref=e130]: 差异预览会显示在这里。

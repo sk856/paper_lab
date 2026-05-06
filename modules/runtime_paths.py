@@ -6,7 +6,8 @@ import sys
 from dataclasses import dataclass
 
 
-APP_DATA_DIR_NAME = '\u7eb8\u7814\u793e'
+APP_DATA_DIR_NAME = '\u8bba\u6587\u5de5\u574a'
+LEGACY_APP_DATA_DIR_NAMES = ('\u7eb8\u7814\u793e',)
 DATA_DIR_POINTER_FILE = 'config_dir.json'
 LOGS_DIR_NAME = 'logs'
 TEMP_DIR_NAME = 'temp'
@@ -36,7 +37,14 @@ def _resolve_default_base_data_root():
     if sys.platform == 'win32':
         local_appdata = os.environ.get('LOCALAPPDATA') or os.environ.get('APPDATA')
         if local_appdata:
-            return _normalize_path(os.path.join(local_appdata, APP_DATA_DIR_NAME))
+            current = _normalize_path(os.path.join(local_appdata, APP_DATA_DIR_NAME))
+            if os.path.isdir(current):
+                return current
+            for legacy_name in LEGACY_APP_DATA_DIR_NAMES:
+                legacy = _normalize_path(os.path.join(local_appdata, legacy_name))
+                if os.path.isdir(legacy):
+                    return legacy
+            return current
         return _normalize_path(os.path.join(_resolve_app_root(), 'user_data'))
 
     if not getattr(sys, 'frozen', False):
@@ -45,10 +53,24 @@ def _resolve_default_base_data_root():
     if sys.platform == 'darwin':
         support_dir = os.path.expanduser('~/Library/Application Support')
         if os.path.isdir(support_dir):
-            return _normalize_path(os.path.join(support_dir, APP_DATA_DIR_NAME))
+            current = _normalize_path(os.path.join(support_dir, APP_DATA_DIR_NAME))
+            if os.path.isdir(current):
+                return current
+            for legacy_name in LEGACY_APP_DATA_DIR_NAMES:
+                legacy = _normalize_path(os.path.join(support_dir, legacy_name))
+                if os.path.isdir(legacy):
+                    return legacy
+            return current
 
     xdg_data = os.environ.get('XDG_DATA_HOME') or os.path.expanduser('~/.local/share')
-    return _normalize_path(os.path.join(xdg_data, APP_DATA_DIR_NAME))
+    current = _normalize_path(os.path.join(xdg_data, APP_DATA_DIR_NAME))
+    if os.path.isdir(current):
+        return current
+    for legacy_name in LEGACY_APP_DATA_DIR_NAMES:
+        legacy = _normalize_path(os.path.join(xdg_data, legacy_name))
+        if os.path.isdir(legacy):
+            return legacy
+    return current
 
 
 def _read_data_dir_pointer(base_data_root):
