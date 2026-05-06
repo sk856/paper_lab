@@ -1875,6 +1875,7 @@ AI 建议标题：{(target or {}).get('chartTitle') or (target or {}).get('title
         target = target or {}
         caption = self._build_table_caption(title)
         table_label = self._target_artifact_label(target, 'table')
+        rows = self._sanitize_variable_table_rows(rows, caption, target)
         table_markdown = self._build_table_markdown(rows, caption, unit, table_label=table_label)
         replacement = self._build_table_replacement_text(target, caption, table_markdown, rows=rows, unit=unit, table_label=table_label)
         reference_entries = self._reference_entries_from_rows(rows)
@@ -2231,6 +2232,79 @@ AI 建议标题：{(target or {}).get('chartTitle') or (target or {}).get('title
     def _markdown_table_escape(value):
         return str(value if value is not None else '').replace('|', '\\|').strip()
 
+    @staticmethod
+    def _variable_symbol_from_label(label):
+        text = str(label or '')
+        match = re.search(r'[（(]\s*([A-Za-z][A-Za-z0-9_]{1,18})\s*[）)]', text)
+        return match.group(1) if match else ''
+
+    @staticmethod
+    def _label_without_variable_symbol(label):
+        text = re.sub(r'\s+', '', str(label or '').strip())
+        text = re.sub(r'[（(]\s*[A-Za-z][A-Za-z0-9_]{1,18}\s*[）)]', '', text)
+        return text or str(label or '').strip()
+
+    @classmethod
+    def _looks_like_variable_definition_table(cls, rows, title='', target=None):
+        context = ' '.join(str(part or '') for part in (
+            title,
+            (target or {}).get('tableTitle') if isinstance(target, dict) else '',
+            (target or {}).get('chartTitle') if isinstance(target, dict) else '',
+            (target or {}).get('dataNeed') if isinstance(target, dict) else '',
+            (target or {}).get('intent') if isinstance(target, dict) else '',
+            (target or {}).get('reason') if isinstance(target, dict) else '',
+        ))
+        if re.search(r'描述性统计|相关系数|回归结果|均值|标准差|最大值|最小值', context):
+            return False
+        if re.search(r'控制变量|变量说明|变量定义|变量口径|指标体系|评价指标|测度方法|指标选取|数据来源表|口径表', context):
+            return True
+        rows = rows or []
+        if not rows:
+            return False
+        symbol_count = sum(1 for row in rows if cls._variable_symbol_from_label(row.get('label', '')))
+        note_text = ' '.join(str(row.get('note', '') or '') for row in rows)
+        return symbol_count / max(1, len(rows)) >= 0.45 and bool(re.search(r'测度指标|预期影响方向|变量|口径|单位|可核验', note_text))
+
+    @staticmethod
+    def _compact_table_cell(value, limit=36):
+        text = re.sub(r'\s+', '', str(value or '').strip())
+        text = re.sub(r'https?://\S+', '', text)
+        text = text.strip('，,。.;； ')
+        if len(text) <= limit:
+            return text
+        return text[:limit].rstrip('，,。.;；、') + '…'
+
+    @classmethod
+    def _compact_measure_note(cls, row, limit=42):
+        note = re.sub(r'\s+', '', str(row.get('note', '') or row.get('source', '') or '').strip())
+        if not note:
+            return ''
+        note = re.sub(r'^测度指标[:：]?', '', note)
+        note = re.split(r'统计路径|可核验|数据来源|来源|预期影响方向|预测方向|建议核验|请核验', note, maxsplit=1)[0]
+        note = re.sub(r'单位[:：][^；;。]*[；;。]?', '', note)
+        note = note.strip('，,。.;； ')
+        return cls._compact_table_cell(note, limit)
+
+    @classmethod
+    def _compact_source_for_table(cls, row, limit=32):
+        source = cls._short_source_label(row)
+        if not source:
+            source = str(row.get('sourceName', '') or row.get('publisher', '') or row.get('url', '') or '').strip()
+        source = re.sub(r'统计路径可核验为|可核验为|可核验|数据来源[:：]?', '', source)
+        return cls._compact_table_cell(source, limit)
+
+    @classmethod
+    def _sanitize_variable_table_rows(cls, rows, title='', target=None):
+        if not cls._looks_like_variable_definition_table(rows, title, target):
+            return rows
+        sanitized = []
+        for row in rows or []:
+            item = dict(row)
+            item['value'] = None
+            item['rawValue'] = ''
+            sanitized.append(item)
+        return sanitized
+
     @classmethod
     def _source_note_text(cls, rows):
         sources = []
@@ -2250,21 +2324,33 @@ AI 建议标题：{(target or {}).get('chartTitle') or (target or {}).get('title
     @classmethod
     def _build_table_markdown(cls, rows, title, unit='', table_label='表1'):
         lines = [f'{table_label or "表1"} {title}']
+        variable_table = cls._looks_like_variable_definition_table(rows, title)
         numeric_rows = cls._numeric_rows(rows)
-        source_table = len(numeric_rows) < 2
+        source_table = variable_table or len(numeric_rows) < 2
         if unit and not source_table:
             lines.append(f'（单位：{unit}）')
-        if source_table:
+        if variable_table:
+            lines.extend([
+                '| 指标 | 变量符号 | 测度方法 | 数据来源 |',
+                '| --- | --- | --- | --- |',
+            ])
+            for row in rows or []:
+                label = cls._markdown_table_escape(cls._label_without_variable_symbol(row.get('label', '')))
+                symbol = cls._markdown_table_escape(cls._variable_symbol_from_label(row.get('label', '')))
+                measure = cls._markdown_table_escape(cls._compact_measure_note(row))
+                source = cls._markdown_table_escape(cls._compact_source_for_table(row))
+                lines.append(f'| {label} | {symbol} | {measure} | {source} |')
+        elif source_table:
             lines.extend([
                 '| 指标/变量 | 来源名称 | 发布机构 | 核验路径 | 口径说明 |',
                 '| --- | --- | --- | --- | --- |',
             ])
             for row in rows or []:
                 label = cls._markdown_table_escape(row.get('label', ''))
-                source_name = cls._markdown_table_escape(row.get('sourceName', '') or row.get('source', ''))
-                publisher = cls._markdown_table_escape(row.get('publisher', ''))
-                url = cls._markdown_table_escape(row.get('url', ''))
-                note = cls._markdown_table_escape(row.get('note', ''))
+                source_name = cls._markdown_table_escape(cls._compact_table_cell(row.get('sourceName', '') or row.get('source', ''), 28))
+                publisher = cls._markdown_table_escape(cls._compact_table_cell(row.get('publisher', ''), 18))
+                url = cls._markdown_table_escape(cls._compact_table_cell(row.get('url', ''), 26))
+                note = cls._markdown_table_escape(cls._compact_table_cell(row.get('note', ''), 34))
                 lines.append(f'| {label} | {source_name} | {publisher} | {url} | {note} |')
         else:
             lines.extend([
@@ -2274,7 +2360,7 @@ AI 建议标题：{(target or {}).get('chartTitle') or (target or {}).get('title
             for row in rows or []:
                 label = cls._markdown_table_escape(row.get('label', ''))
                 value = cls._markdown_table_escape(row.get('rawValue', row.get('value', '')))
-                source = cls._markdown_table_escape(row.get('note', '') or cls._short_source_label(row))
+                source = cls._markdown_table_escape(cls._compact_table_cell(row.get('note', '') or cls._short_source_label(row), 34))
                 lines.append(f'| {label} | {value} | {source} |')
         lines.append(f'资料来源：{cls._source_note_text(rows)}')
         return '\n'.join(lines).strip()

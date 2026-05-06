@@ -133,6 +133,7 @@ def _build_docx(payload, sections, project_dir, web_dir):
 def _build_docx_with_pandoc(payload, sections, project_dir, web_dir, pandoc):
     with tempfile.TemporaryDirectory(prefix='paper_export_') as temp_dir:
         markdown = _build_markdown(payload, sections)
+        markdown = _normalize_export_markdown_blocks(markdown)
         markdown = _normalize_math_for_pandoc(markdown)
         markdown = _localize_markdown_images(markdown, temp_dir, project_dir, web_dir)
         input_path = os.path.join(temp_dir, 'paper.md')
@@ -160,6 +161,7 @@ def _build_docx_with_pandoc(payload, sections, project_dir, web_dir, pandoc):
             stderr=subprocess.DEVNULL,
             timeout=60,
         )
+        _polish_docx_tables(output_path)
         with open(output_path, 'rb') as handle:
             return handle.read()
 
@@ -235,7 +237,7 @@ def _configure_docx_styles(document, qn, Pt):
 
 
 def _add_markdown_content(document, content, kind, project_dir, web_dir, qn, Inches, Pt, WD_ALIGN_PARAGRAPH):
-    lines = _normalize_newlines(content).split('\n')
+    lines = _normalize_export_markdown_blocks(content).split('\n')
     index = 0
     is_reference = kind == 'reference'
     while index < len(lines):
@@ -257,10 +259,15 @@ def _add_markdown_content(document, content, kind, project_dir, web_dir, qn, Inc
             index += 1
             continue
 
-        table_rows = _collect_markdown_table(lines, index)
-        if table_rows:
+        table_block = _collect_markdown_table(lines, index)
+        if table_block:
+            caption_lines, table_rows, note_lines, consumed = table_block
+            if caption_lines:
+                _add_docx_text_block(document, caption_lines, False, qn, Pt, WD_ALIGN_PARAGRAPH)
             _add_docx_table(document, table_rows, qn, Pt)
-            index += len(table_rows) + 1
+            if note_lines:
+                _add_docx_text_block(document, note_lines, False, qn, Pt, WD_ALIGN_PARAGRAPH)
+            index += consumed
             continue
 
         heading = re.match(r'^\s*(#{1,6})\s+(.+?)\s*$', line)
@@ -393,19 +400,132 @@ def _mathtext_expression(formula):
     return f'${text}$'
 
 
+def _normalize_export_markdown_blocks(content):
+    flattened_lines = []
+    for line in _normalize_newlines(content).split('\n'):
+        flattened_lines.extend(_normalize_flat_pipe_table_line(line))
+    return '\n'.join(_separate_markdown_tables(flattened_lines))
+
+
+def _separate_markdown_tables(lines):
+    output = []
+    index = 0
+    while index < len(lines):
+        line = lines[index]
+        if index + 1 < len(lines) and '|' in line and TABLE_SEPARATOR_RE.match(lines[index + 1]):
+            if output and output[-1].strip():
+                output.append('')
+            while index < len(lines) and lines[index].strip() and (
+                '|' in lines[index] or TABLE_SEPARATOR_RE.match(lines[index])
+            ):
+                output.append(lines[index])
+                index += 1
+            if index < len(lines) and lines[index].strip():
+                output.append('')
+            continue
+        output.append(line)
+        index += 1
+    return output
+
+
+def _normalize_flat_pipe_table_line(line):
+    text = str(line or '').rstrip()
+    if '|' not in text:
+        return [text]
+    separator_match = re.search(r'\|\s*:?-{3,}:?\s*(?:\|\s*:?-{3,}:?\s*)+\|', text)
+    if not separator_match:
+        return [text]
+    separator = separator_match.group(0).strip()
+    column_count = len(_split_table_row(separator))
+    if column_count < 2:
+        return [text]
+
+    before = text[:separator_match.start()].rstrip()
+    pipe_positions = [match.start() for match in re.finditer(r'\|', before)]
+    if len(pipe_positions) < column_count + 1:
+        return [text]
+    header_start = pipe_positions[-(column_count + 1)]
+    prefix = before[:header_start].strip()
+    header = before[header_start:].strip()
+    if not header.startswith('|'):
+        return [text]
+
+    output = []
+    if prefix:
+        caption_match = re.search(r'((?:图|表)\s*\d+(?:\.\d+)?[^\n|]*)$', prefix)
+        if caption_match:
+            preface = prefix[:caption_match.start()].strip()
+            caption = caption_match.group(1).strip()
+            if preface:
+                output.append(preface)
+            output.append(caption)
+        else:
+            output.append(prefix)
+    output.extend([header, separator])
+
+    cursor = separator_match.end()
+    while cursor < len(text):
+        while cursor < len(text) and text[cursor].isspace():
+            cursor += 1
+        if cursor >= len(text):
+            break
+        if text[cursor] != '|':
+            tail = text[cursor:].strip()
+            if tail:
+                output.append(tail)
+            break
+        pipe_count = 0
+        end = cursor
+        while end < len(text):
+            if text[end] == '|':
+                pipe_count += 1
+                if pipe_count == column_count + 1:
+                    end += 1
+                    break
+            end += 1
+        if pipe_count < column_count + 1:
+            tail = text[cursor:].strip()
+            if tail:
+                output.append(tail)
+            break
+        output.append(text[cursor:end].strip())
+        cursor = end
+
+    return output or [text]
+
+
 def _collect_markdown_table(lines, index):
     if index + 1 >= len(lines):
-        return []
-    header = lines[index]
-    separator = lines[index + 1]
+        return None
+    caption_lines = []
+    start = index
+    for offset in range(0, 3):
+        cursor = index + offset
+        if cursor + 1 >= len(lines):
+            break
+        header = lines[cursor]
+        separator = lines[cursor + 1]
+        if '|' in header and TABLE_SEPARATOR_RE.match(separator):
+            start = cursor
+            caption_lines = [line.strip() for line in lines[index:start] if line.strip()]
+            break
+    else:
+        return None
+
+    header = lines[start]
+    separator = lines[start + 1]
     if '|' not in header or not TABLE_SEPARATOR_RE.match(separator):
-        return []
+        return None
     rows = [_split_table_row(header)]
-    cursor = index + 2
+    cursor = start + 2
     while cursor < len(lines) and '|' in lines[cursor] and lines[cursor].strip():
         rows.append(_split_table_row(lines[cursor]))
         cursor += 1
-    return rows
+    note_lines = []
+    while cursor < len(lines) and lines[cursor].strip() and re.match(r'^\s*(?:资料来源|注[:：]|备注[:：])', lines[cursor].strip()):
+        note_lines.append(lines[cursor].strip())
+        cursor += 1
+    return caption_lines, rows, note_lines, cursor - index
 
 
 def _split_table_row(line):
@@ -418,21 +538,154 @@ def _add_docx_table(document, rows, qn, Pt):
         return
     width = max(len(row) for row in rows)
     table = document.add_table(rows=len(rows), cols=width)
-    table.style = 'Table Grid'
-    try:
-        table.autofit = True
-    except Exception:
-        pass
+    _style_docx_table(table, qn, Pt)
     for row_index, row in enumerate(rows):
         for col_index in range(width):
             cell = table.cell(row_index, col_index)
             cell.text = row[col_index] if col_index < len(row) else ''
             for paragraph in cell.paragraphs:
+                paragraph.paragraph_format.space_before = Pt(0)
+                paragraph.paragraph_format.space_after = Pt(0)
+                paragraph.paragraph_format.line_spacing = 1.0
                 for run in paragraph.runs:
                     _set_run_font(run, qn)
                     run.font.size = Pt(10.5)
                     if row_index == 0:
                         run.bold = True
+
+
+def _polish_docx_tables(path):
+    try:
+        from docx import Document
+        from docx.oxml.ns import qn
+        from docx.shared import Pt
+    except Exception:
+        return
+    try:
+        document = Document(path)
+    except Exception:
+        return
+    changed = False
+    for table in document.tables:
+        _style_docx_table(table, qn, Pt)
+        for row_index, row in enumerate(table.rows):
+            for cell in row.cells:
+                for paragraph in cell.paragraphs:
+                    paragraph.paragraph_format.space_before = Pt(0)
+                    paragraph.paragraph_format.space_after = Pt(0)
+                    paragraph.paragraph_format.line_spacing = 1.0
+                    for run in paragraph.runs:
+                        _set_run_font(run, qn)
+                        run.font.size = Pt(10.5)
+                        if row_index == 0:
+                            run.bold = True
+        changed = True
+    if changed:
+        document.save(path)
+
+
+def _style_docx_table(table, qn, Pt):
+    try:
+        from docx.enum.table import WD_CELL_VERTICAL_ALIGNMENT, WD_TABLE_ALIGNMENT
+        from docx.oxml import OxmlElement
+    except Exception:
+        WD_CELL_VERTICAL_ALIGNMENT = None
+        WD_TABLE_ALIGNMENT = None
+        OxmlElement = None
+    try:
+        table.style = 'Table Grid'
+    except Exception:
+        pass
+    try:
+        table.alignment = WD_TABLE_ALIGNMENT.CENTER
+    except Exception:
+            pass
+    try:
+        table.autofit = False
+        table.allow_autofit = False
+    except Exception:
+        pass
+    _set_table_layout(table, qn, OxmlElement)
+    column_count = max((len(row.cells) for row in table.rows), default=1)
+    cell_width = max(900, int(8640 / max(1, column_count)))
+    for row in table.rows:
+        for cell in row.cells:
+            if WD_CELL_VERTICAL_ALIGNMENT is not None:
+                try:
+                    cell.vertical_alignment = WD_CELL_VERTICAL_ALIGNMENT.CENTER
+                except Exception:
+                    pass
+            _set_cell_width(cell, qn, OxmlElement, cell_width)
+            _set_cell_margins(cell, qn, OxmlElement, top=60, bottom=60, left=90, right=90)
+
+
+def _set_table_layout(table, qn, OxmlElement, width=8640):
+    if OxmlElement is None:
+        return
+    tbl_pr = table._tbl.tblPr
+    if tbl_pr is None:
+        tbl_pr = OxmlElement('w:tblPr')
+        table._tbl.insert(0, tbl_pr)
+    tbl_w = tbl_pr.find(qn('w:tblW'))
+    if tbl_w is None:
+        tbl_w = OxmlElement('w:tblW')
+        tbl_pr.append(tbl_w)
+    tbl_w.set(qn('w:w'), str(width))
+    tbl_w.set(qn('w:type'), 'dxa')
+
+    tbl_layout = tbl_pr.find(qn('w:tblLayout'))
+    if tbl_layout is None:
+        tbl_layout = OxmlElement('w:tblLayout')
+        tbl_pr.append(tbl_layout)
+    tbl_layout.set(qn('w:type'), 'fixed')
+
+    borders = tbl_pr.find(qn('w:tblBorders'))
+    if borders is None:
+        borders = OxmlElement('w:tblBorders')
+        tbl_pr.append(borders)
+    for border_name in ('top', 'left', 'bottom', 'right', 'insideH', 'insideV'):
+        node = borders.find(qn(f'w:{border_name}'))
+        if node is None:
+            node = OxmlElement(f'w:{border_name}')
+            borders.append(node)
+        node.set(qn('w:val'), 'single')
+        node.set(qn('w:sz'), '4')
+        node.set(qn('w:space'), '0')
+        node.set(qn('w:color'), 'auto')
+
+
+def _set_cell_width(cell, qn, OxmlElement, width):
+    if OxmlElement is None:
+        return
+    tc_pr = cell._tc.get_or_add_tcPr()
+    tc_w = tc_pr.find(qn('w:tcW'))
+    if tc_w is None:
+        tc_w = OxmlElement('w:tcW')
+        tc_pr.append(tc_w)
+    tc_w.set(qn('w:w'), str(width))
+    tc_w.set(qn('w:type'), 'dxa')
+
+
+def _set_cell_margins(cell, qn, OxmlElement, top=60, bottom=60, left=90, right=90):
+    if OxmlElement is None:
+        return
+    tc_pr = cell._tc.get_or_add_tcPr()
+    tc_mar = tc_pr.first_child_found_in('w:tcMar')
+    if tc_mar is None:
+        tc_mar = OxmlElement('w:tcMar')
+        tc_pr.append(tc_mar)
+    for margin_name, value in {
+        'top': top,
+        'bottom': bottom,
+        'left': left,
+        'right': right,
+    }.items():
+        node = tc_mar.find(qn(f'w:{margin_name}'))
+        if node is None:
+            node = OxmlElement(f'w:{margin_name}')
+            tc_mar.append(node)
+        node.set(qn('w:w'), str(value))
+        node.set(qn('w:type'), 'dxa')
 
 
 def _add_docx_image(document, src, alt, project_dir, web_dir, Inches, WD_ALIGN_PARAGRAPH):

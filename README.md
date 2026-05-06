@@ -245,6 +245,14 @@ GitHub Actions 会在推送 `v*` 标签或手动触发时执行跨平台构建�
 
 本项目参考并基于 [Abnerla/AI_Paper](https://github.com/Abnerla/AI_Paper) 的相关思路与工程基础进行开发，在此表示感谢。
 
+## 支持作者
+
+如果论文工坊对你的学术写作有所帮助，可以支持一下作者。
+
+<div align="center">
+  <img src="png/sponsor-alipay.jpg" alt="支付宝赞助码" width="320">
+</div>
+
 ## 许可证
 
 本项目使用 Apache License 2.0，详见 [LICENSE](LICENSE)。
