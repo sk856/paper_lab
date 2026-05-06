@@ -617,6 +617,7 @@ def _style_docx_table(table, qn, Pt):
                     pass
             _set_cell_width(cell, qn, OxmlElement, cell_width)
             _set_cell_margins(cell, qn, OxmlElement, top=60, bottom=60, left=90, right=90)
+    _apply_three_line_table_borders(table, qn, OxmlElement)
 
 
 def _set_table_layout(table, qn, OxmlElement, width=8640):
@@ -643,15 +644,45 @@ def _set_table_layout(table, qn, OxmlElement, width=8640):
     if borders is None:
         borders = OxmlElement('w:tblBorders')
         tbl_pr.append(borders)
-    for border_name in ('top', 'left', 'bottom', 'right', 'insideH', 'insideV'):
-        node = borders.find(qn(f'w:{border_name}'))
-        if node is None:
-            node = OxmlElement(f'w:{border_name}')
-            borders.append(node)
-        node.set(qn('w:val'), 'single')
-        node.set(qn('w:sz'), '4')
-        node.set(qn('w:space'), '0')
-        node.set(qn('w:color'), 'auto')
+    for border_name in ('top', 'bottom'):
+        _set_border_node(borders, border_name, qn, OxmlElement, val='single', size='12')
+    for border_name in ('left', 'right', 'insideV'):
+        _set_border_node(borders, border_name, qn, OxmlElement, val='nil', size='0')
+    _set_border_node(borders, 'insideH', qn, OxmlElement, val='single', size='4', color='D9D9D9')
+
+
+def _set_border_node(parent, border_name, qn, OxmlElement, *, val='single', size='4', color='auto'):
+    if OxmlElement is None:
+        return
+    node = parent.find(qn(f'w:{border_name}'))
+    if node is None:
+        node = OxmlElement(f'w:{border_name}')
+        parent.append(node)
+    node.set(qn('w:val'), val)
+    node.set(qn('w:sz'), str(size))
+    node.set(qn('w:space'), '0')
+    node.set(qn('w:color'), color)
+
+
+def _apply_three_line_table_borders(table, qn, OxmlElement):
+    if OxmlElement is None or not getattr(table, 'rows', None):
+        return
+    for row_index, row in enumerate(table.rows):
+        for cell in row.cells:
+            tc_pr = cell._tc.get_or_add_tcPr()
+            borders = tc_pr.find(qn('w:tcBorders'))
+            if borders is None:
+                borders = OxmlElement('w:tcBorders')
+                tc_pr.append(borders)
+            _set_border_node(borders, 'left', qn, OxmlElement, val='nil', size='0')
+            _set_border_node(borders, 'right', qn, OxmlElement, val='nil', size='0')
+            _set_border_node(borders, 'top', qn, OxmlElement, val='single', size='4', color='D9D9D9')
+            _set_border_node(borders, 'bottom', qn, OxmlElement, val='single', size='4', color='D9D9D9')
+            if row_index == 0:
+                _set_border_node(borders, 'top', qn, OxmlElement, val='single', size='12')
+                _set_border_node(borders, 'bottom', qn, OxmlElement, val='single', size='8')
+            if row_index == len(table.rows) - 1:
+                _set_border_node(borders, 'bottom', qn, OxmlElement, val='single', size='12')
 
 
 def _set_cell_width(cell, qn, OxmlElement, width):

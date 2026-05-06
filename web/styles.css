@@ -86,7 +86,35 @@ svg { width: 22px; height: 22px; fill: none; stroke: currentColor; stroke-width:
   background: color-mix(in srgb, var(--surface) 88%, transparent);
   backdrop-filter: blur(14px);
 }
+.header-brand-group {
+  display: flex;
+  align-items: center;
+  gap: 1rem;
+}
 .brand-mark { display: inline-flex; flex-direction: column; gap: 0.14rem; }
+.github-link {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.42rem;
+  min-height: 34px;
+  padding: 0.42rem 0.78rem;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  color: var(--text);
+  background: var(--surface-soft);
+  font-weight: 700;
+  transition: border-color 180ms ease, background 180ms ease, box-shadow 180ms ease;
+}
+.github-link svg {
+  width: 18px;
+  height: 18px;
+  fill: currentColor;
+  stroke: none;
+}
+.github-link:hover {
+  border-color: var(--accent);
+  background: var(--accent-soft);
+}
 .brand-kicker, .eyebrow {
   margin: 0;
   text-transform: uppercase;
@@ -1075,8 +1103,8 @@ svg { width: 22px; height: 22px; fill: none; stroke: currentColor; stroke-width:
 .data-chart-table-header,
 .data-chart-table-row {
   display: grid;
-  grid-template-columns: minmax(130px, 1fr) minmax(90px, 0.62fr) minmax(150px, 1fr) minmax(130px, 0.9fr) minmax(150px, 1fr) minmax(120px, 0.9fr) 74px;
-  min-width: 950px;
+  grid-template-columns: var(--data-chart-table-columns, minmax(130px, 1fr) minmax(90px, 0.62fr) minmax(150px, 1fr) minmax(130px, 0.9fr) minmax(150px, 1fr) minmax(120px, 0.9fr) 74px);
+  min-width: var(--data-chart-table-min-width, 950px);
 }
 .data-chart-table-header {
   position: sticky;
@@ -1561,6 +1589,10 @@ svg { width: 22px; height: 22px; fill: none; stroke: currentColor; stroke-width:
   }
   .brand-mark {
     gap: 0.08rem;
+  }
+  .header-brand-group {
+    justify-content: space-between;
+    gap: 0.75rem;
   }
   .brand-name {
     font-size: 1.18rem;

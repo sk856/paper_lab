@@ -2752,9 +2752,37 @@ function defaultDataChartTitle(target = currentDataChartTarget()) {
 function dataChartDefaultArtifactLabel(target, kind = dataChartArtifactType(target)) {
   const prefix = kind === 'table' ? '表' : '图';
   const explicit = String((kind === 'table' ? target?.tableLabel : target?.figureLabel) || target?.artifactLabel || '').trim();
-  if (explicit) return explicit;
-  const match = String(target?.sectionTitle || '').trim().match(/^(\d+)(?:\.\d+)*/);
-  return match ? `${prefix}${match[1]}.1` : `${prefix}1`;
+  const sectionNumber = dataChartSectionNumber(target?.sectionTitle) || '1';
+  const explicitMatch = explicit.match(new RegExp(`^${prefix}\\s*(\\d+)(?:\\.(\\d+))?$`));
+  if (explicit && explicitMatch && explicitMatch[1] === sectionNumber && explicitMatch[2]) return explicit.replace(/\s+/g, '');
+  return `${prefix}${sectionNumber}.1`;
+}
+
+function chineseNumberToInt(value) {
+  const text = String(value || '').replace(/\s+/g, '');
+  if (!text) return null;
+  if (/^\d+$/.test(text)) return Number(text);
+  const digits = { 零: 0, '〇': 0, 一: 1, 二: 2, 两: 2, 三: 3, 四: 4, 五: 5, 六: 6, 七: 7, 八: 8, 九: 9 };
+  const units = { 十: 10, 百: 100, 千: 1000 };
+  let total = 0;
+  let current = 0;
+  for (const char of text) {
+    if (digits[char] !== undefined) current = digits[char];
+    else if (units[char]) {
+      total += (current || 1) * units[char];
+      current = 0;
+    } else return null;
+  }
+  return total + current || null;
+}
+
+function dataChartSectionNumber(sectionTitle = '') {
+  const text = String(sectionTitle || '').replace(/\s+/g, '');
+  let match = text.match(/^(?:第)?(\d+)(?:[章节篇部分]|[、.．])?/);
+  if (match) return String(Number(match[1]));
+  match = text.match(/^第([一二两三四五六七八九十百千〇零]+)[章节篇部分]/) || text.match(/^([一二两三四五六七八九十百千〇零]+)[、.．]/);
+  const value = match ? chineseNumberToInt(match[1]) : null;
+  return value ? String(value) : '';
 }
 
 function renderDataChartTargets() {
@@ -2832,7 +2860,8 @@ function normalizeDataChartFigureCaption(caption, citation = '') {
   if (!text) return '';
   const withoutCitation = text.replace(/\s*\[[\d,\-\s]+\]\s*$/g, '').trim();
   const prefixMatch = withoutCitation.match(/^((?:图|表)\s*\d+(?:\.\d+)?|Figure\s*\d+)\s*(.+)$/i);
-  const prefix = prefixMatch ? prefixMatch[1].replace(/\s+/g, ' ') : '图1';
+  const fallbackKind = dataChartArtifactType(state.dataChartResult) === 'table' ? 'table' : 'figure';
+  const prefix = prefixMatch ? prefixMatch[1].replace(/\s+/g, ' ') : dataChartDefaultArtifactLabel(currentDataChartTarget(), fallbackKind);
   const isTable = /^表/i.test(prefix);
   let title = prefixMatch ? prefixMatch[2] : withoutCitation;
   title = title
@@ -2879,9 +2908,10 @@ function dataChartComposedBackfillText(result = state.dataChartResult) {
   if (!artifact) return replacement;
   const paragraphs = replacement.split(/\n{2,}/).map((part) => part.trim()).filter(Boolean);
   const label = result?.artifactLabel || dataChartDefaultArtifactLabel(currentDataChartTarget(), artifactType);
+  const labelPattern = escapeRegExpLiteral(label).replace(/\\\./g, '\\s*\\.\\s*');
   const marker = artifactType === 'table'
-    ? new RegExp(`${escapeRegExpLiteral(label)}|表\\s*1|如表|见表`, 'i')
-    : new RegExp(`${escapeRegExpLiteral(label)}|图\\s*1|图一|如图|见图|figure\\s*1`, 'i');
+    ? new RegExp(`${labelPattern}|表\\s*\\d+(?:\\.\\d+)?|如表|见表`, 'i')
+    : new RegExp(`${labelPattern}|图\\s*\\d+(?:\\.\\d+)?|图一|如图|见图|figure\\s*\\d+`, 'i');
   const insertIndex = paragraphs.findIndex((part) => marker.test(part));
   if (insertIndex >= 0) {
     paragraphs.splice(insertIndex + 1, 0, artifact);
@@ -3080,13 +3110,105 @@ function renderDataChartResult() {
 }
 
 const DATA_CHART_TABLE_COLUMNS = [
-  { key: 'label', label: '标签', placeholder: '指标/年份/地区', fallback: 0 },
-  { key: 'value', label: '数值', placeholder: '待补数值', fallback: 1 },
+  { key: 'label', label: '指标/数据项', placeholder: '指标、年份、地区或统计项', fallback: 0 },
+  { key: 'value', label: '数值', placeholder: '真实或待核验数值', fallback: 1 },
   { key: 'sourceName', label: '来源名称', placeholder: '报告/年鉴/数据库', fallback: 2 },
   { key: 'publisher', label: '发布机构', placeholder: '发布机构', fallback: 3 },
   { key: 'url', label: '链接', placeholder: '核验链接', fallback: 4 },
   { key: 'note', label: '备注', placeholder: '口径/页码/表号', fallback: 5 },
 ];
+
+const DATA_CHART_HIDDEN_META_COLUMNS = [
+  { key: 'year', label: 'year', fallback: 6, hidden: true },
+  { key: 'variable', label: 'variable', fallback: 7, hidden: true },
+  { key: 'statType', label: 'statType', fallback: 8, hidden: true },
+  { key: 'relatedVariable', label: 'relatedVariable', fallback: 9, hidden: true },
+  { key: 'symbol', label: 'symbol', fallback: 10, hidden: true },
+  { key: 'measure', label: 'measure', fallback: 11, hidden: true },
+  { key: 'relatedLabel', label: 'relatedLabel', fallback: 12, hidden: true },
+  { key: 'sampleSize', label: 'sampleSize', fallback: 13, hidden: true },
+  { key: 'mean', label: 'mean', fallback: 14, hidden: true },
+  { key: 'stdDev', label: 'stdDev', fallback: 15, hidden: true },
+  { key: 'min', label: 'min', fallback: 16, hidden: true },
+  { key: 'max', label: 'max', fallback: 17, hidden: true },
+  { key: 'coefficient', label: 'coefficient', fallback: 18, hidden: true },
+  { key: 'stdError', label: 'stdError', fallback: 19, hidden: true },
+  { key: 'tStatistic', label: 'tStatistic', fallback: 20, hidden: true },
+  { key: 'pValue', label: 'pValue', fallback: 21, hidden: true },
+  { key: 'significance', label: 'significance', fallback: 22, hidden: true },
+  { key: 'correlation', label: 'correlation', fallback: 23, hidden: true },
+  { key: 'source', label: 'source', fallback: 24, hidden: true },
+];
+
+const DATA_CHART_DEFINITION_HIDDEN_COLUMNS = [
+  { key: 'year', label: 'year', hidden: true },
+  { key: 'variable', label: 'variable', hidden: true },
+  { key: 'statType', label: 'statType', hidden: true },
+  { key: 'relatedVariable', label: 'relatedVariable', hidden: true },
+  { key: 'publisher', label: 'publisher', hidden: true },
+  { key: 'url', label: 'url', hidden: true },
+  { key: 'source', label: 'source', hidden: true },
+  { key: 'relatedLabel', label: 'relatedLabel', hidden: true },
+  { key: 'sampleSize', label: 'sampleSize', hidden: true },
+  { key: 'mean', label: 'mean', hidden: true },
+  { key: 'stdDev', label: 'stdDev', hidden: true },
+  { key: 'min', label: 'min', hidden: true },
+  { key: 'max', label: 'max', hidden: true },
+  { key: 'coefficient', label: 'coefficient', hidden: true },
+  { key: 'stdError', label: 'stdError', hidden: true },
+  { key: 'tStatistic', label: 'tStatistic', hidden: true },
+  { key: 'pValue', label: 'pValue', hidden: true },
+  { key: 'significance', label: 'significance', hidden: true },
+  { key: 'correlation', label: 'correlation', hidden: true },
+];
+
+const DATA_CHART_NUMERIC_COLUMNS = [
+  ...DATA_CHART_TABLE_COLUMNS,
+  ...DATA_CHART_HIDDEN_META_COLUMNS,
+];
+
+const DATA_CHART_DEFINITION_COLUMNS = [
+  { key: 'label', label: '指标/变量', placeholder: '变量或指标名称', fallback: 0 },
+  { key: 'symbol', label: '变量符号', placeholder: '如 PGDP / EDU', fallback: 2 },
+  { key: 'measure', label: '测度方法', placeholder: '指标定义/计算口径', fallback: 3 },
+  { key: 'sourceName', label: '数据来源', placeholder: '年鉴/报告/数据库', fallback: 4 },
+  { key: 'note', label: '口径说明', placeholder: '页码/表号/补充口径', fallback: 7 },
+  ...DATA_CHART_DEFINITION_HIDDEN_COLUMNS,
+];
+
+const DATA_CHART_SOURCE_COLUMNS = [
+  ...DATA_CHART_TABLE_COLUMNS,
+  ...DATA_CHART_HIDDEN_META_COLUMNS,
+];
+
+function dataChartTableMode(data = state.dataChartSearchResult) {
+  const explicit = String(data?.tableKind || '').trim().toLowerCase();
+  if (['correlation', 'regression', 'descriptive', 'test_result'].includes(explicit)) return explicit;
+  if (explicit) return 'numeric';
+  const target = currentDataChartTarget();
+  const isTable = selectedDataChartArtifactType(target) === 'table';
+  if (!isTable) return 'numeric';
+  const rows = Array.isArray(data?.dataRows)
+    ? data.dataRows
+    : (data && Object.prototype.hasOwnProperty.call(data, 'dataRows') ? [] : dataChartEditableRows(DATA_CHART_NUMERIC_COLUMNS));
+  const context = [
+    $('#dataChartTitle')?.value,
+    target?.tableTitle,
+    target?.dataNeed,
+    target?.reason,
+    target?.intent,
+  ].join('');
+  if (/相关系数|相关矩阵|相关性/.test(context)) return 'correlation';
+  if (/回归结果|回归分析|回归系数|估计结果|参数估计|稳健性|模型结果/.test(context)) return 'regression';
+  if (/描述性统计|描述统计|样本统计|均值|标准差|最大值|最小值/.test(context)) return 'descriptive';
+  if (rows.some((row) => String(row?.rawValue || row?.value || '').trim())) return 'numeric';
+  return 'numeric';
+}
+
+function dataChartTableColumnsForMode(mode = dataChartTableMode()) {
+  if (mode === 'definition') return DATA_CHART_DEFINITION_COLUMNS;
+  return DATA_CHART_NUMERIC_COLUMNS;
+}
 
 function csvEscape(value) {
   const text = String(value ?? '');
@@ -3095,14 +3217,72 @@ function csvEscape(value) {
 
 function dataChartRowsFromSearch(data = state.dataChartSearchResult) {
   const rows = Array.isArray(data?.dataRows) ? data.dataRows : [];
-  return rows.map((row) => ({
-    label: String(row?.label || '').trim(),
-    value: String(row?.rawValue || row?.value || '').trim(),
+  return rows.flatMap(dataChartRowsForSingleValueReview)
+    .filter((row) => Object.values(row).some((value) => String(value || '').trim()));
+}
+
+function dataChartRowsForSingleValueReview(row = {}) {
+  const base = {
     sourceName: String(row?.sourceName || '').trim(),
     publisher: String(row?.publisher || '').trim(),
     url: String(row?.url || '').trim(),
     note: String(row?.note || row?.source || '').trim(),
-  })).filter((row) => row.label || row.value || row.sourceName || row.publisher || row.url || row.note);
+    source: String(row?.source || '').trim(),
+    year: String(row?.year || '').trim(),
+    variable: String(row?.variable || row?.variableName || row?.indicatorName || '').trim(),
+    statType: String(row?.statType || '').trim(),
+    relatedVariable: String(row?.relatedVariable || row?.relatedLabel || '').trim(),
+    symbol: String(row?.symbol || '').trim(),
+    measure: String(row?.measure || '').trim(),
+    relatedLabel: String(row?.relatedLabel || '').trim(),
+  };
+  const label = String(row?.label || '').trim();
+  const primaryValue = String(row?.rawValue || row?.value || '').trim();
+  const output = [];
+  if (primaryValue) {
+    output.push({ label, value: primaryValue, ...base, statType: base.statType || 'value' });
+  }
+  const statFields = [
+    ['sampleSize', '样本量'],
+    ['mean', '均值'],
+    ['stdDev', '标准差'],
+    ['min', '最小值'],
+    ['max', '最大值'],
+    ['coefficient', '系数'],
+    ['stdError', '标准误'],
+    ['tStatistic', 't统计量'],
+    ['pValue', 'P值'],
+    ['correlation', '相关系数'],
+  ];
+  statFields.forEach(([key, name]) => {
+    const value = String(row?.[key] || '').trim();
+    if (!value) return;
+    const related = key === 'correlation' && row?.relatedLabel ? `-${row.relatedLabel}` : '';
+    const statLabel = [label || '数据项', related, name].filter(Boolean).join('');
+    const statNote = [base.note, `统计项：${name}`].filter(Boolean).join('；');
+    output.push({ label: statLabel, value, ...base, statType: key, note: statNote });
+  });
+  if (!output.length) {
+    output.push({ label, value: '', ...base });
+  }
+  return output;
+}
+
+function dataChartVariableSymbolFromText(value) {
+  const text = String(value || '');
+  const match = text.match(/变量符号(?:建议)?[:：]?\s*([A-Za-z][A-Za-z0-9_]{1,18})/);
+  if (match) return match[1];
+  const loose = text.match(/\b([A-Za-z][A-Za-z0-9_]{1,18})\s*(?:或|\/|、)\s*[A-Za-z][A-Za-z0-9_]{1,18}/);
+  return loose ? loose[1] : '';
+}
+
+function dataChartCleanMeasureText(value, row = {}) {
+  let text = String(value || row?.note || '').replace(/\s+/g, '').trim();
+  text = text.replace(/变量符号(?:建议)?[:：]?[A-Za-z][A-Za-z0-9_]*(?:或[A-Za-z][A-Za-z0-9_]*)?[；;。]?/g, '');
+  text = text.replace(/控制变量[；;。]?/g, '');
+  text = text.replace(/^测度指标[:：]?/, '');
+  text = text.split(/统计路径|可核验|数据来源|来源|预期影响方向|预测方向|建议核验|请核验/)[0] || text;
+  return text.replace(/单位[:：][^；;。]*[；;。]?/g, '').replace(/^[，,。.;；]+|[，,。.;；]+$/g, '');
 }
 
 function dataChartRowsWithNumericValues(rows = dataChartEditableRows()) {
@@ -3119,9 +3299,16 @@ function dataChartRowsReadyForGeneration(rows = dataChartEditableRows()) {
 }
 
 function dataChartRowsReadyForTable(rows = dataChartEditableRows()) {
+  const mode = dataChartTableMode();
+  if (mode === 'definition') {
+    return (rows || []).filter((row) => (
+      String(row.label || '').trim()
+      && String(row.symbol || row.measure || row.sourceName || row.note || '').trim()
+    ));
+  }
   return (rows || []).filter((row) => (
     String(row.label || '').trim()
-    && String(row.sourceName || row.publisher || row.url || row.note || row.value || '').trim()
+    && String(row.value || row.sourceName || row.publisher || row.url || row.note || '').trim()
   ));
 }
 
@@ -3167,26 +3354,83 @@ function parseDataChartTableText(text) {
   };
   const header = parseLine(lines[0]).map((cell) => cell.trim());
   const normalizedHeader = header.map((cell) => cell.trim().toLowerCase());
-  const hasHeader = normalizedHeader.some((cell) => ['标签', '数值', '来源名称', '发布机构', '链接', '备注', '来源/备注', 'label', 'value', 'sourcename', 'source_name', 'publisher', 'url', 'note'].includes(cell));
+  const aliases = {
+    label: ['标签', '项目', '名称', '年份', '地区', '指标', '指标/变量', '变量', '变量名称', 'label', 'name', 'indicator'],
+    value: ['数值', '值', '数据', 'value', 'number'],
+    year: ['数据年份', '年度', '年份字段', 'year'],
+    variable: ['正式表变量', '变量列', '指标列', 'variable', 'variableName', 'variable_name', 'series', 'seriesName', 'series_name'],
+    statType: ['统计项', '统计类型', 'statType', 'stat_type', 'statistic', 'metric'],
+    symbol: ['变量符号', '变量代码', '符号', '代码', 'symbol', 'code', 'variable symbol', 'variable_code'],
+    measure: ['测度方法', '衡量方式', '计算口径', '测量方法', '口径说明', '测度指标', '定义', 'measure', 'measurement', 'method', 'calculation', 'definition'],
+    relatedLabel: ['相关变量', '对照变量', '变量2', '第二变量', '列变量', 'related variable', 'relatedlabel', 'variable2', 'with variable', 'column'],
+    relatedVariable: ['相关列变量', '矩阵列变量', 'relatedVariable', 'related_variable', 'columnVariable', 'column_variable'],
+    sampleSize: ['样本量', '观测值', '观测数', 'n', 'sample size', 'observations'],
+    mean: ['均值', '平均值', 'mean', 'average'],
+    stdDev: ['标准差', 'std', 'stddev', 'standard deviation'],
+    min: ['最小值', '最小', 'min', 'minimum'],
+    max: ['最大值', '最大', 'max', 'maximum'],
+    coefficient: ['系数', '回归系数', '估计系数', 'coef', 'coefficient', 'beta'],
+    stdError: ['标准误', '标准误差', 'std error', 'stderr', 'standard error', 'se'],
+    tStatistic: ['t统计量', 't 统计量', 't值', 't 值', 't-statistic', 'tstat', 't statistic', 't'],
+    pValue: ['p值', 'p 值', 'p-value', 'pvalue', 'p'],
+    significance: ['显著性', '星号', 'stars', 'significance'],
+    correlation: ['相关系数', '相关性', 'corr', 'correlation', 'correlation coefficient'],
+    sourceName: ['来源名称', '报告名称', '数据库名称', '网站名称', '来源名', '数据来源', 'sourceName', 'sourcename', 'source_name', 'source name'],
+    publisher: ['发布机构', '机构', '作者', 'publisher', 'organization'],
+    url: ['链接', '网址', 'url', '来源链接'],
+    note: ['备注', '页码/口径', '页码', '口径', '说明', 'note'],
+    source: ['来源/备注', '来源', 'source', 'reference'],
+  };
+  const headerMap = {};
+  normalizedHeader.forEach((cell, index) => {
+    Object.entries(aliases).forEach(([key, names]) => {
+      if (headerMap[key] === undefined && names.map((name) => name.toLowerCase()).includes(cell)) headerMap[key] = index;
+    });
+  });
+  const hasHeader = Object.keys(headerMap).length >= 2;
   const dataLines = hasHeader ? lines.slice(1) : lines;
+  const cellFor = (cells, key, fallback) => {
+    const index = headerMap[key] ?? fallback;
+    return index === undefined ? '' : (cells[index] || '');
+  };
   return dataLines.map((line) => {
     const cells = parseLine(line);
     return {
-      label: cells[0] || '',
-      value: cells[1] || '',
-      sourceName: cells[2] || '',
-      publisher: cells[3] || '',
-      url: cells[4] || '',
-      note: cells[5] || cells[2] || '',
+      label: cellFor(cells, 'label', 0),
+      value: cellFor(cells, 'value', 1),
+      year: cellFor(cells, 'year', hasHeader ? undefined : 6),
+      variable: cellFor(cells, 'variable', hasHeader ? undefined : 7),
+      statType: cellFor(cells, 'statType', hasHeader ? undefined : 8),
+      relatedVariable: cellFor(cells, 'relatedVariable', hasHeader ? undefined : 9),
+      symbol: cellFor(cells, 'symbol', hasHeader ? undefined : 10),
+      measure: cellFor(cells, 'measure', hasHeader ? undefined : 11),
+      relatedLabel: cellFor(cells, 'relatedLabel', hasHeader ? undefined : 12),
+      sampleSize: cellFor(cells, 'sampleSize', hasHeader ? undefined : 13),
+      mean: cellFor(cells, 'mean', hasHeader ? undefined : 14),
+      stdDev: cellFor(cells, 'stdDev', hasHeader ? undefined : 15),
+      min: cellFor(cells, 'min', hasHeader ? undefined : 16),
+      max: cellFor(cells, 'max', hasHeader ? undefined : 17),
+      coefficient: cellFor(cells, 'coefficient', hasHeader ? undefined : 18),
+      stdError: cellFor(cells, 'stdError', hasHeader ? undefined : 19),
+      tStatistic: cellFor(cells, 'tStatistic', hasHeader ? undefined : 20),
+      pValue: cellFor(cells, 'pValue', hasHeader ? undefined : 21),
+      significance: cellFor(cells, 'significance', hasHeader ? undefined : 22),
+      correlation: cellFor(cells, 'correlation', hasHeader ? undefined : 23),
+      sourceName: cellFor(cells, 'sourceName', hasHeader ? undefined : 2),
+      publisher: cellFor(cells, 'publisher', hasHeader ? undefined : 3),
+      url: cellFor(cells, 'url', hasHeader ? undefined : 4),
+      note: cellFor(cells, 'note', hasHeader ? undefined : 5) || (!hasHeader ? (cells[5] || cells[2] || '') : ''),
+      source: cellFor(cells, 'source', hasHeader ? undefined : 24),
     };
-  }).filter((row) => row.label || row.value || row.sourceName || row.publisher || row.url || row.note);
+  }).filter((row) => Object.values(row).some((value) => String(value || '').trim()));
 }
 
-function dataChartRowsToCsv(rows) {
+function dataChartRowsToCsv(rows, columns = dataChartTableColumnsForMode()) {
   if (!Array.isArray(rows) || !rows.length) return '';
-  const output = [DATA_CHART_TABLE_COLUMNS.map((column) => csvEscape(column.label)).join(',')];
+  const outputColumns = columns.filter((column) => column.key);
+  const output = [outputColumns.map((column) => csvEscape(column.key)).join(',')];
   (rows || []).forEach((row) => {
-    output.push(DATA_CHART_TABLE_COLUMNS.map((column) => csvEscape(row?.[column.key] || '')).join(','));
+    output.push(outputColumns.map((column) => csvEscape(row?.[column.key] || '')).join(','));
   });
   return output.join('\n');
 }
@@ -3237,33 +3481,45 @@ function readDataChartDataFile(file) {
   reader.readAsDataURL(file);
 }
 
-function dataChartEditableRows() {
+function dataChartEditableRows(columns = dataChartTableColumnsForMode()) {
   return $$('#dataChartEditableTable .data-chart-table-row').map((rowNode) => {
     const row = {};
-    DATA_CHART_TABLE_COLUMNS.forEach((column) => {
-      row[column.key] = rowNode.querySelector(`[data-data-table-cell="${column.key}"]`)?.value || '';
+    columns.forEach((column) => {
+      if (!column.key) return;
+      if (column.hidden) row[column.key] = rowNode.dataset[`meta${column.key[0].toUpperCase()}${column.key.slice(1)}`] || '';
+      else row[column.key] = rowNode.querySelector(`[data-data-table-cell="${column.key}"]`)?.value || '';
     });
     return row;
-  }).filter((row) => DATA_CHART_TABLE_COLUMNS.some((column) => String(row[column.key] || '').trim()));
+  }).filter((row) => Object.values(row).some((value) => String(value || '').trim()));
 }
 
 function syncDataChartTableFromEditable() {
-  setText('#dataChartDataTable', dataChartRowsToCsv(dataChartEditableRows()));
+  const columns = dataChartTableColumnsForMode();
+  setText('#dataChartDataTable', dataChartRowsToCsv(dataChartEditableRows(columns), columns));
 }
 
 function renderDataChartEditableTable(rows = []) {
   const table = $('#dataChartEditableTable');
   if (!table) return;
-  const normalizedRows = rows.length ? rows : [{ label: '', value: '', sourceName: '', publisher: '', url: '', note: '' }];
+  const columns = dataChartTableColumnsForMode();
+  const visibleColumns = columns.filter((column) => !column.hidden);
+  const emptyRow = Object.fromEntries(columns.map((column) => [column.key, '']));
+  const normalizedRows = rows.length ? rows : [emptyRow];
+  const minWidth = Math.max(760, visibleColumns.length * 150 + 74);
+  table.style.setProperty('--data-chart-table-columns', `${visibleColumns.map((column) => column.width || 'minmax(120px, 1fr)').join(' ')} 74px`);
+  table.style.setProperty('--data-chart-table-min-width', `${minWidth}px`);
   table.innerHTML = `
     <div class="data-chart-table-header">
-      ${DATA_CHART_TABLE_COLUMNS.map((column) => `<div>${escapeHtml(column.label)}</div>`).join('')}
+      ${visibleColumns.map((column) => `<div>${escapeHtml(column.label)}</div>`).join('')}
       <div>操作</div>
     </div>
     <div class="data-chart-table-body">
       ${normalizedRows.map((row, index) => `
         <div class="data-chart-table-row" data-data-table-row="${index}">
-          ${DATA_CHART_TABLE_COLUMNS.map((column) => `
+          ${DATA_CHART_HIDDEN_META_COLUMNS.map((column) => `
+            <input type="hidden" data-data-table-cell="${column.key}" value="${escapeHtml(row?.[column.key] || '')}" />
+          `).join('')}
+          ${visibleColumns.map((column) => `
             <label class="data-chart-table-cell">
               <span>${escapeHtml(column.label)}</span>
               <input class="data-chart-table-input" data-data-table-cell="${column.key}" aria-label="${escapeHtml(column.label)}" placeholder="${escapeHtml(column.placeholder || column.label)}" value="${escapeHtml(row?.[column.key] || '')}" />
@@ -3278,6 +3534,12 @@ function renderDataChartEditableTable(rows = []) {
     input.addEventListener('input', () => {
       syncDataChartTableFromEditable();
       saveDraft();
+    });
+  });
+  $$('#dataChartEditableTable .data-chart-table-row').forEach((rowNode, index) => {
+    const sourceRow = normalizedRows[index] || {};
+    columns.filter((column) => column.hidden).forEach((column) => {
+      rowNode.dataset[`meta${column.key[0].toUpperCase()}${column.key.slice(1)}`] = sourceRow?.[column.key] || '';
     });
   });
   $$('#dataChartEditableTable .data-chart-row-remove').forEach((button) => {
@@ -3304,27 +3566,33 @@ function setDataChartRows(rows) {
 
 function addDataChartEditableRow(row = {}) {
   const rows = dataChartEditableRows();
-  rows.push({
-    label: row.label || '',
-    value: row.value || '',
-    sourceName: row.sourceName || '',
-    publisher: row.publisher || '',
-    url: row.url || '',
-    note: row.note || '',
-  });
+  const columns = dataChartTableColumnsForMode();
+  rows.push(Object.fromEntries(columns.map((column) => [column.key, row[column.key] || ''])));
   renderDataChartEditableTable(rows);
   saveDraft();
 }
 
-function dataChartRowSummary(row) {
+function dataChartHeaderLabelForSummary(row = {}) {
   const label = String(row?.label || '').trim();
+  if (label) return label;
+  const year = String(row?.year || '').trim();
+  const variable = String(row?.variable || '').trim();
+  const statType = String(row?.statType || '').trim();
+  const related = String(row?.relatedVariable || row?.relatedLabel || '').trim();
+  return [year, variable, related, statType].filter(Boolean).join(' ');
+}
+
+function dataChartRowSummary(row) {
+  const label = dataChartHeaderLabelForSummary(row);
   const value = String(row?.rawValue || row?.value || '').trim();
+  const symbol = String(row?.symbol || '').trim();
+  const measure = String(row?.measure || '').trim();
   const sourceName = String(row?.sourceName || '').trim();
   const publisher = String(row?.publisher || '').trim();
   const source = String(row?.source || '').trim();
   const note = String(row?.note || '').trim();
-  const sourcePart = [sourceName || source, publisher, note].filter(Boolean).join('；');
-  return [label, value, sourcePart].filter(Boolean).join(',');
+  const sourcePart = [sourceName || source, publisher, measure || note].filter(Boolean).join('；');
+  return [label, value || symbol, sourcePart].filter(Boolean).join(',');
 }
 
 function dataChartSourceItemsFromSearch(data = state.dataChartSearchResult) {
@@ -3506,6 +3774,9 @@ async function searchDataChartData() {
       artifactType: selectedDataChartArtifactType(target),
       insertType: selectedDataChartArtifactType(target),
     };
+    if (payloadTarget.artifactType === 'table') {
+      payloadTarget.tableKind = 'numeric';
+    }
     const data = await withRunningState('datachart', 'AI 正在检索数据并整理来源...', async () => requestJson('/api/data-chart', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -3550,6 +3821,7 @@ function fillDataChartSampleTable() {
     { label: '2020年农村地区', value: 55.9, rawValue: '55.9', source: '第47次《中国互联网络发展状况统计报告》；中国互联网络信息中心（CNNIC）', sourceName: '第47次《中国互联网络发展状况统计报告》', publisher: '中国互联网络信息中心（CNNIC）', url: 'https://www.cnnic.net.cn/' },
   ];
   state.dataChartSearchResult = {
+    tableKind: 'numeric',
     sourceNote: '已填入示例表头，请替换为已核验的真实数据。',
     dataRows: sampleRows,
     sourceItems: [{
@@ -3576,6 +3848,10 @@ async function generateDataChart() {
   }
   if (artifactType === 'table') {
     target.tableTitle = textValue('#dataChartTitle') || target.tableTitle || target.chartTitle || target.title || '';
+    target.tableKind = dataChartTableMode({
+      tableKind: state.dataChartSearchResult?.tableKind,
+      dataRows: dataChartEditableRows(),
+    });
   }
   syncDataChartTableFromEditable();
   if (!textValue('#dataChartDataTable')) {

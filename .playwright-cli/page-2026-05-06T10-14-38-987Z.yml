@@ -1,0 +1,186 @@
+- generic [ref=e2]:
+  - banner [ref=e3]:
+    - generic [ref=e4]:
+      - link "Thesis Workshop 论文工坊" [ref=e5] [cursor=pointer]:
+        - /url: "#/paper"
+        - generic [ref=e6]: Thesis Workshop
+        - generic [ref=e7]: 论文工坊
+      - link "GitHub" [ref=e8] [cursor=pointer]:
+        - /url: https://github.com/sk856/paper_lab
+        - img [ref=e9]
+        - generic [ref=e11]: GitHub
+    - navigation [ref=e12]:
+      - button "刷新模型" [ref=e13] [cursor=pointer]
+      - button "主题" [ref=e14] [cursor=pointer]
+  - complementary "Web 功能导航" [ref=e15]:
+    - button "论文写作 大纲、章节与编辑器" [ref=e16] [cursor=pointer]:
+      - img [ref=e18]
+      - generic [ref=e21]:
+        - strong [ref=e22]: 论文写作
+        - generic [ref=e23]: 大纲、章节与编辑器
+    - button "数据图表 全文定位、搜数与回填" [ref=e24] [cursor=pointer]:
+      - img [ref=e26]
+      - generic [ref=e28]:
+        - strong [ref=e29]: 数据图表
+        - generic [ref=e30]: 全文定位、搜数与回填
+    - button "降 AI 检测 去痕、核验与差异" [ref=e31] [cursor=pointer]:
+      - img [ref=e33]
+      - generic [ref=e36]:
+        - strong [ref=e37]: 降 AI 检测
+        - generic [ref=e38]: 去痕、核验与差异
+    - button "降查重率 重复源、降重与复核" [ref=e39] [cursor=pointer]:
+      - img [ref=e41]
+      - generic [ref=e44]:
+        - strong [ref=e45]: 降查重率
+        - generic [ref=e46]: 重复源、降重与复核
+    - button "学术润色 任务设置与结果预览" [ref=e47] [cursor=pointer]:
+      - img [ref=e49]
+      - generic [ref=e51]:
+        - strong [ref=e52]: 学术润色
+        - generic [ref=e53]: 任务设置与结果预览
+    - button "智能纠错 统计、预览与问题列表" [ref=e54] [cursor=pointer]:
+      - img [ref=e56]
+      - generic [ref=e58]:
+        - strong [ref=e59]: 智能纠错
+        - generic [ref=e60]: 统计、预览与问题列表
+    - button "配置管理 模式、接口与后端配置" [ref=e61] [cursor=pointer]:
+      - img [ref=e63]
+      - generic [ref=e66]:
+        - strong [ref=e67]: 配置管理
+        - generic [ref=e68]: 模式、接口与后端配置
+    - button "历史记录 版本、草稿与恢复" [ref=e69] [cursor=pointer]:
+      - img [ref=e71]
+      - generic [ref=e75]:
+        - strong [ref=e76]: 历史记录
+        - generic [ref=e77]: 版本、草稿与恢复
+  - main [ref=e78]:
+    - text: 这里对应桌面端右侧正文编辑区，可放已有章节上下文、全文正文或参考文献。生成结果也会直接写回这里。
+    - generic [ref=e190]:
+      - generic [ref=e191]:
+        - paragraph [ref=e192]: Data Chart
+        - heading "数据图表" [level=1] [ref=e193]
+        - paragraph [ref=e194]: AI 阅读全文定位适合插入图或表的位置，自行整理可核验数据来源；审核数据后生成图表或论文表格，并把图表/表格与改写段落回填到论文对应位置。
+      - generic [ref=e195]:
+        - generic [ref=e196]:
+          - generic [ref=e197]:
+            - paragraph [ref=e198]: Workflow
+            - heading "全文查数与图表回填" [level=3] [ref=e199]
+          - generic [ref=e200]: 待处理
+        - generic [ref=e201]:
+          - button "AI 阅读全文" [ref=e202] [cursor=pointer]
+          - button "AI 搜索数据" [ref=e203] [cursor=pointer]
+          - button "生成图/表" [ref=e204] [cursor=pointer]
+          - button "回填" [ref=e205] [cursor=pointer]
+      - generic [ref=e206]:
+        - generic [ref=e207]:
+          - generic [ref=e208]:
+            - generic [ref=e209]:
+              - paragraph [ref=e210]: Full Text
+              - heading "全文内容" [level=3] [ref=e211]
+            - button "复制" [ref=e212] [cursor=pointer]
+          - textbox "从论文写作页推送后，整篇文章、某章/某节或单个小节会显示在这里；也可以直接粘贴全文。" [ref=e213]
+        - generic [ref=e214]:
+          - generic [ref=e215]:
+            - generic [ref=e216]:
+              - paragraph [ref=e217]: Targets
+              - heading "候选位置" [level=3] [ref=e218]
+            - generic [ref=e219]: 0 项
+          - generic [ref=e220]: 点击“AI 阅读全文”后，这里会列出适合插入数据图或数据表的位置。
+      - generic [ref=e221]:
+        - generic [ref=e222]:
+          - generic [ref=e223]:
+            - generic [ref=e224]:
+              - paragraph [ref=e225]: Search
+              - heading "数据检索与审核" [level=3] [ref=e226]
+            - button "示例表头" [active] [ref=e227] [cursor=pointer]
+          - generic [ref=e228]:
+            - generic [ref=e229]:
+              - generic [ref=e230]: AI 检索方向
+              - textbox "AI 检索方向" [ref=e231]:
+                - /placeholder: AI 会根据全文生成，也可补充数据范围、地区或年份
+            - generic [ref=e232]:
+              - generic [ref=e233]: 图表类型
+              - combobox "图表类型" [ref=e234]:
+                - option "柱状图" [selected]
+                - option "折线图"
+                - option "结构图"
+                - option "表格"
+            - generic [ref=e235]:
+              - generic [ref=e236]: 单位
+              - textbox "单位" [ref=e237]:
+                - /placeholder: 例如：%、亿元、分
+            - generic [ref=e238]:
+              - generic [ref=e239]: 图表标题
+              - textbox "图表标题" [ref=e240]:
+                - /placeholder: 例如：金融科技发展水平变化趋势
+            - generic [ref=e241]:
+              - generic [ref=e242]: 辅助数据文件
+              - button "辅助数据文件" [ref=e243]
+            - generic [ref=e244]: 可选上传 CSV、TXT 或 XLSX，供 AI 辅助检索和抽数；不上传也可以继续。
+          - article [ref=e284]:
+            - generic [ref=e285]: "1"
+            - generic [ref=e286]:
+              - link "中国互联网络信息中心（CNNIC）" [ref=e288] [cursor=pointer]:
+                - /url: https://www.cnnic.net.cn/
+              - generic [ref=e289]: CNNIC
+              - generic [ref=e290]: 2020年城镇地区,79.8,第47次《中国互联网络发展状况统计报告》；中国互联网络信息中心（CNNIC） 2020年农村地区,55.9,第47次《中国互联网络发展状况统计报告》；中国互联网络信息中心（CNNIC）
+          - generic [ref=e246]:
+            - generic [ref=e247]:
+              - generic [ref=e248]: 可编辑数据表
+              - button "新增行" [ref=e249] [cursor=pointer]
+            - generic "可编辑数据表" [ref=e250]:
+              - generic [ref=e291]:
+                - generic [ref=e292]: 指标/数据项
+                - generic [ref=e293]: 数值
+                - generic [ref=e294]: 来源名称
+                - generic [ref=e295]: 发布机构
+                - generic [ref=e296]: 链接
+                - generic [ref=e297]: 备注
+                - generic [ref=e298]: 操作
+              - generic [ref=e299]:
+                - generic [ref=e300]:
+                  - textbox "指标/数据项" [ref=e302]:
+                    - /placeholder: 指标、年份、地区或统计项
+                    - text: 2020年城镇地区
+                  - textbox "数值" [ref=e304]:
+                    - /placeholder: 真实或待核验数值
+                    - text: "79.8"
+                  - textbox "来源名称" [ref=e306]:
+                    - /placeholder: 报告/年鉴/数据库
+                    - text: 第47次《中国互联网络发展状况统计报告》
+                  - textbox "发布机构" [ref=e308]: 中国互联网络信息中心（CNNIC）
+                  - textbox "链接" [ref=e310]:
+                    - /placeholder: 核验链接
+                    - text: https://www.cnnic.net.cn/
+                  - textbox "备注" [ref=e312]:
+                    - /placeholder: 口径/页码/表号
+                    - text: 第47次《中国互联网络发展状况统计报告》；中国互联网络信息中心（CNNIC）
+                  - button "删除" [ref=e313] [cursor=pointer]
+                - generic [ref=e314]:
+                  - textbox "指标/数据项" [ref=e316]:
+                    - /placeholder: 指标、年份、地区或统计项
+                    - text: 2020年农村地区
+                  - textbox "数值" [ref=e318]:
+                    - /placeholder: 真实或待核验数值
+                    - text: "55.9"
+                  - textbox "来源名称" [ref=e320]:
+                    - /placeholder: 报告/年鉴/数据库
+                    - text: 第47次《中国互联网络发展状况统计报告》
+                  - textbox "发布机构" [ref=e322]: 中国互联网络信息中心（CNNIC）
+                  - textbox "链接" [ref=e324]:
+                    - /placeholder: 核验链接
+                    - text: https://www.cnnic.net.cn/
+                  - textbox "备注" [ref=e326]:
+                    - /placeholder: 口径/页码/表号
+                    - text: 第47次《中国互联网络发展状况统计报告》；中国互联网络信息中心（CNNIC）
+                  - button "删除" [ref=e327] [cursor=pointer]
+        - generic [ref=e274]:
+          - generic [ref=e275]:
+            - generic [ref=e276]:
+              - paragraph [ref=e277]: Diff
+              - heading "差异与图表回填" [level=3] [ref=e278]
+            - generic [ref=e279]:
+              - button "回填" [ref=e280] [cursor=pointer]
+              - button "编辑文字" [ref=e281] [cursor=pointer]
+          - paragraph [ref=e282]: 红色为删除，绿色为新增。图或表会直接显示在差异区域内。
+          - generic [ref=e283]: 差异预览会显示在这里。
