@@ -96,6 +96,25 @@ def _safe_web_user_id(value):
     return text if 18 <= len(text) <= 80 else ''
 
 
+def _positive_int(value, default=0):
+    try:
+        if value is None or value == '':
+            return default
+        parsed = int(float(str(value).replace(',', '').strip()))
+    except Exception:
+        return default
+    return parsed if parsed > 0 else default
+
+
+def _target_reference_count_for_words(value):
+    total = _positive_int(value)
+    if not total:
+        return 0
+    scaled = (total + 699) // 700
+    floor = 15 if total >= 10000 else 6
+    return min(60, max(floor, scaled))
+
+
 def _persist_data_chart_image(data_url, title='chart'):
     value = str(data_url or '')
     match = re.match(r'^data:image/(png|jpeg|jpg);base64,([A-Za-z0-9+/=\s]+)$', value)
@@ -1731,6 +1750,11 @@ class WebWorkbench:
             context = str(payload.get('context', '') or '').strip()
             reference_style = str(payload.get('referenceStyle', 'GB/T 7714') or 'GB/T 7714')
             all_sections = payload.get('allSections', [])
+            total_word_count = str(payload.get('totalWordCount', '') or '').strip()
+            target_reference_count = _positive_int(payload.get('targetReferenceCount')) or _target_reference_count_for_words(total_word_count)
+            current_reference_count = _positive_int(payload.get('currentReferenceCount'))
+            remaining_section_count = _positive_int(payload.get('remainingSectionCount'), 1)
+            reference_snapshot = str(payload.get('referenceSnapshot', '') or '').strip()
             try:
                 word_count = int(payload.get('wordCount') or 1000)
             except Exception:
@@ -1747,6 +1771,11 @@ class WebWorkbench:
                 context=context,
                 word_count=word_count,
                 reference_style=reference_style,
+                total_word_count=total_word_count,
+                target_reference_count=target_reference_count,
+                current_reference_count=current_reference_count,
+                remaining_section_count=remaining_section_count,
+                reference_snapshot=reference_snapshot,
             )
 
             # Determine reference processing mode
@@ -1813,10 +1842,17 @@ class WebWorkbench:
         if action == 'references':
             reference_style = str(payload.get('referenceStyle', 'GB/T 7714') or 'GB/T 7714')
             all_sections = payload.get('allSections', [])
+            total_word_count = str(payload.get('totalWordCount', '') or '').strip()
+            target_reference_count = _positive_int(payload.get('targetReferenceCount')) or _target_reference_count_for_words(total_word_count)
             if all_sections:
-                result = reorder_references_for_full_paper(all_sections, reference_style)
+                result = reorder_references_for_full_paper(
+                    all_sections,
+                    reference_style,
+                    min_reference_count=target_reference_count,
+                )
                 if not result['reference_content']:
                     raise ValueError('没有找到可整理的参考文献条目')
+                reference_warning = result.get('reference_warning', '')
                 return {
                     'result': result['reference_content'],
                     'content': result['reference_content'],
@@ -1826,9 +1862,15 @@ class WebWorkbench:
                         'content': result['reference_content'],
                         'entryCount': result['entry_count'],
                         'citationCount': result['citation_count'],
+                        'targetCount': result.get('target_reference_count', 0),
+                        'shortfall': result.get('reference_shortfall', 0),
+                        'warning': reference_warning,
                     },
                     'updatedSections': result['updated_sections'],
-                    'analysis': {'citation': plagiarism.check_citation_format(result['reference_content'])},
+                    'analysis': {
+                        'citation': plagiarism.check_citation_format(result['reference_content']),
+                        'referenceWarning': reference_warning,
+                    },
                 }
             result = paper_writer.format_references(text, style=reference_style)
             return {'result': result, 'analysis': {'citation': plagiarism.check_citation_format(result)}}
@@ -1837,6 +1879,8 @@ class WebWorkbench:
             reference_style = str(payload.get('referenceStyle', 'GB/T 7714') or 'GB/T 7714')
             sections = payload.get('sections', [])
             all_sections = payload.get('allSections', [])
+            total_word_count = str(payload.get('totalWordCount', '') or '').strip()
+            target_reference_count = _positive_int(payload.get('targetReferenceCount')) or _target_reference_count_for_words(total_word_count)
             try:
                 word_count = int(payload.get('wordCount') or 1000)
             except Exception:
@@ -1873,7 +1917,12 @@ class WebWorkbench:
                         section_title,
                         context=context,
                         word_count=word_count,
-                        reference_style=reference_style
+                        reference_style=reference_style,
+                        total_word_count=total_word_count,
+                        target_reference_count=target_reference_count,
+                        current_reference_count=len(all_references),
+                        remaining_section_count=max(1, len(sections) - len(results)),
+                        reference_snapshot=build_reference_body_from_entries(all_references),
                     )
 
                     # Extract references from this section

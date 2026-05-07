@@ -1572,7 +1572,7 @@ def process_references_reorder_mode(section_title, new_content, all_sections, re
     }
 
 
-def reorder_references_for_full_paper(all_sections, reference_style='GB/T 7714'):
+def reorder_references_for_full_paper(all_sections, reference_style='GB/T 7714', min_reference_count=0):
     """
     整篇文章参考文献整理：按正文首次引用顺序重排编号，并重写参考文献章节。
 
@@ -1583,6 +1583,9 @@ def reorder_references_for_full_paper(all_sections, reference_style='GB/T 7714')
             'updated_sections': [{'title': ..., 'content': ...}],
             'entry_count': 条目数,
             'citation_count': 正文引用数量,
+            'target_reference_count': 目标条目数,
+            'reference_shortfall': 目标缺口,
+            'reference_warning': 不足提示,
         }
     """
     sections = list(all_sections or [])
@@ -1606,8 +1609,8 @@ def reorder_references_for_full_paper(all_sections, reference_style='GB/T 7714')
     number_to_keys = {}
     for occurrence in ordered_occurrences:
         number = occurrence.get('number')
-        key = occurrence.get('key')
-        text = occurrence.get('text', '')
+        text = sanitize_reference_entry_for_output(occurrence.get('text', ''))
+        key = reference_entry_key(text)
         if not key:
             continue
         if key not in key_to_text:
@@ -1700,10 +1703,28 @@ def reorder_references_for_full_paper(all_sections, reference_style='GB/T 7714')
         if rewritten != content:
             updated_sections.append({'title': title, 'content': rewritten})
 
+    reference_body = build_reference_body_from_entries(full_entries)
+    entry_count = len(parse_reference_entries(reference_body))
+    try:
+        target_reference_count = max(0, int(min_reference_count or 0))
+    except Exception:
+        target_reference_count = 0
+    reference_shortfall = max(0, target_reference_count - entry_count) if target_reference_count else 0
+    reference_warning = ''
+    if reference_shortfall:
+        reference_warning = (
+            f'核验后仅保留 {entry_count} 条真实带链接参考文献，'
+            f'低于目标 {target_reference_count} 条，还差 {reference_shortfall} 条。'
+            '系统不会用无法核验的条目凑数，请继续补写相关章节或补充真实中文带链接文献。'
+        )
+
     return {
         'reference_title': reference_title,
-        'reference_content': build_reference_body_from_entries(full_entries),
+        'reference_content': reference_body,
         'updated_sections': updated_sections,
-        'entry_count': len(full_entries),
+        'entry_count': entry_count,
         'citation_count': citation_count,
+        'target_reference_count': target_reference_count,
+        'reference_shortfall': reference_shortfall,
+        'reference_warning': reference_warning,
     }

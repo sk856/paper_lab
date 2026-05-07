@@ -4464,6 +4464,50 @@ function customTotalWordCount() {
   return isChecked('#totalWordCountAuto') ? 0 : targetWordCountValue('#totalWordCount', 0);
 }
 
+function targetReferenceCountForPaper(totalWordCount = customTotalWordCount()) {
+  const total = Number(totalWordCount || 0);
+  if (!Number.isFinite(total) || total <= 0) return 0;
+  const scaled = Math.ceil(total / 700);
+  const floor = total >= 10000 ? 15 : 6;
+  return Math.min(60, Math.max(floor, scaled));
+}
+
+function countReferenceEntriesInText(text) {
+  const content = String(text || '').replace(/\r\n/g, '\n').replace(/\r/g, '\n');
+  if (!content.trim()) return 0;
+  const numbered = content.match(/^\s*(?:\[\d+\]|\d+[.、])\s*\S+/gm);
+  return numbered ? numbered.length : 0;
+}
+
+function currentReferenceCountForPayload() {
+  hydratePaperReferenceSnapshotFromSections();
+  return countReferenceEntriesInText(state.paperReferenceSnapshot || '');
+}
+
+function remainingReferenceSectionsForPayload(targetTitle = '') {
+  const sections = bodyWritingSections();
+  if (!sections.length) return 1;
+  const targetKey = paperTitleMatchKey(targetTitle);
+  if (!targetKey) {
+    return Math.max(1, sections.filter((section) => !isPaperSectionWritten(section.title)).length || sections.length);
+  }
+  const targetIndex = sections.findIndex((section) => paperTitleMatchKey(section.title) === targetKey);
+  if (targetIndex < 0) return Math.max(1, sections.length);
+  return Math.max(1, sections.length - targetIndex);
+}
+
+function referenceTargetFields(targetSection = '', remainingOverride = 0) {
+  const totalWordCount = customTotalWordCount();
+  const targetReferenceCount = targetReferenceCountForPaper(totalWordCount);
+  if (!targetReferenceCount) return {};
+  return {
+    totalWordCount,
+    targetReferenceCount,
+    currentReferenceCount: currentReferenceCountForPayload(),
+    remainingSectionCount: Math.max(1, Number(remainingOverride || 0) || remainingReferenceSectionsForPayload(targetSection)),
+  };
+}
+
 function customSectionWordCount() {
   return isChecked('#wordCountAuto') ? 0 : targetWordCountValue('#wordCount', 0);
 }
@@ -4643,11 +4687,13 @@ async function runBatchWriteAllSections() {
   const wordCount = perSectionWordCountForBatch();
   const totalWords = targets.length * wordCount;
   const totalTarget = customTotalWordCount();
+  const targetReferenceCount = targetReferenceCountForPaper(totalTarget);
 
   // 警告确认
   if (targets.length > 8 || wordCount > 1200 || totalWords > 12000) {
     const targetText = totalTarget ? `全文目标字数 ${totalTarget} 字，` : '';
-    const warningMsg = `即将批量写作 ${targets.length} 个章节，${targetText}按每节约 ${wordCount} 字预计生成约 ${totalWords} 字。\n\n这可能需要较长时间并消耗较多 API 额度。\n\n是否继续？`;
+    const referenceText = targetReferenceCount ? `参考文献目标不少于 ${targetReferenceCount} 条，` : '';
+    const warningMsg = `即将批量写作 ${targets.length} 个章节，${targetText}${referenceText}按每节约 ${wordCount} 字预计生成约 ${totalWords} 字。\n\n这可能需要较长时间并消耗较多 API 额度。\n\n是否继续？`;
     if (!confirm(warningMsg)) {
       setState('paper', '已取消批量写作', 'error');
       return;
@@ -4686,6 +4732,7 @@ async function runBatchWriteAllSections() {
             referenceStyle,
             allSections: paperSectionsForReferenceSync(),
             referenceSnapshot: state.paperReferenceSnapshot || '',
+            ...referenceTargetFields(target.title, targets.length - i),
           };
 
           const data = await requestPaperRun(payload, { timeoutMs: BATCH_PAPER_REQUEST_TIMEOUT_MS });
@@ -4756,7 +4803,10 @@ async function runBatchWriteAllSections() {
 
     // 显示结果摘要
     if (failedSections.length === 0) {
-      setState('paper', `批量写作完成！成功写作 ${completedSections.length} 个章节`, 'done');
+      const finalReferenceCount = countReferenceEntriesInText(state.paperReferenceSnapshot || '');
+      const referenceDetail = targetReferenceCount ? `，参考文献 ${finalReferenceCount}/${targetReferenceCount} 条` : '';
+      const referenceKind = targetReferenceCount && finalReferenceCount < targetReferenceCount ? 'running' : 'done';
+      setState('paper', `批量写作完成！成功写作 ${completedSections.length} 个章节${referenceDetail}`, referenceKind);
       addHistoryRecord('paper', '批量写作全部章节', {
         output: `成功写作 ${completedSections.length} 个章节：\n${completedSections.join('\n')}`,
       });
@@ -4775,6 +4825,7 @@ async function runBatchWriteAllSections() {
 
 function paperRequestPayload(action, payloadText, targetSection, topic, outline, context) {
   const allSectionsPayload = ['section', 'references'].includes(action) ? paperSectionsForReferenceSync() : null;
+  const referenceFields = ['section', 'references'].includes(action) ? referenceTargetFields(targetSection) : {};
   const payload = {
     action,
     text: payloadText,
@@ -4790,6 +4841,7 @@ function paperRequestPayload(action, payloadText, targetSection, topic, outline,
     outline,
     context,
     language: '中文',
+    ...referenceFields,
   };
 
   // Include all sections for reference management
@@ -4913,9 +4965,15 @@ async function runPaperAction(action) {
       syncPaperOutlineFromSections();
       const entryCount = data.references?.entryCount;
       const citationCount = data.references?.citationCount;
+      const targetCount = data.references?.targetCount;
+      const shortfall = data.references?.shortfall;
       const detail = Number.isFinite(entryCount) ? `，共 ${entryCount} 条参考文献` : '';
       const citationDetail = Number.isFinite(citationCount) ? `，扫描到 ${citationCount} 处正文引用` : '';
-      setState('paper', `参考文献已按整篇文章引用顺序整理${detail}${citationDetail}`, 'done');
+      if (Number.isFinite(shortfall) && shortfall > 0 && Number.isFinite(targetCount)) {
+        setState('paper', `参考文献已整理${detail}${citationDetail}，低于目标 ${targetCount} 条，还差 ${shortfall} 条真实带链接文献`, 'running');
+      } else {
+        setState('paper', `参考文献已按整篇文章引用顺序整理${detail}${citationDetail}`, 'done');
+      }
     } else {
       const generatedContent = data.content || data.result || '';
       writePaperContentToSection(targetSection, generatedContent);

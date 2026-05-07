@@ -23,6 +23,25 @@ class PaperWriter:
             'action': action,
         }
 
+    @staticmethod
+    def _positive_int(value, default=0):
+        try:
+            if value is None or value == '':
+                return default
+            parsed = int(float(str(value).replace(',', '').strip()))
+        except Exception:
+            return default
+        return parsed if parsed > 0 else default
+
+    @classmethod
+    def _target_reference_count_for_words(cls, value):
+        total = cls._positive_int(value)
+        if not total:
+            return 0
+        scaled = (total + 699) // 700
+        floor = 15 if total >= 10000 else 6
+        return min(60, max(floor, scaled))
+
     def _render_scene(self, scene_id, values):
         rendered = self.prompt_center.render_scene(scene_id, values)
         return rendered['system'], rendered['prompt']
@@ -330,16 +349,32 @@ class PaperWriter:
         return any(candidate in text for candidate in candidates)
 
     @staticmethod
-    def _section_token_budget(word_count):
+    def _section_token_budget(word_count, reference_count=0):
         try:
             target_words = max(300, int(word_count or 1000))
         except Exception:
             target_words = 1000
+        try:
+            reference_extra = max(0, int(reference_count or 0)) * 140
+        except Exception:
+            reference_extra = 0
         # Keep this close to the requested Chinese character count; a loose token
         # budget lets many models drift from 1200 characters to 1800+ characters.
-        return max(650, min(2200, int(target_words * 1.22) + 120))
+        return max(650, min(PaperWriter.SECTION_MAX_TOKENS, int(target_words * 1.22) + 120 + reference_extra))
 
-    def write_section(self, outline, section_title, context='', word_count=1000, reference_style='GB/T 7714'):
+    def write_section(
+        self,
+        outline,
+        section_title,
+        context='',
+        word_count=1000,
+        reference_style='GB/T 7714',
+        total_word_count='',
+        target_reference_count=0,
+        current_reference_count=0,
+        remaining_section_count=0,
+        reference_snapshot='',
+    ):
         """按章节写作。"""
         system, prompt = self._render_scene(
             'paper_write.section',
@@ -357,6 +392,40 @@ class PaperWriter:
             target_words = 1000
         upper_words = int(target_words * 1.12)
         lower_words = int(target_words * 0.88)
+        target_reference_count = self._positive_int(target_reference_count) or self._target_reference_count_for_words(total_word_count)
+        current_reference_count = self._positive_int(current_reference_count)
+        remaining_section_count = max(1, self._positive_int(remaining_section_count, 1))
+        remaining_reference_count = max(0, target_reference_count - current_reference_count)
+        reference_target_for_section = 0
+        reference_density_prompt = ''
+        reference_snapshot = str(reference_snapshot or '').strip()
+        reference_snapshot_prompt = ''
+        if reference_snapshot:
+            reference_snapshot_prompt = (
+                '\n\n【已有参考文献去重】\n'
+                '以下是当前已经保留的参考文献快照，新增文献时不得重复这些条目，也不要只改写同一来源的题名来凑数：\n'
+                f'{reference_snapshot[:2200]}\n'
+            )
+        if target_reference_count:
+            if remaining_reference_count:
+                reference_target_for_section = min(
+                    5,
+                    max(1, (remaining_reference_count + remaining_section_count - 1) // remaining_section_count),
+                )
+                reference_density_prompt = (
+                    '\n\n【参考文献数量硬约束】\n'
+                    f'全文目标字数约 {total_word_count or "未明确"} 字，最终参考文献不得少于 {target_reference_count} 条真实、可核验、带链接的中文来源。\n'
+                    f'当前已保留的有效参考文献约 {current_reference_count} 条，包含本章节在内预计还剩 {remaining_section_count} 个可写章节，仍需补足约 {remaining_reference_count} 条。\n'
+                    f'本章节如果是正文实质小节，原则上请新增 {reference_target_for_section} 条不同的真实中文带链接参考文献，并在正文相应观点处使用编号引用。\n'
+                    '文献综述、研究现状、变量选取、模型构建、实证分析、政策建议等章节优先使用 2-3 条，若前文不足可提高到本章节目标；摘要、结论或纯过渡章节可少引用，但不得虚构。\n'
+                    '新增条目不得与前文重复；如果某条无法确认真实链接，宁可换成可核验来源，也不要降低真实性要求。\n'
+                )
+            else:
+                reference_density_prompt = (
+                    '\n\n【参考文献数量硬约束】\n'
+                    f'全文参考文献目标为不少于 {target_reference_count} 条真实、可核验、带链接的中文来源，当前已达到或接近目标。\n'
+                    '本章节如继续引用，仍必须使用真实中文带链接来源，并避免与前文重复；不需要为了凑数添加无关文献。\n'
+                )
         prompt = (
             f'{prompt}\n\n'
             '【字数硬约束】\n'
@@ -375,11 +444,13 @@ class PaperWriter:
             '参考文献条目应同时提供可核验线索，例如期刊/出版社/发布机构、年份、卷期页码、DOI 或官网链接。\n'
             '不得使用英文论文、英文网页、英文书籍或将英文文献翻译成中文后冒充中文来源；找不到真实可靠且带链接的中文来源时使用 `[待补充带链接中文文献]`，不要输出伪造条目。\n'
             '参考文献条目中的题名、来源、出版单位等信息应保持中文，避免出现英文题名或英文期刊名。'
+            f'{reference_density_prompt}'
+            f'{reference_snapshot_prompt}'
         )
         return self.api.call_sync(
             prompt,
             system,
-            max_tokens=self._section_token_budget(target_words),
+            max_tokens=self._section_token_budget(target_words, reference_target_for_section),
             usage_context=self._usage_context('paper_write.section', 'write_section'),
         )
 
