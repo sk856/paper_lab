@@ -362,6 +362,76 @@ class PaperWriter:
         # budget lets many models drift from 1200 characters to 1800+ characters.
         return max(650, min(PaperWriter.SECTION_MAX_TOKENS, int(target_words * 1.22) + 120 + reference_extra))
 
+    @classmethod
+    def _empirical_analysis_prompt(cls, section_title):
+        title = re.sub(r'\s+', '', cls._strip_heading_number(section_title))
+        if not title:
+            return ''
+
+        mechanism_terms = (
+            '机理分析',
+            '机理研究',
+            '机制分析',
+            '作用机理',
+            '影响机理',
+            '理论机制',
+            '传导机制',
+        )
+        variable_selection_terms = (
+            '变量选取',
+            '变量选择',
+            '变量设定',
+            '指标选取',
+            '指标选择',
+            '变量说明',
+            '变量定义',
+        )
+        correlation_terms = (
+            '变量相关分析',
+            '相关分析',
+            '相关性分析',
+            '变量相关性',
+            '相关关系分析',
+        )
+
+        matched = []
+        if any(term in title for term in mechanism_terms):
+            matched.append('mechanism')
+        if any(term in title for term in variable_selection_terms):
+            matched.append('variable_selection')
+        if any(term in title for term in correlation_terms):
+            matched.append('correlation')
+        if not matched:
+            return ''
+
+        sections = [
+            '\n\n【实证分析结构硬约束】\n'
+            '当前章节标题涉及机理分析、变量选取或变量相关分析，必须服务于后续数据分析，不能只写概念性综述。'
+        ]
+        if 'mechanism' in matched:
+            sections.append(
+                '机理分析部分必须明确“核心解释变量 X 如何影响被解释变量 Y”的逻辑链条；'
+                '至少给出一个可检验关系式或机制表达式，例如 `Y = β0 + β1X + β2M + β3Controls + ε`，'
+                '并解释 X、Y、M 或 Controls 的含义、预期影响方向以及为什么这些变量能够承接理论机制。'
+            )
+        if 'variable_selection' in matched:
+            sections.append(
+                '变量选取部分必须分别说明被解释变量、核心解释变量、控制变量（如适用还包括中介变量、调节变量）的选取依据；'
+                '每类变量都要写清楚变量含义、可观测指标或度量方式、预期符号/作用方向、数据来源或可获得性。'
+                '若论文包含实证检验，必须给出基准模型方程，并逐项解释方程中的变量和参数。'
+            )
+        if 'correlation' in matched:
+            sections.append(
+                '变量相关分析部分必须说明将对哪些解释变量、被解释变量和控制变量计算相关关系；'
+                '需要给出相关系数或相关矩阵的构建方式（如 Pearson 或 Spearman 相关系数公式），'
+                '解释相关系数正负、强弱和显著性的判读逻辑，并明确相关分析只能揭示线性/单调关联，不能直接证明因果关系。'
+            )
+        sections.append(
+            '如果当前没有真实数据，不得编造数值或显著性结果；应写成“后续将基于样本数据计算/检验”的可执行分析方案，'
+            '但仍必须保留方程、变量定义和解释变量/被解释变量选择依据。'
+        )
+        return '\n'.join(sections)
+
     def write_section(
         self,
         outline,
@@ -398,6 +468,7 @@ class PaperWriter:
         remaining_reference_count = max(0, target_reference_count - current_reference_count)
         reference_target_for_section = 0
         reference_density_prompt = ''
+        empirical_analysis_prompt = self._empirical_analysis_prompt(section_title)
         reference_snapshot = str(reference_snapshot or '').strip()
         reference_snapshot_prompt = ''
         if reference_snapshot:
@@ -444,6 +515,7 @@ class PaperWriter:
             '参考文献条目应同时提供可核验线索，例如期刊/出版社/发布机构、年份、卷期页码、DOI 或官网链接。\n'
             '不得使用英文论文、英文网页、英文书籍或将英文文献翻译成中文后冒充中文来源；找不到真实可靠且带链接的中文来源时使用 `[待补充带链接中文文献]`，不要输出伪造条目。\n'
             '参考文献条目中的题名、来源、出版单位等信息应保持中文，避免出现英文题名或英文期刊名。'
+            f'{empirical_analysis_prompt}'
             f'{reference_density_prompt}'
             f'{reference_snapshot_prompt}'
         )
