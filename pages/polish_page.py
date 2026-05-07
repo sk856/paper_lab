@@ -68,7 +68,7 @@ class PolishPage(WorkspaceStateMixin):
         'logic': '重点加强因果、转承和段落逻辑。',
         'full': '综合执行语法、表达、逻辑和学术风格提升。',
     }
-    LEGACY_FACT_HINT = '请保留原文事实、数据、引用含义和术语准确性，不要杜撰文献或新增结论。'
+    LEGACY_FACT_HINT = '请保留原文事实、数据、引用含义和术语准确性，不要杜撰、拼接或新增参考文献，不要新增结论。'
 
     def __init__(self, parent, config_mgr, api_client, history_mgr, set_status, navigate_page=None, app_bridge=None):
         self.config = config_mgr
