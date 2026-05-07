@@ -18,10 +18,11 @@ import sys
 import tempfile
 import threading
 import traceback
+import uuid
 import webbrowser
 from datetime import datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from urllib.parse import unquote, urlparse
+from urllib.parse import parse_qs, unquote, urlparse
 
 from modules.ai_reducer import AIReducer
 from modules.api_client import APIClient
@@ -32,6 +33,12 @@ from modules.plagiarism import PlagiarismReducer
 from modules.polisher import AcademicPolisher
 from modules.paper_writer import PaperWriter
 from modules.paper_exporter import export_paper_document
+from modules.paper_ppt_bridge import (
+    generate_ppt_from_paper,
+    read_ppt_preview,
+    run_ppt_generation_task,
+    run_ppt_refine_task,
+)
 from modules.provider_registry import PRESET_MAP, PRESET_OPTIONS, get_static_models, normalize_provider_type
 from modules.runtime_paths import get_runtime_paths
 from modules.reference_manager import (
@@ -1113,6 +1120,8 @@ class WebWorkbench:
         os.makedirs(self.base_user_data_root, exist_ok=True)
         self._session_lock = threading.RLock()
         self._sessions = {}
+        self._ppt_lock = threading.RLock()
+        self._ppt_jobs = {}
         self._default_session = self._create_session(runtime_paths.base_data_root)
 
     def _create_session(self, data_root):
@@ -1432,6 +1441,193 @@ class WebWorkbench:
             result['citationNumber'] = reference_result['citationNumber']
             return result
         raise ValueError('未知数据图表操作')
+
+    def generate_paper_ppt(self, payload, user_id=''):
+        return generate_ppt_from_paper(payload, self._config(user_id), PROJECT_DIR, WEB_DIR)
+
+    def start_paper_ppt(self, payload, user_id=''):
+        job_id = uuid.uuid4().hex[:12]
+        job = {
+            'id': job_id,
+            'kind': 'generate',
+            'status': 'pending',
+            'progress': 0,
+            'message': '等待开始',
+            'slidesCompleted': 0,
+            'totalSlides': 0,
+            'events': [],
+            'outputPath': '',
+            'projectDir': '',
+            'error': '',
+            'title': str(payload.get('title') or '论文PPT'),
+            'options': payload.get('pptOptions') or {},
+        }
+        with self._ppt_lock:
+            self._ppt_jobs[job_id] = job
+
+        thread = threading.Thread(
+            target=self._run_paper_ppt_job,
+            args=(job_id, payload, user_id),
+            daemon=True,
+        )
+        thread.start()
+        return self.ppt_job_status(job_id)
+
+    def start_paper_ppt_refine(self, payload, user_id=''):
+        parent_id = str(payload.get('jobId') or '').strip()
+        parent = self._get_ppt_job(parent_id)
+        if not parent or not parent.get('projectDir'):
+            raise ValueError('没有可重做的 PPT 任务')
+        job_id = uuid.uuid4().hex[:12]
+        refine_payload = dict(payload or {})
+        refine_payload['projectDir'] = parent.get('projectDir')
+        refine_payload['parentJobId'] = parent_id
+        refine_payload['title'] = parent.get('title') or refine_payload.get('title') or '论文PPT'
+        refine_payload.setdefault('canvasFormat', (parent.get('options') or {}).get('canvasFormat') or 'ppt169')
+        refine_payload.setdefault('style', (parent.get('options') or {}).get('style') or 'academic')
+        refine_payload.setdefault('language', (parent.get('options') or {}).get('language') or 'zh')
+        refine_payload.setdefault('detailLevel', (parent.get('options') or {}).get('detailLevel') or 'normal')
+        job = {
+            'id': job_id,
+            'kind': 'refine',
+            'parentJobId': parent_id,
+            'status': 'pending',
+            'progress': 0,
+            'message': '等待重做',
+            'slidesCompleted': 0,
+            'totalSlides': parent.get('totalSlides') or 0,
+            'events': [],
+            'outputPath': '',
+            'projectDir': parent.get('projectDir'),
+            'error': '',
+            'title': refine_payload['title'],
+            'options': parent.get('options') or {},
+            'targetPages': refine_payload.get('targetPages') or [],
+        }
+        with self._ppt_lock:
+            self._ppt_jobs[job_id] = job
+
+        thread = threading.Thread(
+            target=self._run_paper_ppt_refine_job,
+            args=(job_id, refine_payload, user_id),
+            daemon=True,
+        )
+        thread.start()
+        return self.ppt_job_status(job_id)
+
+    def _run_paper_ppt_job(self, job_id, payload, user_id):
+        self._update_ppt_job(job_id, status='running', message='正在启动 PPT Agent')
+        try:
+            result = run_ppt_generation_task(
+                payload,
+                self._config(user_id),
+                PROJECT_DIR,
+                WEB_DIR,
+                progress_callback=lambda event: self._record_ppt_event(job_id, event),
+            )
+            slides = read_ppt_preview(result.get('project_dir') or '')
+            self._update_ppt_job(
+                job_id,
+                status='complete',
+                progress=1,
+                message='PPT 已生成',
+                outputPath=result.get('output_path') or '',
+                projectDir=result.get('project_dir') or '',
+                totalSlides=len(slides),
+                slidesCompleted=len(slides),
+                error='',
+            )
+        except Exception as exc:
+            self._update_ppt_job(job_id, status='error', message=str(exc), error=str(exc))
+
+    def _run_paper_ppt_refine_job(self, job_id, payload, user_id):
+        self._update_ppt_job(job_id, status='running', message='正在重做 PPT 页面')
+        try:
+            result = run_ppt_refine_task(
+                {**payload, 'jobId': job_id},
+                self._config(user_id),
+                PROJECT_DIR,
+                progress_callback=lambda event: self._record_ppt_event(job_id, event),
+            )
+            slides = read_ppt_preview(result.get('project_dir') or payload.get('projectDir') or '')
+            self._update_ppt_job(
+                job_id,
+                status='complete',
+                progress=1,
+                message='PPT 页面已重做',
+                outputPath=result.get('output_path') or '',
+                projectDir=result.get('project_dir') or payload.get('projectDir') or '',
+                totalSlides=len(slides),
+                slidesCompleted=len(slides),
+                error='',
+            )
+        except Exception as exc:
+            self._update_ppt_job(job_id, status='error', message=str(exc), error=str(exc))
+
+    def _record_ppt_event(self, job_id, event):
+        data = event.get('data') if isinstance(event, dict) else {}
+        updates = {
+            'status': 'running',
+            'message': event.get('message') or '',
+            'progress': event.get('progress') or 0,
+        }
+        if isinstance(data, dict):
+            if data.get('project_dir'):
+                updates['projectDir'] = data.get('project_dir')
+            if data.get('output_path'):
+                updates['outputPath'] = data.get('output_path')
+            if data.get('total_slides'):
+                updates['totalSlides'] = data.get('total_slides')
+            if data.get('page'):
+                updates['slidesCompleted'] = max(int(data.get('page') or 0), 0)
+        with self._ppt_lock:
+            job = self._ppt_jobs.get(job_id)
+            if not job:
+                return
+            job.update(updates)
+            job['events'] = (job.get('events') or [])[-40:] + [event]
+
+    def _update_ppt_job(self, job_id, **updates):
+        with self._ppt_lock:
+            job = self._ppt_jobs.get(job_id)
+            if job:
+                job.update(updates)
+
+    def _get_ppt_job(self, job_id):
+        with self._ppt_lock:
+            job = self._ppt_jobs.get(str(job_id or '').strip())
+            return dict(job) if job else None
+
+    def ppt_job_status(self, job_id):
+        job = self._get_ppt_job(job_id)
+        if not job:
+            raise ValueError('PPT 任务不存在')
+        public = dict(job)
+        public['hasOutput'] = bool(public.get('outputPath') and os.path.isfile(public.get('outputPath')))
+        return public
+
+    def ppt_job_preview(self, job_id):
+        job = self._get_ppt_job(job_id)
+        if not job:
+            raise ValueError('PPT 任务不存在')
+        return {
+            'job': self.ppt_job_status(job_id),
+            'slides': read_ppt_preview(job.get('projectDir') or ''),
+        }
+
+    def ppt_job_download(self, job_id):
+        job = self._get_ppt_job(job_id)
+        if not job:
+            raise ValueError('PPT 任务不存在')
+        output_path = job.get('outputPath') or ''
+        if not output_path or not os.path.isfile(output_path):
+            raise ValueError('PPT 文件还没有生成')
+        title = re.sub(r'[<>:"/\\|?*\x00-\x1f]+', '_', str(job.get('title') or '论文PPT')).strip(' ._') or '论文PPT'
+        return {
+            'filename': f'{title[:80]}-PPT.pptx',
+            'content_type': 'application/vnd.openxmlformats-officedocument.presentationml.presentation',
+            'body': open(output_path, 'rb').read(),
+        }
 
     def analyze(self, text, user_id=''):
         ai_reducer = self._ai_reducer(user_id)
@@ -1812,6 +2008,28 @@ class RequestHandler(BaseHTTPRequestHandler):
         if parsed.path == '/api/config':
             self._send_json({'ok': True, 'data': self.workbench.config_payload(user_id)})
             return
+        if parsed.path == '/api/paper/ppt/status':
+            job_id = (parse_qs(parsed.query).get('jobId') or [''])[0]
+            try:
+                self._send_json({'ok': True, 'data': self.workbench.ppt_job_status(job_id)})
+            except Exception as exc:
+                self._send_json({'ok': False, 'error': str(exc)}, status=404)
+            return
+        if parsed.path == '/api/paper/ppt/preview':
+            job_id = (parse_qs(parsed.query).get('jobId') or [''])[0]
+            try:
+                self._send_json({'ok': True, 'data': self.workbench.ppt_job_preview(job_id)})
+            except Exception as exc:
+                self._send_json({'ok': False, 'error': str(exc)}, status=404)
+            return
+        if parsed.path == '/api/paper/ppt/download':
+            job_id = (parse_qs(parsed.query).get('jobId') or [''])[0]
+            try:
+                exported = self.workbench.ppt_job_download(job_id)
+                self._send_binary(exported['body'], exported['filename'], exported['content_type'])
+            except Exception as exc:
+                self._send_json({'ok': False, 'error': str(exc)}, status=404)
+            return
         self._serve_static(parsed.path)
 
     def do_POST(self):
@@ -1835,6 +2053,14 @@ class RequestHandler(BaseHTTPRequestHandler):
                 data = self.workbench.run_data_chart(payload, user_id)
             elif parsed.path == '/api/paper/export':
                 exported = export_paper_document(payload, PROJECT_DIR, WEB_DIR)
+                self._send_binary(exported.body, exported.filename, exported.content_type)
+                return
+            elif parsed.path == '/api/paper/ppt/start':
+                data = self.workbench.start_paper_ppt(payload, user_id)
+            elif parsed.path == '/api/paper/ppt/refine':
+                data = self.workbench.start_paper_ppt_refine(payload, user_id)
+            elif parsed.path == '/api/paper/ppt':
+                exported = self.workbench.generate_paper_ppt(payload, user_id)
                 self._send_binary(exported.body, exported.filename, exported.content_type)
                 return
             else:

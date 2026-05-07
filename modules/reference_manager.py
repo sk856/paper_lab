@@ -2,7 +2,11 @@
 参考文献管理模块
 从桌面端 paper_write_page.py 移植的参考文献处理函数
 """
+import html
 import re
+import urllib.error
+import urllib.parse
+import urllib.request
 
 
 # 支持数字参考文献编号的格式
@@ -220,6 +224,7 @@ def normalize_reference_entry_text(text):
     normalized = normalize_section_body(text or '')
     # 移除编号前缀 [1] 或 1. 或 1、
     normalized = re.sub(r'^\s*(?:\[(\d+)\]|(\d+)[\.、])\s*', '', normalized)
+    normalized = REFERENCE_VALIDATION_MARKER_RE.sub('', normalized)
     # 合并多个空格为单个空格
     normalized = re.sub(r'\s+', ' ', normalized).strip()
     return normalized
@@ -228,6 +233,375 @@ def normalize_reference_entry_text(text):
 def reference_entry_key(text):
     """生成参考文献去重键"""
     return normalize_reference_entry_text(text)
+
+
+REFERENCE_LINK_RE = re.compile(
+    r'(?:https?://|www\.)[^\s<>"\'\]\[）)；;，。、]+',
+    re.IGNORECASE,
+)
+
+REFERENCE_URL_RE = re.compile(
+    r'(?:https?://|www\.)[^\s<>"\'\]\[）)；;，。、]+',
+    re.IGNORECASE,
+)
+
+REFERENCE_VALIDATION_MARKER_RE = re.compile(
+    r'\s*链接：\[(?:待补充真实可访问链接|疑似无效：[^\]]+)\]\s*$'
+)
+
+REFERENCE_VALIDATION_CACHE = {}
+REFERENCE_SEARCH_CACHE = {}
+
+
+def reference_entry_has_link(text):
+    """判断参考文献条目是否包含可核验链接线索。"""
+    return bool(REFERENCE_LINK_RE.search(str(text or '')))
+
+
+def extract_reference_urls(text):
+    """提取参考文献条目中的可访问 URL。"""
+    urls = []
+    seen = set()
+    for match in REFERENCE_URL_RE.finditer(str(text or '')):
+        url = _normalize_reference_url(match.group(0))
+        if not url or url in seen:
+            continue
+        seen.add(url)
+        urls.append(url)
+    return urls
+
+
+def _normalize_reference_url(url):
+    normalized = str(url or '').strip().strip('\'"<>[]()（）')
+    normalized = normalized.rstrip('，,。；;、')
+    while normalized.endswith('.'):
+        normalized = normalized[:-1]
+    if normalized.lower().startswith('www.'):
+        normalized = 'https://' + normalized
+    return normalized
+
+
+def _compact_reference_match_text(text):
+    normalized = html.unescape(str(text or ''))
+    normalized = normalized.replace('—', '-').replace('－', '-').replace('–', '-')
+    return re.sub(r'[^0-9a-zA-Z\u4e00-\u9fff]+', '', normalized).lower()
+
+
+def _reference_title_candidate(text):
+    entry_text = normalize_reference_entry_text(text)
+    entry_text = REFERENCE_URL_RE.sub('', entry_text)
+    quoted_titles = re.findall(r'《([^》]{2,120})》', entry_text)
+    if quoted_titles:
+        return max(quoted_titles, key=len).strip()
+
+    title_match = re.search(
+        r'\.\s*(.+?)(?:\[(?:J|M|D|C|N|R|S|P|A|Z|EB/OL|R/OL|OL)[^\]]*\]|(?:\.\s*)?\d{4}\s*[,，(（]|$)',
+        entry_text,
+        flags=re.IGNORECASE,
+    )
+    if title_match:
+        return title_match.group(1).strip(' .。:：')
+
+    source_match = re.search(r'^(.+?)(?:\[(?:J|M|D|C|N|R|S|P|A|Z|EB/OL|R/OL|OL)[^\]]*\])', entry_text, flags=re.IGNORECASE)
+    if source_match:
+        return source_match.group(1).strip(' .。:：')
+
+    return entry_text[:120].strip(' .。:：')
+
+
+def _iter_title_ngrams(text, size):
+    if len(text) < size:
+        return set()
+    return {text[index:index + size] for index in range(0, len(text) - size + 1)}
+
+
+def _reference_title_matches_page(entry_text, page_title):
+    title_candidate = _compact_reference_match_text(_reference_title_candidate(entry_text))
+    page_candidate = _compact_reference_match_text(page_title)
+    if not title_candidate or not page_candidate:
+        return True
+    if title_candidate in page_candidate or page_candidate in title_candidate:
+        return True
+    if len(title_candidate) < 8:
+        return title_candidate in page_candidate
+
+    long_matches = _iter_title_ngrams(title_candidate, 12) & _iter_title_ngrams(page_candidate, 12)
+    if long_matches:
+        return True
+    medium_matches = _iter_title_ngrams(title_candidate, 8) & _iter_title_ngrams(page_candidate, 8)
+    return len(medium_matches) >= 2
+
+
+def _fetch_reference_url_metadata(url, timeout=5):
+    cache_key = (url, int(timeout))
+    if cache_key in REFERENCE_VALIDATION_CACHE:
+        return REFERENCE_VALIDATION_CACHE[cache_key]
+
+    request = urllib.request.Request(
+        url,
+        headers={
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+            'Accept-Language': 'zh-CN,zh;q=0.9,en;q=0.6',
+        },
+        method='GET',
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=timeout) as response:
+            body = response.read(300000)
+            charset = response.headers.get_content_charset() or 'utf-8'
+            page_text = body.decode(charset, errors='replace')
+            title_match = re.search(r'<title[^>]*>(.*?)</title>', page_text, flags=re.IGNORECASE | re.DOTALL)
+            title = ''
+            if title_match:
+                title = re.sub(r'\s+', ' ', html.unescape(title_match.group(1))).strip()
+            result = {
+                'ok': 200 <= int(response.status) < 400,
+                'status': int(response.status),
+                'url': response.geturl(),
+                'title': title,
+                'error': '',
+            }
+    except urllib.error.HTTPError as exc:
+        result = {'ok': False, 'status': int(exc.code), 'url': url, 'title': '', 'error': f'HTTP {exc.code}'}
+    except Exception as exc:
+        result = {'ok': False, 'status': 0, 'url': url, 'title': '', 'error': exc.__class__.__name__}
+
+    REFERENCE_VALIDATION_CACHE[cache_key] = result
+    return result
+
+
+def _reference_search_terms(entry_text):
+    title = _reference_title_candidate(entry_text)
+    title = re.sub(r'\s+', ' ', title).strip(' .。:：')
+    if not title or len(title) < 4:
+        return []
+    terms = [title]
+    if '金融科技发展规划' in title:
+        terms.append('中国人民银行 金融科技发展规划 2022 2025')
+    if '供应链金融' in title:
+        terms.append('规范发展供应链金融 支持供应链产业链稳定循环和优化升级')
+    return list(dict.fromkeys(terms))
+
+
+def _reference_search_domains(entry_text, urls):
+    domains = []
+    for url in urls:
+        try:
+            host = urllib.parse.urlparse(url).netloc.lower()
+        except Exception:
+            host = ''
+        if host:
+            domains.append(host)
+    lowered = str(entry_text or '').lower()
+    if '中国人民银行' in entry_text or '人民银行' in entry_text or 'pbc' in lowered:
+        domains.extend(['pbc.gov.cn', 'gov.cn'])
+    if '国务院' in entry_text or '工业和信息化部' in entry_text or '工信部' in entry_text or 'gov.cn' in lowered:
+        domains.extend(['gov.cn'])
+    return list(dict.fromkeys(domain.lstrip('www.') for domain in domains if domain))
+
+
+def _decode_search_result_url(url):
+    value = html.unescape(str(url or '')).strip()
+    if not value:
+        return ''
+    parsed = urllib.parse.urlparse(value)
+    query = urllib.parse.parse_qs(parsed.query)
+    for key in ('uddg', 'u', 'url', 'q'):
+        if query.get(key):
+            candidate = urllib.parse.unquote(query[key][0])
+            if candidate.startswith(('http://', 'https://')):
+                return candidate
+    if value.startswith(('http://', 'https://')):
+        return value
+    return ''
+
+
+def _extract_search_urls(page_text):
+    urls = []
+    for match in re.finditer(r'href=["\']([^"\']+)["\']', page_text or '', flags=re.I):
+        url = _decode_search_result_url(match.group(1))
+        if not url:
+            continue
+        host = urllib.parse.urlparse(url).netloc.lower()
+        if not host or any(blocked in host for blocked in ('bing.com', 'duckduckgo.com', 'baidu.com', 'google.com')):
+            continue
+        if url not in urls:
+            urls.append(url)
+    return urls
+
+
+def _search_reference_candidates(query, timeout=6):
+    cache_key = query.strip().lower()
+    if cache_key in REFERENCE_SEARCH_CACHE:
+        return REFERENCE_SEARCH_CACHE[cache_key]
+
+    endpoints = [
+        'https://duckduckgo.com/html/?' + urllib.parse.urlencode({'q': query}),
+        'https://www.bing.com/search?' + urllib.parse.urlencode({'q': query}),
+    ]
+    results = []
+    for endpoint in endpoints:
+        request = urllib.request.Request(
+            endpoint,
+            headers={
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+                'Accept-Language': 'zh-CN,zh;q=0.9,en;q=0.6',
+            },
+        )
+        try:
+            with urllib.request.urlopen(request, timeout=timeout) as response:
+                charset = response.headers.get_content_charset() or 'utf-8'
+                page_text = response.read(500000).decode(charset, errors='replace')
+        except Exception:
+            continue
+        for url in _extract_search_urls(page_text):
+            if url not in results:
+                results.append(url)
+            if len(results) >= 8:
+                break
+        if results:
+            break
+
+    REFERENCE_SEARCH_CACHE[cache_key] = results
+    return results
+
+
+def _url_host_matches_domain(url, domain):
+    try:
+        host = urllib.parse.urlparse(url).netloc.lower().lstrip('www.')
+    except Exception:
+        return False
+    expected = str(domain or '').lower().lstrip('www.')
+    return bool(host and expected and (host == expected or host.endswith('.' + expected)))
+
+
+def repair_reference_entry_url(text):
+    """按题名搜索并返回修复后的参考文献条目；失败返回空字符串。"""
+    entry_text = normalize_reference_entry_text(text)
+    if not entry_text:
+        return ''
+
+    urls = extract_reference_urls(entry_text)
+    valid_urls = [url for url in urls if _reference_url_is_valid_for_entry(entry_text, url)]
+    if valid_urls:
+        cleaned = entry_text
+        for url in urls:
+            if url not in valid_urls:
+                cleaned = _remove_reference_url(cleaned, url)
+        return re.sub(r'\s+', ' ', cleaned).strip()
+
+    terms = _reference_search_terms(entry_text)
+    if not terms:
+        return ''
+    domains = _reference_search_domains(entry_text, urls)
+    queries = []
+    for term in terms:
+        for domain in domains:
+            queries.append(f'{term} site:{domain}')
+        queries.append(term)
+
+    for query in dict.fromkeys(queries):
+        site_match = re.search(r'\bsite:([A-Za-z0-9.-]+)', query)
+        site_domain = site_match.group(1) if site_match else ''
+        for candidate_url in _search_reference_candidates(query):
+            if site_domain and not _url_host_matches_domain(candidate_url, site_domain):
+                continue
+            if not _reference_url_is_valid_for_entry(entry_text, candidate_url):
+                continue
+            cleaned = entry_text
+            for url in urls:
+                cleaned = _remove_reference_url(cleaned, url)
+            cleaned = REFERENCE_VALIDATION_MARKER_RE.sub('', cleaned)
+            cleaned = re.sub(r'\s+', ' ', cleaned).strip(' ，,。；;')
+            return f'{cleaned} {candidate_url}'.strip()
+    return ''
+
+
+def validate_reference_entry_link(text):
+    """校验参考文献 URL 是否能访问且页面标题是否大致匹配条目题名。"""
+    urls = extract_reference_urls(text)
+    if not urls:
+        return '缺少真实可访问链接'
+
+    invalid_reasons = []
+    mismatch_reasons = []
+    for url in urls:
+        metadata = _fetch_reference_url_metadata(url)
+        if not metadata.get('ok'):
+            status = metadata.get('status')
+            reason = f'URL 访问失败（HTTP {status}）' if status else 'URL 无法自动访问'
+            invalid_reasons.append(reason)
+            continue
+        title = metadata.get('title', '')
+        if _reference_title_matches_page(text, title):
+            return ''
+        if title:
+            mismatch_reasons.append(f'页面标题不匹配：{title[:80]}')
+        else:
+            return ''
+
+    reasons = mismatch_reasons or invalid_reasons
+    return '；'.join(dict.fromkeys(reasons)) if reasons else ''
+
+
+def _reference_url_is_valid_for_entry(entry_text, url):
+    metadata = _fetch_reference_url_metadata(url)
+    if not metadata.get('ok'):
+        return False
+    title = metadata.get('title', '')
+    return not title or _reference_title_matches_page(entry_text, title)
+
+
+def _remove_reference_url(text, url):
+    if not url:
+        return text
+    variants = {url}
+    if url.lower().startswith('https://'):
+        variants.add(url[8:])
+    if url.lower().startswith('http://'):
+        variants.add(url[7:])
+    result = str(text or '')
+    for variant in sorted(variants, key=len, reverse=True):
+        result = re.sub(re.escape(variant), '', result)
+    result = re.sub(r'\s+', ' ', result).strip()
+    result = re.sub(r'\s+([，,。；;])', r'\1', result)
+    return result.strip(' ，,。；;')
+
+
+def sanitize_reference_entry_for_output(text):
+    """修复并仅保留带真实可访问 URL 的参考文献条目。
+
+    无链接、链接不可访问、或链接页面与题名不匹配且无法修复的条目直接丢弃。
+    如果一条条目包含多个 URL，仅保留其中有效的 URL。
+    """
+    entry_text = repair_reference_entry_url(text)
+    if not entry_text:
+        return ''
+    urls = extract_reference_urls(entry_text)
+    if not urls:
+        return ''
+
+    valid_urls = []
+    invalid_urls = []
+    for url in urls:
+        if _reference_url_is_valid_for_entry(entry_text, url):
+            valid_urls.append(url)
+        else:
+            invalid_urls.append(url)
+    if not valid_urls:
+        return ''
+
+    cleaned = entry_text
+    for url in invalid_urls:
+        cleaned = _remove_reference_url(cleaned, url)
+    cleaned = REFERENCE_VALIDATION_MARKER_RE.sub('', cleaned)
+    cleaned = re.sub(r'\s+', ' ', cleaned).strip()
+    return cleaned
+
+
+def ensure_reference_entry_link_marker(text):
+    """兼容旧调用：修复可修复条目，失败返回空，不再输出校验标记。"""
+    return sanitize_reference_entry_for_output(text)
 
 
 def parse_reference_entries(text):
@@ -372,7 +746,7 @@ def collect_citation_reference_keys(text, number_to_entry):
     return keys
 
 
-def rewrite_citations_with_entry_map(text, number_to_entry):
+def rewrite_citations_with_entry_map(text, number_to_entry, drop_missing=False):
     """
     重写文本中的引用编号
 
@@ -393,9 +767,14 @@ def rewrite_citations_with_entry_map(text, number_to_entry):
         for number in source_numbers:
             entry = number_to_entry.get(number)
             target_number = entry.get('new_number') if entry else None
-            target_numbers.append(target_number if target_number else number)
+            if target_number:
+                target_numbers.append(target_number)
+            elif not drop_missing:
+                target_numbers.append(number)
         formatted = format_citation_numbers(target_numbers)
-        return f'[{formatted}]' if formatted else match.group(0)
+        if formatted:
+            return f'[{formatted}]'
+        return '' if drop_missing else match.group(0)
 
     return re.sub(r'\[([^\[\]]+)\]', replace, text)
 
@@ -408,12 +787,12 @@ def build_reference_body_from_entries(entries):
     输出: "[1] ...\n[2] ...\n[3] ..."
     """
     lines = []
-    for index, entry in enumerate(entries, start=1):
-        entry_text = normalize_reference_entry_text(entry.get('text', ''))
+    for entry in entries or []:
+        entry_text = sanitize_reference_entry_for_output(entry.get('text', ''))
         if not entry_text:
             continue
-        # 优先使用条目中的编号，如果没有则使用索引
-        entry_number = entry.get('number') or entry.get('new_number') or index
+        # 无效条目会被剔除，因此输出时重新连续编号，避免出现编号断档。
+        entry_number = len(lines) + 1
         lines.append(f'[{entry_number}]{entry_text}')
     return '\n'.join(lines).strip()
 
@@ -428,7 +807,7 @@ def merge_reference_entry_lists(*groups):
     seen = set()
     for group in groups:
         for entry in group or []:
-            entry_text = normalize_reference_entry_text(entry.get('text', ''))
+            entry_text = sanitize_reference_entry_for_output(entry.get('text', ''))
             entry_key = reference_entry_key(entry_text)
             if not entry_key or entry_key in seen:
                 continue
@@ -447,7 +826,7 @@ def build_reference_number_map(entries):
     number_map = {}
     next_auto_number = 1
     for entry in entries or []:
-        entry_text = normalize_reference_entry_text(entry.get('text', ''))
+        entry_text = sanitize_reference_entry_for_output(entry.get('text', ''))
         entry_key = reference_entry_key(entry_text)
         if not entry_key:
             continue
@@ -478,7 +857,7 @@ def build_reference_occurrence_runs(entries):
     previous_number = None
     next_auto_number = 1
     for position, entry in enumerate(entries or []):
-        entry_text = normalize_reference_entry_text(entry.get('text', ''))
+        entry_text = sanitize_reference_entry_for_output(entry.get('text', ''))
         entry_key = reference_entry_key(entry_text)
         if not entry_key:
             continue
@@ -890,7 +1269,7 @@ def collect_references_from_sections(sections, start_position, end_position=None
     return all_keys
 
 
-def renumber_references(content, old_to_new_map):
+def renumber_references(content, old_to_new_map, drop_missing=False):
     """
     根据编号映射更新章节中的引用编号
 
@@ -912,17 +1291,21 @@ def renumber_references(content, old_to_new_map):
         new_numbers = []
         for num in numbers:
             new_num = old_to_new_map.get(num, num)
-            new_numbers.append(new_num)
+            if num in old_to_new_map or not drop_missing:
+                new_numbers.append(new_num)
 
         # 格式化新编号
-        return '[' + format_citation_numbers(new_numbers) + ']'
+        formatted = format_citation_numbers(new_numbers)
+        if formatted:
+            return '[' + formatted + ']'
+        return '' if drop_missing else match.group(0)
 
     # 替换所有引用
     updated = re.sub(r'\[([^\[\]]+)\]', replace_citation, content)
     return updated
 
 
-def rewrite_citations_with_number_map(text, old_to_new_map):
+def rewrite_citations_with_number_map(text, old_to_new_map, drop_missing=False):
     """
     使用旧编号到新编号的映射重写正文引用。
     """
@@ -933,9 +1316,15 @@ def rewrite_citations_with_number_map(text, old_to_new_map):
         source_numbers = parse_citation_numbers(match.group(1))
         if not source_numbers:
             return match.group(0)
-        target_numbers = [old_to_new_map.get(number, number) for number in source_numbers]
+        target_numbers = [
+            old_to_new_map.get(number, number)
+            for number in source_numbers
+            if number in old_to_new_map or not drop_missing
+        ]
         formatted = format_citation_numbers(target_numbers)
-        return f'[{formatted}]' if formatted else match.group(0)
+        if formatted:
+            return f'[{formatted}]'
+        return '' if drop_missing else match.group(0)
 
     return re.sub(r'\[([^\[\]]+)\]', replace, text)
 
@@ -1030,7 +1419,7 @@ def process_references_append_mode(section_title, new_content, all_sections, ref
 
     for entry in new_entries:
         old_number = entry.get('number', 0)
-        entry_text = normalize_reference_entry_text(entry.get('text', ''))
+        entry_text = sanitize_reference_entry_for_output(entry.get('text', ''))
         entry_key = reference_entry_key(entry_text)
 
         if not entry_key:
@@ -1045,7 +1434,7 @@ def process_references_append_mode(section_title, new_content, all_sections, ref
         next_number += 1
 
     # 更新章节内容中的引用编号
-    updated_content = renumber_references(clean_content, old_to_new_map)
+    updated_content = renumber_references(clean_content, old_to_new_map, drop_missing=True)
 
     return {
         'cleaned_content': updated_content,
@@ -1099,7 +1488,7 @@ def process_references_reorder_mode(section_title, new_content, all_sections, re
     old_number_map = build_reference_number_map(existing_ref_entries)
     key_to_entry = {}
     for entry in existing_ref_entries:
-        entry_text = normalize_reference_entry_text(entry.get('text', ''))
+        entry_text = sanitize_reference_entry_for_output(entry.get('text', ''))
         entry_key = reference_entry_key(entry_text)
         if entry_key:
             key_to_entry[entry_key] = {
@@ -1111,7 +1500,7 @@ def process_references_reorder_mode(section_title, new_content, all_sections, re
     local_reference_entries = parse_reference_entries(references_text) if references_text else []
     local_number_map = build_reference_number_map(local_reference_entries)
     for entry in local_reference_entries:
-        entry_text = normalize_reference_entry_text(entry.get('text', ''))
+        entry_text = sanitize_reference_entry_for_output(entry.get('text', ''))
         entry_key = reference_entry_key(entry_text)
         if entry_key:
             key_to_entry[entry_key] = {'text': entry_text, 'key': entry_key, 'number': 0}
@@ -1141,7 +1530,8 @@ def process_references_reorder_mode(section_title, new_content, all_sections, re
 
     # 3. 当前章节生成了参考文献但正文没显式引用时，也保留这些新条目。
     for entry in local_reference_entries:
-        entry_key = entry.get('key') or reference_entry_key(entry.get('text', ''))
+        entry_text = sanitize_reference_entry_for_output(entry.get('text', ''))
+        entry_key = reference_entry_key(entry_text)
         if entry_key and entry_key not in seen_keys:
             seen_keys.add(entry_key)
             ordered_keys.append(entry_key)
@@ -1161,7 +1551,7 @@ def process_references_reorder_mode(section_title, new_content, all_sections, re
         for entry in number_map.values():
             entry['new_number'] = new_number_by_key.get(entry.get('key'))
 
-    updated_content = rewrite_citations_with_entry_map(clean_content, local_number_map)
+    updated_content = rewrite_citations_with_entry_map(clean_content, local_number_map, drop_missing=True)
 
     updated_sections = []
     for i, section in enumerate(all_sections):
@@ -1171,7 +1561,7 @@ def process_references_reorder_mode(section_title, new_content, all_sections, re
         if is_reference_section(title):
             continue
         content = normalize_section_body(section.get('content', ''))
-        rewritten_content = rewrite_citations_with_entry_map(content, old_number_map)
+        rewritten_content = rewrite_citations_with_entry_map(content, old_number_map, drop_missing=True)
         if rewritten_content != content:
             updated_sections.append({'title': title, 'content': rewritten_content})
 
@@ -1306,7 +1696,7 @@ def reorder_references_for_full_paper(all_sections, reference_style='GB/T 7714')
             for number, key in section.get('number_to_key', {}).items()
             if key in new_number_by_key
         }
-        rewritten = rewrite_citations_with_number_map(content, old_to_new)
+        rewritten = rewrite_citations_with_number_map(content, old_to_new, drop_missing=True)
         if rewritten != content:
             updated_sections.append({'title': title, 'content': rewritten})
 

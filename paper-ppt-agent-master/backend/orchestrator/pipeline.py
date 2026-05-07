@@ -1,0 +1,764 @@
+"""Main paper-to-PPT pipeline orchestrator.
+
+Ties together: parsing → research → strategist → SVG executor → finalize → export.
+"""
+
+from __future__ import annotations
+
+from collections.abc import AsyncIterator
+from dataclasses import dataclass
+from datetime import datetime
+from pathlib import Path
+from typing import Literal
+
+from backend.config import settings
+from backend.generator.svg_critic import CriticReport
+from backend.usage.tracker import reset_usage_context, set_usage_context
+
+from .manuscript import count_manuscript_pages
+from . import research_agent, strategist_agent, svg_executor
+
+
+@dataclass
+class ProgressEvent:
+    """Progress event emitted during pipeline execution."""
+
+    stage: str
+    status: Literal["started", "progress", "complete", "error"]
+    message: str = ""
+    progress: float = 0.0  # 0.0 to 1.0
+    data: dict | None = None
+
+
+@dataclass
+class GenerationRequest:
+    """Request parameters for paper-to-PPT generation."""
+
+    file_path: Path
+    source_type: Literal["pdf", "latex"]
+    provider: str  # "openai", "anthropic", "gemini"
+    model: str
+    api_key: str
+    base_url: str | None = None
+    canvas_format: str = "ppt169"
+    style: str = "academic"
+    num_pages: int | None = None
+    instruction: str = ""
+    language: str = "zh"
+    detail_level: str = "normal"
+    timeout_seconds: int | None = None
+    style_overrides: dict | None = None  # {palette: [...], font: "...", density: "..."}
+    icon_library: str = "chunk"  # chunk / tabler-filled / tabler-outline
+    deepseek_settings: dict | None = None
+    openai_settings: dict | None = None
+    enable_visual_critic: bool = False
+    enable_icon: bool = True
+    enable_icon_rag: bool = True
+    gemini_api_key: str | None = None
+
+
+async def run_pipeline(
+    request: GenerationRequest,
+) -> AsyncIterator[ProgressEvent]:
+    """Execute the full paper-to-PPT pipeline.
+
+    Yields ProgressEvent at each stage transition.
+    """
+    # Initialize LLM provider
+    from backend.generator.project_manager import get_notes, get_svg_files, init_project
+    from backend.generator.svg_finalize import finalize_project
+    from backend.generator.svg_to_pptx import create_pptx
+    from backend.llm import create_provider
+    from backend.parser.latex_parser import LaTeXParser
+    from backend.parser.pdf_parser import PDFParser
+
+    provider_kwargs = {"base_url": request.base_url}
+    if request.deepseek_settings is not None:
+        provider_kwargs["deepseek_settings"] = request.deepseek_settings
+    if request.openai_settings is not None:
+        provider_kwargs["openai_settings"] = request.openai_settings
+    llm = create_provider(
+        request.provider,
+        request.api_key,
+        **provider_kwargs,
+    )
+
+    # Create project workspace
+    project_dir = init_project(
+        name="paper_ppt",
+        canvas_format=request.canvas_format,
+        base_dir=settings.workspaces_dir,
+    )
+
+    # Attribute every LLM call inside this run to the caller's job if known.
+    job_id = getattr(request, "job_id", None)
+    usage_snapshot = set_usage_context(job_id=job_id, stage="parsing", attempt=1)
+
+    try:
+        # Stage 1: Parse paper
+        yield ProgressEvent(
+            "parsing",
+            "started",
+            "Parsing paper...",
+            data={"project_dir": str(project_dir)},
+        )
+
+        output_dir = project_dir / "sources"
+        if request.source_type == "pdf":
+            parser = PDFParser()
+        else:
+            parser = LaTeXParser()
+
+        paper = await parser.parse(request.file_path, output_dir)
+
+        parse_info: dict = {}
+        if request.source_type == "pdf":
+            parse_info = dict(
+                getattr(parser, "last_parse_info", None)
+                or getattr(type(parser), "last_parse_info", None)
+                or {}
+            )
+
+        complete_msg = f"Parsed: {paper.title}"
+        if parse_info.get("fallback"):
+            complete_msg += " (layout fallback used)"
+        yield ProgressEvent(
+            "parsing",
+            "complete",
+            complete_msg,
+            0.15,
+            data={"parse_info": parse_info} if parse_info else None,
+        )
+
+        # Stage 2: Research agent
+        set_usage_context(stage="research")
+        yield ProgressEvent("research", "started", "Analyzing paper content...")
+        manuscript = await research_agent.analyze_paper(
+            paper,
+            llm,
+            request.model,
+            instruction=request.instruction,
+            num_pages=request.num_pages,
+            language=request.language,
+            detail_level=request.detail_level,
+        )
+
+        # Save manuscript
+        (project_dir / "manuscript.md").write_text(manuscript, encoding="utf-8")
+        yield ProgressEvent("research", "complete", "Manuscript generated", 0.30)
+
+        # Stage 3: Strategist agent
+        set_usage_context(stage="strategy")
+        yield ProgressEvent("strategy", "started", "Creating design specification...")
+        figure_inventory = _build_figure_inventory(paper, project_dir)
+        design_spec = await strategist_agent.create_design_spec(
+            manuscript,
+            llm,
+            request.model,
+            canvas_format=request.canvas_format,
+            style=request.style,
+            language=request.language,
+            detail_level=request.detail_level,
+            icon_library=request.icon_library,
+            style_overrides=request.style_overrides,
+            enable_icon=request.enable_icon,
+            enable_icon_rag=request.enable_icon_rag,
+            gemini_api_key=request.gemini_api_key,
+            figure_inventory=figure_inventory,
+            debug_dir=project_dir / "debug",
+        )
+
+        # Save design spec
+        (project_dir / "design_spec.md").write_text(design_spec, encoding="utf-8")
+        yield ProgressEvent("strategy", "complete", "Design spec created", 0.40)
+
+        # Stage 4: SVG executor
+        set_usage_context(stage="generation")
+        total_pages = count_manuscript_pages(manuscript)
+        yield ProgressEvent(
+            "generation",
+            "started",
+            "Generating slide SVGs...",
+            0.40,
+            data={"total_slides": total_pages},
+        )
+        generated = 0
+
+        critic_events: list[dict] = []
+        svg_update_queue: list[tuple[int, str]] = []
+
+        async def _on_critic(
+            page_num: int,
+            attempt: int,
+            report: CriticReport,
+            repair_prompt: str | None,
+            archive_path: str | None,
+        ) -> None:
+            entry: dict = {
+                "page": page_num,
+                "attempt": attempt,
+                "report": report.to_dict(),
+            }
+            if repair_prompt is not None:
+                entry["repair_prompt"] = repair_prompt
+            if archive_path is not None:
+                entry["archive_path"] = archive_path
+            critic_events.append(entry)
+
+        async def _on_svg_update(page_num: int, svg: str) -> None:
+            svg_update_queue.append((page_num, svg))
+
+        async for page_num, svg_content in svg_executor.generate_svg_pages(
+            design_spec,
+            manuscript,
+            project_dir,
+            llm,
+            request.model,
+            style=request.style,
+            language=request.language,
+            detail_level=request.detail_level,
+            extra_instruction=_build_style_overrides_block(request.style_overrides),
+            on_critic=_on_critic,
+            on_svg_update=_on_svg_update,
+            figure_inventory=figure_inventory,
+            enable_visual_critic=request.enable_visual_critic,
+        ):
+            generated += 1
+            progress = 0.40 + (generated / total_pages) * 0.35
+
+            # Embed images inline for live preview (browser can't load file:// paths)
+            preview_svg = _embed_svg_preview(svg_content, project_dir)
+
+            page_critic = [ev for ev in critic_events if ev["page"] == page_num]
+            # Send intermediate SVG updates from repair cycles
+            while svg_update_queue:
+                upd_page, upd_svg = svg_update_queue.pop(0)
+                upd_preview = _embed_svg_preview(upd_svg, project_dir)
+                yield ProgressEvent(
+                    "generation",
+                    "progress",
+                    f"Repaired slide {upd_page}",
+                    progress,
+                    data={"page": upd_page, "svg": upd_preview},
+                )
+
+            yield ProgressEvent(
+                "generation",
+                "progress",
+                f"Generated slide {page_num}/{total_pages}",
+                progress,
+                data={
+                    "page": page_num,
+                    "svg": preview_svg,
+                    "critic": page_critic,
+                },
+            )
+
+        yield ProgressEvent(
+            "generation",
+            "complete",
+            f"{generated} slides generated",
+            0.75,
+            data={"critic": critic_events},
+        )
+
+        _save_critic_history(project_dir, critic_events)
+
+        # Stage 5: Post-processing
+        set_usage_context(stage="postprocess")
+        yield ProgressEvent("postprocess", "started", "Finalizing SVGs...")
+        stats = finalize_project(project_dir)
+        yield ProgressEvent(
+            "postprocess",
+            "complete",
+            f"Processed {stats['total_files']} files",
+            0.85,
+        )
+
+        # Stage 6: Export PPTX
+        set_usage_context(stage="export")
+        yield ProgressEvent("export", "started", "Exporting to PowerPoint...")
+        svg_files = get_svg_files(project_dir, source="final")
+        notes = get_notes(project_dir, svg_files)
+
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        pptx_path = project_dir / "exports" / f"presentation_{timestamp}.pptx"
+
+        create_pptx(
+            svg_files,
+            pptx_path,
+            canvas_format=request.canvas_format,
+            notes=notes,
+        )
+
+        yield ProgressEvent(
+            "export",
+            "complete",
+            "PowerPoint generated!",
+            1.0,
+            data={"output_path": str(pptx_path)},
+        )
+
+    except Exception as e:
+        yield ProgressEvent("error", "error", str(e))
+        raise
+    finally:
+        reset_usage_context(usage_snapshot)
+
+
+def _load_figure_inventory(project_dir: Path) -> list[dict]:
+    """Read figure_review.json from a refine workspace.
+
+    The refine pipeline runs without re-parsing the PDF, so we cannot call
+    ``_build_figure_inventory(paper, ...)`` here. ``figure_review.json``
+    is written once during the original parse and contains everything the
+    executor needs to resolve `[[FIG:id]]` tokens to real hrefs.
+    """
+    import json
+    candidate = project_dir / "sources" / "images" / "figure_review.json"
+    if not candidate.exists():
+        return []
+    try:
+        records = json.loads(candidate.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return []
+    inventory: list[dict] = []
+    for rec in records:
+        try:
+            abs_path = Path(rec.get("path") or "").resolve()
+            try:
+                rel = abs_path.relative_to(project_dir.resolve())
+                rel_str = f"../{rel.as_posix()}" if rel.parts and rel.parts[0] == "sources" else rel.as_posix()
+            except ValueError:
+                rel_str = str(abs_path)
+        except (OSError, ValueError):
+            rel_str = str(rec.get("path") or "")
+        inventory.append({
+            "path": rel_str,
+            "natural_width": int(rec.get("natural_width") or 0),
+            "natural_height": int(rec.get("natural_height") or 0),
+            "aspect_ratio": float(rec.get("aspect_ratio") or 0.0),
+            "caption": rec.get("caption") or "",
+            "page_number": rec.get("page_number"),
+        })
+    return inventory
+
+
+def _build_figure_inventory(paper, project_dir: Path) -> list[dict]:
+    """Collect available figures with natural sizes for the strategist prompt."""
+    inventory: list[dict] = []
+    for fig in paper.all_figures():
+        if not getattr(fig, "available", False):
+            continue
+        try:
+            rel = Path(fig.path).resolve().relative_to(project_dir.resolve())
+            rel_str = f"../{rel.as_posix()}" if rel.parts and rel.parts[0] == "sources" else rel.as_posix()
+        except (ValueError, OSError):
+            rel_str = str(fig.path)
+        inventory.append({
+            "path": rel_str,
+            "natural_width": int(getattr(fig, "natural_width", 0) or 0),
+            "natural_height": int(getattr(fig, "natural_height", 0) or 0),
+            "aspect_ratio": float(getattr(fig, "aspect_ratio", 0.0) or 0.0),
+            "caption": getattr(fig, "caption", "") or "",
+            "page_number": getattr(fig, "page_number", None),
+        })
+    return inventory
+
+
+def _embed_svg_preview(svg_content: str, project_dir: Path) -> str:
+    """Embed image hrefs as base64 data URIs so browsers can render them.
+
+    Runs the same lightweight render-prep path used by preview/export,
+    including icon embedding, image embedding, and safe text flattening.
+    """
+    from backend.generator.svg_finalize.render_ready import prepare_svg_content_for_render
+
+    try:
+        return prepare_svg_content_for_render(svg_content, project_dir / "svg_output")
+    except Exception as exc:
+        raise RuntimeError(f"SVG preview preparation failed: {exc}") from exc
+
+
+# ── Refine pipeline ───────────────────────────────────────────────────────────
+
+
+@dataclass
+class RefineRequest:
+    """Parameters for a refine (feedback-based iteration) run."""
+
+    project_dir: str        # absolute path to the existing project workspace
+    feedback: str           # latest user feedback text
+    feedback_history: list[str]  # all feedback rounds including the latest
+    job_id: str             # new job ID (for logging / context)
+    parent_job_id: str      # job ID of the previous generation
+    provider: str = "openai"
+    model: str = "gpt-4o"
+    api_key: str = ""
+    base_url: str | None = None
+    canvas_format: str = "ppt169"
+    style: str = "academic"
+    language: str = "zh"
+    detail_level: str = "normal"
+    timeout_seconds: int | None = None
+    target_pages: list[int] | None = None
+    allow_structure_changes: bool = False
+    style_overrides: dict | None = None
+    icon_library: str = "chunk"
+    deepseek_settings: dict | None = None
+    openai_settings: dict | None = None
+    enable_visual_critic: bool = False
+    enable_icon: bool = True
+    enable_icon_rag: bool = True
+    gemini_api_key: str | None = None
+
+
+async def run_refine_pipeline(
+    request: RefineRequest,
+) -> AsyncIterator[ProgressEvent]:
+    """Re-run stages 4–6 (SVG generation → finalize → export) with feedback.
+
+    Reads the existing ``manuscript.md`` and ``design_spec.md`` from the
+    project directory, appends the accumulated feedback as an extra
+    instruction block, then re-generates all SVG pages.
+
+    Previously generated SVGs are archived to ``svg_archive/round_N/``
+    before being overwritten so the user can compare iterations.
+
+    Yields ProgressEvent at each stage transition — identical shape to
+    ``run_pipeline`` so the frontend WebSocket handler needs no changes.
+    """
+    from backend.generator.project_manager import get_notes, get_svg_files
+    from backend.generator.svg_finalize import finalize_project
+    from backend.generator.svg_to_pptx import create_pptx
+    from backend.llm import create_provider
+
+    project_dir = Path(request.project_dir)
+    if not project_dir.exists():
+        yield ProgressEvent("error", "error", f"Project directory not found: {project_dir}")
+        return
+
+    # Read existing manuscript and design_spec
+    manuscript_path = project_dir / "manuscript.md"
+    design_spec_path = project_dir / "design_spec.md"
+
+    if not manuscript_path.exists() or not design_spec_path.exists():
+        yield ProgressEvent(
+            "error", "error",
+            "Cannot refine: manuscript.md or design_spec.md missing from project."
+        )
+        return
+
+    manuscript = manuscript_path.read_text(encoding="utf-8")
+    design_spec = design_spec_path.read_text(encoding="utf-8")
+
+    provider_kwargs = {"base_url": request.base_url}
+    if request.deepseek_settings is not None:
+        provider_kwargs["deepseek_settings"] = request.deepseek_settings
+    if request.openai_settings is not None:
+        provider_kwargs["openai_settings"] = request.openai_settings
+    llm = create_provider(
+        request.provider,
+        request.api_key,
+        **provider_kwargs,
+    )
+    target_pages = sorted({page for page in (request.target_pages or []) if page > 0})
+
+    refine_snapshot = set_usage_context(job_id=request.job_id, stage="refine", attempt=1)
+
+    # Build feedback block injected into the SVG executor prompt
+    feedback_block = _build_feedback_block(
+        request.feedback_history,
+        target_pages=target_pages,
+        allow_structure_changes=request.allow_structure_changes,
+    )
+    overrides_block = _build_style_overrides_block(request.style_overrides)
+    if overrides_block:
+        feedback_block = (
+            f"{feedback_block}\n\n{overrides_block}" if feedback_block else overrides_block
+        )
+
+    if request.allow_structure_changes:
+        yield ProgressEvent("research", "started", "Revising manuscript structure from feedback...", 0.0)
+        manuscript = await research_agent.revise_manuscript(
+            manuscript,
+            llm,
+            request.model,
+            feedback_history=request.feedback_history,
+            language=request.language,
+            detail_level=request.detail_level,
+            target_pages=target_pages,
+            allow_structure_changes=True,
+        )
+        manuscript_path.write_text(manuscript, encoding="utf-8")
+        yield ProgressEvent("research", "complete", "Manuscript revised", 0.15)
+
+        yield ProgressEvent("strategy", "started", "Rebuilding design specification...", 0.15)
+        refine_figure_inventory = _load_figure_inventory(project_dir)
+        design_spec = await strategist_agent.create_design_spec(
+            manuscript,
+            llm,
+            request.model,
+            canvas_format=request.canvas_format,
+            style=request.style,
+            language=request.language,
+            detail_level=request.detail_level,
+            icon_library=request.icon_library,
+            style_overrides=request.style_overrides,
+            enable_icon=request.enable_icon,
+            enable_icon_rag=request.enable_icon_rag,
+            gemini_api_key=request.gemini_api_key,
+            figure_inventory=refine_figure_inventory,
+        )
+        design_spec_path.write_text(design_spec, encoding="utf-8")
+        yield ProgressEvent("strategy", "complete", "Design spec rebuilt", 0.30)
+
+    # Archive current svg_output before overwriting
+    _archive_svgs(project_dir)
+    if target_pages and not request.allow_structure_changes:
+        _seed_svg_output_for_targeted_refine(project_dir, target_pages)
+
+    # ── Stage 4: SVG generation (with feedback) ───────────────────────────
+    total_pages = count_manuscript_pages(manuscript)
+    pages_to_generate = len(target_pages) if target_pages and not request.allow_structure_changes else total_pages
+    generation_start = 0.30 if request.allow_structure_changes else 0.0
+    generation_span = 0.30 if request.allow_structure_changes else 0.60
+    yield ProgressEvent(
+        "generation", "started",
+        "Re-generating selected slides with feedback..." if target_pages and not request.allow_structure_changes else "Re-generating slides with feedback...",
+        generation_start,
+        data={"total_slides": pages_to_generate},
+    )
+    generated = 0
+
+    refine_critic_events: list[dict] = []
+
+    async def _refine_on_critic(
+        page_num: int,
+        attempt: int,
+        report: CriticReport,
+        repair_prompt: str | None,
+        archive_path: str | None,
+    ) -> None:
+        entry: dict = {
+            "page": page_num,
+            "attempt": attempt,
+            "report": report.to_dict(),
+        }
+        if repair_prompt is not None:
+            entry["repair_prompt"] = repair_prompt
+        if archive_path is not None:
+            entry["archive_path"] = archive_path
+        refine_critic_events.append(entry)
+
+    refine_inventory = _load_figure_inventory(project_dir)
+
+    async for page_num, svg_content in svg_executor.generate_svg_pages(
+        design_spec,
+        manuscript,
+        project_dir,
+        llm,
+        request.model,
+        style=request.style,
+        language=request.language,
+        detail_level=request.detail_level,
+        extra_instruction=feedback_block,
+        target_pages=set(target_pages) if target_pages and not request.allow_structure_changes else None,
+        on_critic=_refine_on_critic,
+        figure_inventory=refine_inventory,
+        enable_visual_critic=request.enable_visual_critic,
+    ):
+        generated += 1
+        progress = generation_start + (generated / max(pages_to_generate, 1)) * generation_span
+
+        preview_svg = _embed_svg_preview(svg_content, project_dir)
+        page_critic = [ev for ev in refine_critic_events if ev["page"] == page_num]
+        yield ProgressEvent(
+            "generation", "progress",
+            f"Generated slide {page_num}/{total_pages}",
+            progress,
+            data={"page": page_num, "svg": preview_svg, "critic": page_critic},
+        )
+
+    yield ProgressEvent(
+        "generation",
+        "complete",
+        f"{generated} slides regenerated",
+        generation_start + generation_span,
+    )
+
+    # ── Stage 5: Post-processing ──────────────────────────────────────────
+    postprocess_start = generation_start + generation_span
+    export_start = 0.80 if request.allow_structure_changes else 0.80
+    yield ProgressEvent("postprocess", "started", "Finalizing SVGs...", postprocess_start)
+    stats = finalize_project(project_dir)
+    yield ProgressEvent(
+        "postprocess", "complete",
+        f"Processed {stats['total_files']} files",
+        export_start,
+    )
+
+    # ── Stage 6: Export PPTX ─────────────────────────────────────────────
+    yield ProgressEvent("export", "started", "Exporting to PowerPoint...", export_start)
+    svg_files = get_svg_files(project_dir, source="final")
+    notes = get_notes(project_dir, svg_files)
+
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    pptx_path = project_dir / "exports" / f"presentation_{timestamp}.pptx"
+
+    create_pptx(svg_files, pptx_path, canvas_format=request.canvas_format, notes=notes)
+
+    # Persist feedback history to disk for auditability
+    _save_feedback_history(project_dir, request.feedback_history)
+    _save_critic_history(project_dir, refine_critic_events, refine=True)
+
+    yield ProgressEvent(
+        "export", "complete",
+        "Refined PowerPoint generated!",
+        1.0,
+        data={"output_path": str(pptx_path), "critic": refine_critic_events},
+    )
+
+    reset_usage_context(refine_snapshot)
+
+
+def _archive_svgs(project_dir: Path) -> None:
+    """Copy current svg_output/ into svg_archive/round_N/ before overwriting."""
+    import shutil
+
+    svg_output = project_dir / "svg_output"
+    if not svg_output.exists():
+        return
+
+    archive_base = project_dir / "svg_archive"
+    archive_base.mkdir(exist_ok=True)
+
+    # find next round number
+    existing = [d for d in archive_base.iterdir() if d.is_dir() and d.name.startswith("round_")]
+    next_round = len(existing) + 1
+    dest = archive_base / f"round_{next_round:02d}"
+    try:
+        shutil.copytree(svg_output, dest)
+    except Exception:
+        pass
+
+
+def _build_feedback_block(
+    feedback_history: list[str],
+    *,
+    target_pages: list[int] | None = None,
+    allow_structure_changes: bool = False,
+) -> str:
+    """Format accumulated feedback history as a prompt instruction block."""
+    if not feedback_history:
+        return ""
+    lines = ["## User Feedback (apply to ALL slides)"]
+    if target_pages:
+        lines.append(
+            "\n## Targeted Scope\n"
+            f"\nOnly modify these slide pages: {', '.join(map(str, target_pages))}."
+            "\nKeep all other pages visually and semantically unchanged."
+        )
+    if allow_structure_changes:
+        lines.append(
+            "\n## Structural Changes Allowed\n"
+            "\nYou may insert new slides, remove slides, split dense slides, or reorder slides if needed."
+        )
+    for i, fb in enumerate(feedback_history, 1):
+        lines.append(f"\n### Round {i}\n{fb.strip()}")
+    lines.append(
+        "\n**Important:** Address ALL feedback points above when generating each slide."
+    )
+    return "\n".join(lines)
+
+
+def _build_style_overrides_block(overrides: dict | None) -> str:
+    """Format user style overrides (palette/font/density) as a prompt block."""
+    if not overrides:
+        return ""
+    parts: list[str] = []
+    palette = overrides.get("palette") if isinstance(overrides, dict) else None
+    font = overrides.get("font") if isinstance(overrides, dict) else None
+    density = overrides.get("density") if isinstance(overrides, dict) else None
+    if palette:
+        try:
+            colors = ", ".join(str(c) for c in palette if c)
+        except TypeError:
+            colors = ""
+        if colors:
+            parts.append(
+                f"- **Palette override** (use these exact colors for primary / accent / background "
+                f"where appropriate): {colors}"
+            )
+    if font:
+        parts.append(
+            f"- **Font override**: Use this font-family for every SVG `<text>` element: `{font}`."
+        )
+    if density:
+        density_hint = {
+            "compact": "Prefer dense but legible layouts: smaller paddings, tighter line heights, more items per slide.",
+            "normal": "Keep balanced spacing and default density.",
+            "spacious": "Use generous whitespace, larger margins, fewer items per slide.",
+        }.get(str(density), "")
+        parts.append(f"- **Density override** (`{density}`): {density_hint}")
+    if not parts:
+        return ""
+    return "## Style Overrides (must follow)\n" + "\n".join(parts)
+
+
+def _save_feedback_history(project_dir: Path, history: list[str]) -> None:
+    """Append-write feedback_history.json for auditability."""
+    import json
+
+    path = project_dir / "feedback_history.json"
+    path.write_text(json.dumps(history, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+def _save_critic_history(
+    project_dir: Path,
+    critic_events: list[dict],
+    *,
+    refine: bool = False,
+) -> None:
+    """Persist critic events to critic_history.json for post-run analysis."""
+    import json
+    from datetime import datetime
+
+    path = project_dir / "critic_history.json"
+    existing: dict = {}
+    if path.exists():
+        try:
+            existing = json.loads(path.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, OSError):
+            existing = {}
+
+    key = "refine_events" if refine else "generation_events"
+    existing[key] = critic_events
+    existing["updated_at"] = datetime.now().isoformat()
+    if "created_at" not in existing:
+        existing["created_at"] = existing["updated_at"]
+
+    path.write_text(json.dumps(existing, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+def _seed_svg_output_for_targeted_refine(project_dir: Path, target_pages: list[int]) -> None:
+    """Seed svg_output/ with the latest stable deck before partial regeneration."""
+    import shutil
+
+    source_dir = project_dir / "svg_final"
+    if not source_dir.exists() or not any(source_dir.glob("*.svg")):
+        source_dir = project_dir / "svg_output"
+    if not source_dir.exists():
+        return
+
+    output_dir = project_dir / "svg_output"
+    if output_dir.exists():
+        shutil.rmtree(output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    for svg_path in sorted(source_dir.glob("*.svg")):
+        shutil.copy2(svg_path, output_dir / svg_path.name)
+
+    for page in target_pages:
+        for existing in output_dir.glob(f"{page:02d}_*.svg"):
+            existing.unlink(missing_ok=True)

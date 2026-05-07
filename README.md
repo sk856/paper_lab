@@ -1,6 +1,6 @@
 # 论文工坊
 
-论文工坊是一款本地运行的 AI 论文工作台。当前项目同时保留桌面端入口和本地 Web 工作台，核心功能围绕论文写作、数据图表、降 AI 检测、降查重率、学术润色、智能纠错、模型配置和历史草稿管理展开。
+论文工坊是一款本地运行的 AI 论文工作台。当前项目同时保留桌面端入口和本地 Web 工作台，核心功能围绕论文写作、数据图表、PPT 制作、降 AI 检测、降查重率、学术润色、智能纠错、模型配置和历史草稿管理展开。
 
 项目默认把界面和数据放在本地，AI 功能通过你配置的模型接口调用外部服务。适合在 Windows 上直接运行，也提供跨平台打包脚本用于生成 Windows、macOS 和 Linux 发布包。
 
@@ -51,6 +51,14 @@
 - 支持上传辅助数据文件或手动粘贴数据表。
 - 生成后可回填到论文对应位置，并同步补充参考文献。
 - 图表图片会保存到本地 Web 静态目录，便于导出时引用。
+
+### PPT 制作
+
+- 读取论文写作区的当前全文，或接收从论文写作区推送的全文、章节和小节内容。
+- 使用配置管理中当前启用的模型接口生成可编辑的 PowerPoint 文件。
+- 支持 16:9 宽屏和 4:3 标准比例，可设置语言、目标页数、详细程度、风格和补充指令。
+- 提供生成进度、代理日志、PPT 页面预览和缩略图列表。
+- 支持下载 `.pptx`，也可根据反馈重做当前页或对整套 PPT 进行整体优化。
 
 ### 降 AI 检测
 
@@ -178,8 +186,11 @@ http://127.0.0.1:8765/
 - `.docx`
 - `.md`
 - `.txt`
+- `.pptx`
 
 导出 Word 时，如果系统安装了 Pandoc，会优先使用 Pandoc 处理 Markdown、公式、表格和图片；未安装 Pandoc 时会回退到 `python-docx` 实现。
+
+导出 PPT 时会调用 `paper-ppt-agent-master` 工作流，需要先在配置管理中启用可用模型接口，并确保本机已安装 `uv`。
 
 ## 打包发布
 
@@ -213,6 +224,7 @@ GitHub Actions 会在推送 `v*` 标签或手动触发时执行跨平台构建�
 ├── web_server.py            # 本地 Web 工作台后端
 ├── web/                     # Web 前端静态文件
 ├── modules/                 # 核心功能模块
+├── paper-ppt-agent-master/  # 论文 PPT 生成工作流
 ├── pages/                   # 配置页辅助逻辑
 ├── installers/              # 安装与打包辅助脚本
 ├── Introduction/            # 历史预览图与说明素材
@@ -243,7 +255,7 @@ GitHub Actions 会在推送 `v*` 标签或手动触发时执行跨平台构建�
 
 ## 致谢
 
-本项目参考并基于 [Abnerla/AI_Paper](https://github.com/Abnerla/AI_Paper) 的相关思路与工程基础进行开发，在此表示感谢。
+本项目参考并基于 [Abnerla/AI_Paper](https://github.com/Abnerla/AI_Paper) 的相关思路与工程基础进行开发，并集成参考了 [CRui5in/paper-ppt-agent](https://github.com/CRui5in/paper-ppt-agent) 的论文 PPT 生成能力，在此表示感谢。
 
 ## 支持作者
 
@@ -255,4 +267,4 @@ GitHub Actions 会在推送 `v*` 标签或手动触发时执行跨平台构建�
 
 ## 许可证
 
-本项目使用 Apache License 2.0，详见 [LICENSE](LICENSE)。
+本项目使用 Apache License 2.0，详见 [LICENSE](LICENSE)。第三方项目来源、许可证和再分发说明见 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)。

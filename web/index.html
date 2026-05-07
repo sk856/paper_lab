@@ -51,6 +51,10 @@
         <span class="feature-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M3 12h4l2-7 4 14 2-7h6"/></svg></span>
         <span class="feature-copy"><strong>智能纠错</strong><span>统计、预览与问题列表</span></span>
       </button>
+      <button class="feature-item" data-page="ppt" type="button">
+        <span class="feature-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M4 4h16v11H4z"/><path d="M12 15v5"/><path d="M8 20h8"/><path d="M8 8h8"/><path d="M8 11h5"/></svg></span>
+        <span class="feature-copy"><strong>PPT制作</strong><span>生成、预览与单页重做</span></span>
+      </button>
       <button class="feature-item" data-page="config" type="button">
         <span class="feature-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M4 7h10"/><path d="M18 7h2"/><circle cx="16" cy="7" r="2"/><path d="M4 17h2"/><path d="M10 17h10"/><circle cx="8" cy="17" r="2"/></svg></span>
         <span class="feature-copy"><strong>配置管理</strong><span>模式、接口与后端配置</span></span>
@@ -121,13 +125,14 @@
             <div class="paper-push-panel">
               <div class="paper-push-copy">
                 <strong>推送章节到功能区</strong>
-                <span>把整篇文章、某章/某节或单个小节送到降 AI、降重、润色、纠错页面。</span>
+                <span>把整篇文章、某章/某节或单个小节送到 PPT、数据图表、降 AI、降重、润色、纠错页面。</span>
               </div>
               <div class="paper-push-controls">
                 <select id="paperPushScope" class="input-box" aria-label="推送范围">
                   <option value="all">整篇文章</option>
                 </select>
                 <select id="paperPushTarget" class="input-box" aria-label="目标功能区">
+                  <option value="ppt">PPT制作</option>
                   <option value="datachart">数据图表</option>
                   <option value="ai">降 AI 检测</option>
                   <option value="plagiarism">降查重率</option>
@@ -453,6 +458,109 @@
             </div>
             <div id="correctionReport" class="analysis-detail correction-report-detail">请选择问题或运行智能纠错查看详情。</div>
           </div>
+        </section>
+      </section>
+
+      <section class="page-view" data-page-view="ppt">
+        <div class="page-hero compact-hero">
+          <p class="eyebrow">Presentation</p>
+          <h1>PPT制作</h1>
+          <p class="muted-copy">读取论文写作区的当前全文，使用配置管理里已启用的模型接口生成可编辑 PowerPoint，并支持预览、下载和单页重做。</p>
+          <div class="status-strip" id="pptModelStatus">正在读取启用接口...</div>
+        </div>
+
+        <section class="ppt-workspace-grid">
+          <aside class="ppt-sidebar">
+            <section class="panel ppt-upload-panel">
+              <div class="ppt-upload-drop">
+                <span class="ppt-upload-icon" aria-hidden="true">
+                  <svg viewBox="0 0 24 24"><path d="M4 4h16v12H4z"/><path d="M12 16v4"/><path d="M8 20h8"/><path d="M8 8h8"/><path d="M8 11h5"/></svg>
+                </span>
+                <strong>来自论文写作区</strong>
+                <span id="pptSourceSummary">等待论文内容</span>
+              </div>
+            </section>
+
+            <section class="panel">
+              <div class="panel-header-row"><div><p class="eyebrow">Source</p><h3>源文件</h3></div></div>
+              <div id="pptSourceInfo" class="ppt-source-info">未加载</div>
+            </section>
+
+            <section class="panel">
+              <div class="panel-header-row"><div><p class="eyebrow">Progress</p><h3>流程监控</h3></div><span class="state-pill" data-state-for="ppt">待处理</span></div>
+              <div class="ppt-progress-bar"><span id="pptProgressFill"></span></div>
+              <div class="ppt-progress-stats">
+                <span><small>详细资料</small><strong id="pptProgressPercent">0%</strong></span>
+                <span><small>已出页数</small><strong id="pptSlidesDone">0</strong></span>
+                <span><small>状态</small><strong id="pptJobState">闲置</strong></span>
+              </div>
+              <div id="pptStageList" class="ppt-stage-list">
+                <div><span>解析论文</span><small>未开始</small></div>
+                <div><span>研究分析</span><small>未开始</small></div>
+                <div><span>策略规划</span><small>未开始</small></div>
+                <div><span>生成页面</span><small>未开始</small></div>
+                <div><span>后处理</span><small>未开始</small></div>
+                <div><span>导出文件</span><small>未开始</small></div>
+              </div>
+            </section>
+          </aside>
+
+          <section class="ppt-main-area">
+            <section class="panel ppt-preview-panel">
+              <div class="panel-header-row">
+                <div><p class="eyebrow">Preview</p><h3>PPT预览</h3></div>
+                <div class="button-row compact-row">
+                  <button id="pptDownloadButton" class="secondary-button compact" type="button" disabled>下载PPT</button>
+                  <button id="pptRefreshPreviewButton" class="secondary-button compact" type="button">刷新预览</button>
+                </div>
+              </div>
+              <div class="ppt-current-meta">
+                <span>当前页面</span>
+                <strong id="pptCurrentSlideLabel">等待中</strong>
+              </div>
+              <div id="pptPreviewCanvas" class="ppt-preview-canvas">等待生成第一张幻灯片...</div>
+            </section>
+
+            <section class="panel ppt-thumbs-panel">
+              <div class="panel-header-row">
+                <div><p class="eyebrow">Slides</p><h3>PPT缩略</h3></div>
+              </div>
+              <div id="pptSlideThumbs" class="ppt-slide-thumbs">还没有页面</div>
+            </section>
+          </section>
+
+          <aside class="ppt-settings-area">
+            <section class="panel">
+              <div class="panel-header-row"><div><p class="eyebrow">Settings</p><h3>演示设置</h3></div></div>
+              <div class="ppt-settings-grid">
+                <label class="field-block"><span>大部分比例</span><select id="pptCanvasFormat" class="input-box"><option value="ppt169">16:9 宽屏</option><option value="ppt43">4:3 标准</option></select></label>
+                <label class="field-block"><span>语言</span><select id="pptLanguage" class="input-box"><option value="zh">中文</option><option value="en">英文</option><option value="bilingual">中英双语</option></select></label>
+                <label class="field-block"><span>目标页数</span><input id="pptNumPages" class="input-box" type="number" min="3" max="40" placeholder="自动" /></label>
+                <label class="field-block"><span>详细程度</span><select id="pptDetailLevel" class="input-box"><option value="normal">正常</option><option value="high">较详细</option><option value="very_high">非常详细</option></select></label>
+                <label class="field-block"><span>任务超时（秒）</span><input id="pptTimeoutSeconds" class="input-box" type="number" min="60" step="60" placeholder="不限制" /></label>
+                <label class="field-block"><span>风格</span><select id="pptStyle" class="input-box"><option value="academic">学术</option><option value="consulting">咨询</option><option value="tech">科技</option><option value="general">通用</option></select></label>
+              </div>
+              <label class="field-block"><span>补充指令</span><textarea id="pptInstruction" class="input-box ppt-command-box" placeholder="例如：控制在12页以内，重点放在方法和实验上。"></textarea></label>
+              <div class="paper-actions ppt-action-row">
+                <button id="pptStartButton" class="primary-button" type="button">开始生成</button>
+              </div>
+            </section>
+
+            <section class="panel">
+              <div class="panel-header-row"><div><p class="eyebrow">Refine</p><h3>页面重做</h3></div></div>
+              <label class="field-block"><span>重做要求</span><textarea id="pptRefineFeedback" class="input-box ppt-command-box" placeholder="例如：当前页更突出研究方法，减少背景文字。"></textarea></label>
+              <label class="inline-toggle ppt-structure-toggle"><input id="pptAllowStructureChanges" type="checkbox" />允许增删页和重排</label>
+              <div class="paper-actions ppt-action-row">
+                <button id="pptRefineSlideButton" class="secondary-button" type="button" disabled>重做当前页</button>
+                <button id="pptRefineDeckButton" class="secondary-button" type="button" disabled>整体优化</button>
+              </div>
+            </section>
+
+            <section class="panel">
+              <div class="panel-header-row"><div><p class="eyebrow">Logs</p><h3>代理日志</h3></div></div>
+              <div id="pptAgentLog" class="ppt-agent-log">等待任务开始。</div>
+            </section>
+          </aside>
         </section>
       </section>
 

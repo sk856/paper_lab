@@ -17,6 +17,7 @@ debug_*.log
 server*.log
 /logs
 /web/generated/
+/output/paper_ppt_agent/
 /config.enc
 /config_dir.json
 /history.json

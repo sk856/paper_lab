@@ -26,6 +26,15 @@ const state = {
   dataChartSearchResult: null,
   dataChartApproved: false,
   dataChartDataFile: null,
+  ppt: {
+    sourcePayload: null,
+    currentJobId: '',
+    selectedSlideIndex: 1,
+    slides: [],
+    pollTimer: null,
+    feedbackHistory: [],
+    latestJob: null,
+  },
   promptTemplates: {},
   activePromptScope: '',
   selectedPromptTemplateId: '',
@@ -72,6 +81,7 @@ const PAGE_LABELS = {
   plagiarism: '降查重率',
   polish: '学术润色',
   correction: '智能纠错',
+  ppt: 'PPT制作',
   config: '配置管理',
   history: '历史记录',
 };
@@ -1000,7 +1010,7 @@ function setPaperActionsDisabled(disabled, activeAction = '') {
   });
 }
 
-function setPage(page) {
+function setPage(page, options = {}) {
   const nextPage = page || 'paper';
   state.page = nextPage;
   $$('.page-view').forEach((view) => view.classList.toggle('active', view.dataset.pageView === nextPage));
@@ -1008,6 +1018,12 @@ function setPage(page) {
   if (location.hash !== `#/${nextPage}`) history.replaceState(null, '', `#/${nextPage}`);
   saveDraft();
   if (nextPage === 'history') renderHistory();
+  if (nextPage === 'ppt') {
+    if (!options.preservePptSource) syncPptSourceFromPaper({ silent: true });
+    else renderPptSource(state.ppt.sourcePayload, { silent: true });
+    renderPptJob();
+    renderPptSlides();
+  }
 }
 
 function routeFromHash() {
@@ -1118,6 +1134,7 @@ function renderConfig(config) {
     )).join('');
   }
   renderProviders({ providers: config.providers || [] });
+  renderPptModelStatus();
   const active = (config.providers || []).find((item) => item.active) || (config.providers || [])[0];
   if (!state.editingApiId && active) fillConfigForm(active);
 }
@@ -1964,6 +1981,298 @@ async function exportPaperDocument() {
   }
 }
 
+function pptOptionsPayload() {
+  return {
+    canvasFormat: $('#pptCanvasFormat')?.value || 'ppt169',
+    style: $('#pptStyle')?.value || 'academic',
+    language: $('#pptLanguage')?.value || 'zh',
+    detailLevel: $('#pptDetailLevel')?.value || 'normal',
+    numPages: Number($('#pptNumPages')?.value || 0) || null,
+    timeoutSeconds: Number($('#pptTimeoutSeconds')?.value || 0) || 1800,
+    instruction: textValue('#pptInstruction'),
+  };
+}
+
+function currentPptPayload() {
+  const payload = paperExportPayload('markdown');
+  payload.pptOptions = pptOptionsPayload();
+  payload.pptSourceKind = 'current-paper';
+  payload.pptSourceLabel = '整篇文章';
+  return payload;
+}
+
+function paperPptPayloadFromScope(scopeValue = 'all') {
+  const scope = String(scopeValue || 'all');
+  if (scope === 'all') return currentPptPayload();
+
+  const base = paperExportPayload('markdown');
+  const payload = collectPaperPushPayload(scope);
+  const sections = state.paperSections || [];
+  const numbers = outlineSectionNumbers(sections);
+  const selectedSections = (payload.titles || [])
+    .map((title) => {
+      const index = sections.findIndex((section) => section.title === title);
+      const section = index >= 0 ? sections[index] : null;
+      const content = paperSectionBodyContent(title);
+      if (!section || !content) return null;
+      const number = formatOutlineSectionNumber(numbers[index] ?? '');
+      return {
+        title,
+        displayTitle: number ? `${number} ${title}` : title,
+        level: Math.min(Math.max(Number(section.level || 1), 1), 4),
+        kind: paperSpecialKind(title),
+        hasChildren: false,
+        content,
+      };
+    })
+    .filter(Boolean);
+  const content = selectedSections
+    .map((section) => [section.displayTitle || section.title, section.content].filter(Boolean).join('\n'))
+    .filter(Boolean)
+    .join('\n\n')
+    .trim();
+  return {
+    ...base,
+    sections: selectedSections,
+    content,
+    pptOptions: pptOptionsPayload(),
+    pptSourceKind: 'paper-push',
+    pptSourceScope: scope,
+    pptSourceTitles: payload.titles,
+    pptSourceLabel: payload.titles?.length === 1 ? payload.titles[0] : `${payload.titles?.length || 0} 个已推送章节`,
+  };
+}
+
+function renderPptSource(payload, { silent = false } = {}) {
+  if (!payload) return payload;
+  state.ppt.sourcePayload = payload;
+  const sectionCount = payload.sections?.length || 0;
+  const charCount = (payload.content || '').length;
+  const sourceLabel = payload.pptSourceKind === 'paper-push' ? '已推送论文内容' : '当前论文';
+  $('#pptSourceSummary') && ($('#pptSourceSummary').textContent = sectionCount ? `${sourceLabel}：${sectionCount} 个章节，约 ${charCount} 字符` : '未发现可用章节');
+  $('#pptSourceInfo') && ($('#pptSourceInfo').textContent = sectionCount
+    ? `标题：${payload.title || '未命名论文'}\n范围：${payload.pptSourceLabel || '整篇文章'}\n章节：${sectionCount} 个\n来源：论文写作区\n模型：使用配置管理中当前启用接口`
+    : '未加载，请先在论文写作区生成或粘贴正文。');
+  if (!silent) setState('ppt', sectionCount ? '已接收论文内容' : '没有可用论文内容', sectionCount ? 'done' : 'error');
+  renderPptModelStatus();
+  return payload;
+}
+
+function syncPptSourceFromPaper({ silent = false } = {}) {
+  return renderPptSource(currentPptPayload(), { silent });
+}
+
+function pushPaperSelectionToPpt(scopeValue, { silent = false } = {}) {
+  const payload = paperPptPayloadFromScope(scopeValue);
+  payload.pptSourceKind = 'paper-push';
+  payload.pptSourceLabel = payload.pptSourceLabel || '整篇文章';
+  return renderPptSource(payload, { silent });
+}
+
+function renderPptModelStatus() {
+  const node = $('#pptModelStatus');
+  if (!node) return;
+  const activeId = state.config?.activeApi || '';
+  const active = (state.config?.providers || []).find((item) => item.active || item.id === activeId);
+  if (!active || !active.model) {
+    node.textContent = '尚未启用可用模型接口；请先到配置管理填写并启用接口。';
+    return;
+  }
+  node.textContent = `当前启用接口：${active.name || active.id} / ${active.modelDisplayName || active.model}`;
+}
+
+function pptStageLabel(stage) {
+  return {
+    parsing: '解析论文',
+    research: '研究分析',
+    strategy: '策略规划',
+    generation: '生成页面',
+    postprocess: '后处理',
+    export: '导出文件',
+    refine: '页面重做',
+  }[stage] || stage || '任务';
+}
+
+function renderPptJob(job = state.ppt.latestJob) {
+  if (!job) {
+    setState('ppt', '待处理');
+    return;
+  }
+  state.ppt.latestJob = job;
+  const pct = Math.max(0, Math.min(100, Math.round((Number(job.progress || 0)) * 100)));
+  $('#pptProgressFill') && ($('#pptProgressFill').style.width = `${pct}%`);
+  $('#pptProgressPercent') && ($('#pptProgressPercent').textContent = `${pct}%`);
+  $('#pptSlidesDone') && ($('#pptSlidesDone').textContent = `${job.slidesCompleted || 0}/${job.totalSlides || 0}`);
+  $('#pptJobState') && ($('#pptJobState').textContent = job.status === 'complete' ? '完成' : (job.status === 'error' ? '失败' : (job.status === 'running' ? '运行中' : '闲置')));
+  setState('ppt', job.message || 'PPT 任务更新', job.status === 'complete' ? 'done' : (job.status === 'error' ? 'error' : 'running'));
+  $('#pptDownloadButton') && ($('#pptDownloadButton').disabled = !job.hasOutput);
+  $('#pptRefineSlideButton') && ($('#pptRefineSlideButton').disabled = !(job.status === 'complete' && state.ppt.slides.length));
+  $('#pptRefineDeckButton') && ($('#pptRefineDeckButton').disabled = !(job.status === 'complete' && state.ppt.slides.length));
+  renderPptStages(job.events || []);
+  renderPptLog(job.events || [], job.error || '');
+}
+
+function renderPptStages(events = []) {
+  const stageList = $('#pptStageList');
+  if (!stageList) return;
+  const latest = {};
+  events.forEach((event) => {
+    latest[event.stage] = event;
+  });
+  const stages = ['parsing', 'research', 'strategy', 'generation', 'postprocess', 'export'];
+  stageList.innerHTML = stages.map((stage) => {
+    const event = latest[stage];
+    const status = event ? (event.status === 'complete' ? '完成' : (event.status === 'error' ? '失败' : '进行中')) : '未开始';
+    return `<div><span>${escapeHtml(pptStageLabel(stage))}</span><small>${escapeHtml(status)}</small></div>`;
+  }).join('');
+}
+
+function renderPptLog(events = [], error = '') {
+  const node = $('#pptAgentLog');
+  if (!node) return;
+  const lines = events.slice(-12).map((event) => `${pptStageLabel(event.stage)}：${event.message || event.status || ''}`);
+  if (error) lines.push(`错误：${error}`);
+  node.textContent = lines.length ? lines.join('\n') : '等待任务开始。';
+}
+
+function renderPptSlides() {
+  const thumbs = $('#pptSlideThumbs');
+  const canvas = $('#pptPreviewCanvas');
+  const label = $('#pptCurrentSlideLabel');
+  const slides = state.ppt.slides || [];
+  if (!slides.length) {
+    if (thumbs) thumbs.textContent = '还没有页面';
+    if (canvas) canvas.textContent = '等待生成第一张幻灯片...';
+    if (label) label.textContent = '等待中';
+    return;
+  }
+  if (!slides.some((slide) => slide.index === state.ppt.selectedSlideIndex)) {
+    state.ppt.selectedSlideIndex = slides[0].index;
+  }
+  const current = slides.find((slide) => slide.index === state.ppt.selectedSlideIndex) || slides[0];
+  if (label) label.textContent = `第 ${current.index} / ${slides.length} 页`;
+  if (canvas) {
+    canvas.innerHTML = current.content || '该页没有预览内容';
+  }
+  if (thumbs) {
+    thumbs.innerHTML = slides.map((slide) => `
+      <button class="ppt-thumb ${slide.index === current.index ? 'selected' : ''}" data-ppt-slide="${slide.index}" type="button">
+        <span>${slide.index}</span>
+        <div>${slide.content || ''}</div>
+      </button>
+    `).join('');
+    $$('.ppt-thumb').forEach((button) => button.addEventListener('click', () => {
+      state.ppt.selectedSlideIndex = Number(button.dataset.pptSlide || 1);
+      renderPptSlides();
+    }));
+  }
+  $('#pptRefineSlideButton') && ($('#pptRefineSlideButton').disabled = false);
+  $('#pptRefineDeckButton') && ($('#pptRefineDeckButton').disabled = false);
+}
+
+async function fetchPptPreview(jobId = state.ppt.currentJobId) {
+  if (!jobId) return;
+  const data = await requestJson(`/api/paper/ppt/preview?jobId=${encodeURIComponent(jobId)}`, {}, { timeoutMs: 60000 });
+  state.ppt.slides = data.slides || [];
+  state.ppt.latestJob = data.job || state.ppt.latestJob;
+  renderPptJob(state.ppt.latestJob);
+  renderPptSlides();
+}
+
+function startPptPolling(jobId) {
+  if (state.ppt.pollTimer) window.clearInterval(state.ppt.pollTimer);
+  state.ppt.currentJobId = jobId;
+  const poll = async () => {
+    try {
+      const job = await requestJson(`/api/paper/ppt/status?jobId=${encodeURIComponent(jobId)}`, {}, { timeoutMs: 30000 });
+      renderPptJob(job);
+      if (job.status === 'complete') {
+        window.clearInterval(state.ppt.pollTimer);
+        state.ppt.pollTimer = null;
+        await fetchPptPreview(jobId);
+      } else if (job.status === 'error') {
+        window.clearInterval(state.ppt.pollTimer);
+        state.ppt.pollTimer = null;
+      }
+    } catch (error) {
+      setState('ppt', `PPT 状态读取失败：${error.message}`, 'error');
+    }
+  };
+  poll();
+  state.ppt.pollTimer = window.setInterval(poll, 2500);
+}
+
+async function startPptGeneration() {
+  const payload = {
+    ...(state.ppt.sourcePayload || currentPptPayload()),
+    pptOptions: pptOptionsPayload(),
+  };
+  renderPptSource(payload, { silent: true });
+  if (!payload.sections.length && !payload.content) {
+    setState('ppt', '没有可生成 PPT 的论文内容', 'error');
+    return;
+  }
+  if ((payload.content || '').length < 800 && !confirm('当前论文内容较少，生成的 PPT 可能偏空。仍要继续吗？')) {
+    setState('ppt', '已取消生成 PPT', 'error');
+    return;
+  }
+  $('#pptStartButton') && ($('#pptStartButton').disabled = true);
+  try {
+    const job = await requestJson('/api/paper/ppt/start', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    }, { timeoutMs: 60000 });
+    state.ppt.slides = [];
+    state.ppt.feedbackHistory = [];
+    renderPptSlides();
+    startPptPolling(job.id);
+  } catch (error) {
+    setState('ppt', `PPT 生成启动失败：${error.message}`, 'error');
+  } finally {
+    $('#pptStartButton') && ($('#pptStartButton').disabled = false);
+  }
+}
+
+async function refinePpt(target = 'slide') {
+  const feedback = textValue('#pptRefineFeedback');
+  if (!state.ppt.currentJobId) {
+    setState('ppt', '请先生成 PPT', 'error');
+    return;
+  }
+  if (!feedback) {
+    setState('ppt', '请填写重做要求', 'error');
+    return;
+  }
+  const targetPages = target === 'slide' ? [state.ppt.selectedSlideIndex || 1] : [];
+  const payload = {
+    jobId: state.ppt.currentJobId,
+    feedback,
+    feedbackHistory: [...(state.ppt.feedbackHistory || []), feedback],
+    targetPages,
+    allowStructureChanges: isChecked('#pptAllowStructureChanges') || target !== 'slide',
+    ...pptOptionsPayload(),
+  };
+  $('#pptRefineSlideButton') && ($('#pptRefineSlideButton').disabled = true);
+  $('#pptRefineDeckButton') && ($('#pptRefineDeckButton').disabled = true);
+  try {
+    const job = await requestJson('/api/paper/ppt/refine', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    }, { timeoutMs: 60000 });
+    state.ppt.feedbackHistory = payload.feedbackHistory;
+    startPptPolling(job.id);
+  } catch (error) {
+    setState('ppt', `PPT 重做启动失败：${error.message}`, 'error');
+  }
+}
+
+function downloadCurrentPpt() {
+  if (!state.ppt.currentJobId) return;
+  window.location.href = `/api/paper/ppt/download?jobId=${encodeURIComponent(state.ppt.currentJobId)}`;
+}
+
 function collectFullPaperText(includeReference = false) {
   const sections = collectPaperSectionsPayload(includeReference);
   return sections.map((section) => `${section.title}\n${section.content}`).join('\n\n').trim();
@@ -1991,6 +2300,7 @@ function renderPaperPushScopes() {
 
 function paperPushTargetConfig(target) {
   return {
+    ppt: { page: 'ppt', stateScope: 'ppt', label: 'PPT制作' },
     datachart: { page: 'datachart', input: '#dataChartFullText', output: '#dataChartResultText', stateScope: 'datachart', label: '数据图表' },
     ai: { page: 'ai', input: '#aiInput', output: '#aiOutput', stateScope: 'ai', label: '降 AI 检测' },
     plagiarism: { page: 'plagiarism', input: '#plagiarismInput', output: '#plagiarismOutput', stateScope: 'plagiarism', label: '降查重率' },
@@ -2009,6 +2319,18 @@ function pushPaperSelectionToWorkspace() {
     setState('paper', '所选范围没有可推送的正文内容。', 'error');
     return;
   }
+  if (target === 'ppt') {
+    pushPaperSelectionToPpt(scope);
+    state.paperPushTargets[target] = {
+      scope: payload.scope,
+      titles: payload.titles,
+      pushedAt: new Date().toISOString(),
+    };
+    setState('paper', '已推送到PPT制作', 'done');
+    setPage('ppt', { preservePptSource: true });
+    saveDraft();
+    return;
+  }
   setText(config.input, payload.text);
   setText(config.output, '');
   resetPushedTargetResults(target);
@@ -2025,6 +2347,7 @@ function pushPaperSelectionToWorkspace() {
 
 function resetPushedTargetResults(target) {
   ({
+    ppt: () => {},
     datachart: resetDataChartResultsForNewInput,
     ai: resetAiResultsForNewInput,
     plagiarism: resetPlagiarismResultsForNewInput,
@@ -5066,6 +5389,11 @@ function bindActions() {
   bindDataChartActions();
   $$('[data-paper-action]').forEach((button) => button.addEventListener('click', () => runPaperAction(button.dataset.paperAction)));
   $('#exportPaperButton')?.addEventListener('click', exportPaperDocument);
+  $('#pptStartButton')?.addEventListener('click', startPptGeneration);
+  $('#pptRefreshPreviewButton')?.addEventListener('click', () => fetchPptPreview());
+  $('#pptDownloadButton')?.addEventListener('click', downloadCurrentPpt);
+  $('#pptRefineSlideButton')?.addEventListener('click', () => refinePpt('slide'));
+  $('#pptRefineDeckButton')?.addEventListener('click', () => refinePpt('deck'));
   ['#totalWordCountAuto', '#wordCountAuto'].forEach((selector) => {
     $(selector)?.addEventListener('change', () => {
       syncWordLimitControls();
