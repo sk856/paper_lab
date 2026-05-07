@@ -4150,17 +4150,15 @@ function isPaperBodySection(section) {
   return !['reference', 'cn_abstract', 'cn_keywords', 'en_abstract', 'en_keywords'].includes(kind);
 }
 
-function deepestBodyWritingSections() {
+function bodyWritingSections() {
   const sections = (state.paperSections || []).filter((section) => isPaperBodySection(section) && isPaperSectionWritable(section.title));
-  if (!sections.length) return [];
-  const deepestLevel = Math.max(...sections.map((section) => Math.max(1, Number(section.level || 1))));
-  return sections.filter((section) => Math.max(1, Number(section.level || 1)) === deepestLevel);
+  return sections;
 }
 
 function autoSectionWordCount() {
   const totalTarget = customTotalWordCount();
   if (!totalTarget) return 1000;
-  const basisCount = deepestBodyWritingSections().length || 1;
+  const basisCount = bodyWritingSections().length || 1;
   return Math.max(300, Math.round(totalTarget / basisCount));
 }
 

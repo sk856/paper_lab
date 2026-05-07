@@ -129,7 +129,7 @@ for _scene_id, _scene_def in SCENE_DEFS.items():
     PAGE_SCENE_MAP.setdefault(_scene_def['page_id'], []).append(_scene_id)
 
 DEFAULTS_PATH = resolve_resource_path('modules', 'prompt_defaults.json')
-SYSTEM_DEFAULT_SYNC_SCENE_IDS = ('paper_write.outline', 'polish.run_task')
+SYSTEM_DEFAULT_SYNC_SCENE_IDS = ('paper_write.outline', 'paper_write.section', 'polish.run_task')
 
 
 # 冻结的历史 instruction_wrapper：仅用于把旧版本的"纯说明文本"用户提示词一次性迁移为完整模板。
