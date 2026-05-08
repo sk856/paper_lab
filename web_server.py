@@ -1477,6 +1477,15 @@ class WebWorkbench:
                 analysis_plan=payload.get('analysisPlan') if isinstance(payload.get('analysisPlan'), dict) else None,
                 analysis_parameters=payload.get('analysisParameters') if isinstance(payload.get('analysisParameters'), list) else None,
             )
+        if action == 'calculate-parameters':
+            return data_chart.calculate_analysis_parameters(
+                table_text=payload.get('tableText', ''),
+                target=target,
+                analysis_plan=payload.get('analysisPlan') if isinstance(payload.get('analysisPlan'), dict) else None,
+                analysis_parameters=payload.get('analysisParameters') if isinstance(payload.get('analysisParameters'), list) else None,
+                title=payload.get('title', ''),
+                unit=payload.get('unit', ''),
+            )
         if action == 'preview':
             return data_chart.preview_chart(
                 table_text=payload.get('tableText', ''),

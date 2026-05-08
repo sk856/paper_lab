@@ -29,6 +29,8 @@ const state = {
   dataChartApproved: false,
   dataChartDataFile: null,
   dataChartAnalysisParameters: [],
+  dataChartAnalysisExpression: '',
+  dataChartAnalysisMethodNote: '',
   ppt: {
     sourcePayload: null,
     currentJobId: '',
@@ -824,6 +826,8 @@ function saveDraft() {
     dataChartAnalysisPlan: state.dataChartAnalysisPlan,
     dataChartApproved: state.dataChartApproved,
     dataChartAnalysisParameters: state.dataChartAnalysisParameters,
+    dataChartAnalysisExpression: state.dataChartAnalysisExpression,
+    dataChartAnalysisMethodNote: state.dataChartAnalysisMethodNote,
     promptTemplates: state.promptTemplates,
     fields: captureFields(),
     savedAt: new Date().toISOString(),
@@ -850,6 +854,8 @@ function restoreDraft() {
   state.dataChartApproved = Boolean(draft.dataChartApproved);
   state.dataChartDataFile = null;
   state.dataChartAnalysisParameters = Array.isArray(draft.dataChartAnalysisParameters) ? draft.dataChartAnalysisParameters : [];
+  state.dataChartAnalysisExpression = draft.dataChartAnalysisExpression || '';
+  state.dataChartAnalysisMethodNote = draft.dataChartAnalysisMethodNote || '';
   state.promptTemplates = normalizePromptTemplates(draft.promptTemplates || {});
   applyFields(draft.fields);
   syncModeSelections();
@@ -2396,6 +2402,8 @@ function resetDataChartResultsForNewInput() {
   state.dataChartApproved = false;
   state.dataChartDataFile = null;
   state.dataChartAnalysisParameters = [];
+  state.dataChartAnalysisExpression = '';
+  state.dataChartAnalysisMethodNote = '';
   setText('#dataChartQuery', '');
   setDataChartTableText('');
   renderDataChartSourceList();
@@ -3265,6 +3273,8 @@ function selectDataChartTarget(targetId) {
     state.dataChartAnalysisPlan = null;
     state.dataChartPreviewResult = null;
     state.dataChartAnalysisParameters = [];
+    state.dataChartAnalysisExpression = '';
+    state.dataChartAnalysisMethodNote = '';
     setText('#dataChartResultText', '');
     setDataChartTableText('');
     renderDataChartSourceList();
@@ -3396,6 +3406,10 @@ function dataChartHistoryStateSnapshot() {
     dataChartResult: state.dataChartResult,
     dataChartSearchResult: state.dataChartSearchResult,
     dataChartApproved: state.dataChartApproved,
+    dataChartAnalysisPlan: state.dataChartAnalysisPlan,
+    dataChartAnalysisParameters: state.dataChartAnalysisParameters,
+    dataChartAnalysisExpression: state.dataChartAnalysisExpression,
+    dataChartAnalysisMethodNote: state.dataChartAnalysisMethodNote,
   };
 }
 
@@ -3479,11 +3493,84 @@ function markdownTableToHtml(tableMarkdown) {
   `;
 }
 
+function dataChartLocalPreviewYear(row = {}) {
+  const direct = String(row.year || '').match(/(?:19|20)\d{2}/);
+  if (direct) return direct[0];
+  const label = String(row.label || '');
+  const labelMatch = label.match(/(?:19|20)\d{2}/);
+  return labelMatch ? labelMatch[0] : '';
+}
+
+function dataChartLocalPreviewSeries(row = {}) {
+  const symbol = String(row.symbol || '').replace(/\s+/g, '').trim();
+  if (symbol) return symbol;
+  const variable = String(row.variable || '').replace(/\s+/g, '').trim();
+  if (/^[A-Za-z][A-Za-z0-9_]{0,18}$/.test(variable)) return variable;
+  const label = String(row.label || '').replace(/\s+/g, '').trim();
+  const withoutYear = label.replace(/(?:19|20)\d{2}年?/, '').replace(/^[-—–_:：,，、]+|[-—–_:：,，、]+$/g, '');
+  return withoutYear || label || 'X';
+}
+
+function dataChartFormalLocalPreview(rows = dataChartEditableRows()) {
+  const usable = rows.map((row) => ({
+    year: dataChartLocalPreviewYear(row),
+    series: dataChartLocalPreviewSeries(row),
+    value: String(row.value || row.rawValue || '').trim(),
+  })).filter((row) => row.year && row.series);
+  const years = [...new Set(usable.map((row) => row.year))]
+    .sort((left, right) => Number(left) - Number(right));
+  const series = [...new Set(usable.map((row) => row.series))];
+  if (!years.length || !series.length || (years.length < 2 && series.length < 2)) return null;
+  const pointMap = new Map(usable.map((row) => [`${row.year}::${row.series}`, row.value]));
+  return {
+    headers: ['年份', ...series],
+    rows: years.map((year) => [year, ...series.map((name) => pointMap.get(`${year}::${name}`) || '')]),
+  };
+}
+
+function dataChartFallbackLocalPreview(rows = dataChartEditableRows()) {
+  const target = currentDataChartTarget();
+  const role = dataChartTableRole(target);
+  if (selectedDataChartArtifactType(target) === 'table' && role === 'impact_factors') {
+    return {
+      headers: ['影响因素'],
+      rows: rows.map((row) => [row.label || '']).filter((row) => row.some(Boolean)),
+    };
+  }
+  return {
+    headers: ['指标/变量', '数值'],
+    rows: rows.map((row) => [row.symbol || row.label || row.variable || '', row.value || row.rawValue || ''])
+      .filter((row) => row.some((cell) => String(cell || '').trim())),
+  };
+}
+
+function dataChartLocalPreviewHtml() {
+  if (!textValue('#dataChartDataTable')) return '';
+  const rows = dataChartEditableRows();
+  if (!rows.length) return '';
+  const table = dataChartFormalLocalPreview(rows) || dataChartFallbackLocalPreview(rows);
+  if (!table?.rows?.length) return '';
+  const title = textValue('#dataChartTitle') || defaultDataChartTitle(currentDataChartTarget()) || '数据图表';
+  return `
+    <figure class="data-chart-diff-table">
+      <figcaption>${escapeHtml(title)}</figcaption>
+      <div class="data-chart-diff-table-wrap">
+        <table data-columns="${table.headers.length}">
+          <thead><tr>${table.headers.map((header) => `<th>${escapeHtml(header)}</th>`).join('')}</tr></thead>
+          <tbody>${table.rows.map((row) => `
+            <tr>${table.headers.map((_, index) => `<td>${escapeHtml(row[index] || '')}</td>`).join('')}</tr>
+          `).join('')}</tbody>
+        </table>
+      </div>
+    </figure>
+  `;
+}
+
 function renderDataChartFinalPreview(result = state.dataChartResult) {
   const node = $('#dataChartFinalPreview');
   if (!node) return;
   if (!result) {
-    node.innerHTML = '生成图/表后，这里会显示最终插入论文的图或表。';
+    node.innerHTML = dataChartLocalPreviewHtml() || '生成图/表后，这里会显示最终插入论文的图或表。';
     return;
   }
   if (dataChartArtifactType(result) === 'table') {
@@ -3530,6 +3617,10 @@ function buildDataChartPreviewTarget() {
   if (state.dataChartAnalysisPlan) {
     target.analysisPlan = state.dataChartAnalysisPlan;
     target.analysisParameters = state.dataChartAnalysisParameters;
+  }
+  if (state.dataChartAnalysisExpression) {
+    target.analysisExpression = state.dataChartAnalysisExpression;
+    target.analysisMethodNote = state.dataChartAnalysisMethodNote || '';
   }
   return target;
 }
@@ -3583,6 +3674,57 @@ async function updateDataChartPreview(options = {}) {
   } catch (error) {
     setDataChartPreviewMessage(`预览生成失败：${error.message}`);
     if (!quiet) setState('datachart', `预览生成失败：${error.message}`, 'error');
+    return null;
+  }
+}
+
+async function calculateDataChartParameters() {
+  const target = buildDataChartPreviewTarget();
+  if (!target) {
+    setState('datachart', '请先选择候选段落。', 'error');
+    return null;
+  }
+  if (target.artifactType === 'table' && target.tableRole === 'impact_factors') {
+    setState('datachart', '影响因素表不需要计算参数或生成分析式。', 'error');
+    return null;
+  }
+  syncDataChartTableFromEditable();
+  syncDataChartAnalysisParameters();
+  if (!textValue('#dataChartDataTable')) {
+    setState('datachart', '请先完成分析数据表，再计算参数。', 'error');
+    return null;
+  }
+  try {
+    const data = await withRunningState('datachart', '正在根据分析数据表计算参数并生成分析式...', async () => requestJson('/api/data-chart', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        action: 'calculate-parameters',
+        target,
+        tableText: textValue('#dataChartDataTable'),
+        title: textValue('#dataChartTitle'),
+        unit: textValue('#dataChartUnit'),
+        analysisPlan: state.dataChartAnalysisPlan,
+        analysisParameters: state.dataChartAnalysisParameters,
+      }),
+    }, {
+      timeoutMs: DATA_CHART_SEARCH_TIMEOUT_MS,
+      timeoutMessage: '参数计算等待超时，请稍后重试，或手动填写软件计算出的参数值。',
+    }));
+    const incoming = Array.isArray(data.analysisParameters) ? data.analysisParameters : [];
+    if (incoming.length) {
+      state.dataChartAnalysisParameters = incoming
+        .map(normalizeDataChartAnalysisParameter)
+        .filter((item) => item.name || item.meaning || item.value);
+    }
+    state.dataChartAnalysisExpression = String(data.analysisExpression || data.expression || state.dataChartAnalysisExpression || '').trim();
+    state.dataChartAnalysisMethodNote = String(data.methodNote || data.analysisMethodNote || '').trim();
+    renderDataChartParameterPanel();
+    setState('datachart', state.dataChartAnalysisExpression ? '参数已计算，分析式已生成；生成图/表时会写入正文。' : '参数已整理，请补齐空缺值后再次计算分析式。', 'done');
+    saveDraft();
+    return data;
+  } catch (error) {
+    setState('datachart', `计算参数失败：${error.message}`, 'error');
     return null;
   }
 }
@@ -4073,7 +4215,7 @@ function normalizeDataChartAnalysisPlan(plan = null) {
 }
 
 function dataChartAnalysisParameterRows() {
-  return $$('#dataChartAnalysisPlan [data-analysis-param-row]').map((row) => ({
+  return $$('#dataChartParameterPanel [data-analysis-param-row]').map((row) => ({
     name: row.querySelector('[data-analysis-param-name]')?.value || '',
     meaning: row.querySelector('[data-analysis-param-meaning]')?.value || '',
     value: row.querySelector('[data-analysis-param-value]')?.value || '',
@@ -4082,7 +4224,8 @@ function dataChartAnalysisParameterRows() {
 
 function syncDataChartAnalysisParameters() {
   const rows = dataChartAnalysisParameterRows();
-  if (rows.length || $('#dataChartAnalysisPlan')) state.dataChartAnalysisParameters = rows;
+  const panel = $('#dataChartParameterPanel');
+  if (rows.length || (panel && !panel.hidden)) state.dataChartAnalysisParameters = rows;
 }
 
 function dataChartParameterKey(parameter = {}) {
@@ -4138,7 +4281,7 @@ function mergeDataChartAnalysisParameters(incoming = []) {
   });
   if (changed) {
     state.dataChartAnalysisParameters = current;
-    renderDataChartAnalysisPlan();
+    renderDataChartParameterPanel();
   }
   return changed;
 }
@@ -4158,20 +4301,15 @@ function renderDataChartAnalysisPlan(plan = state.dataChartAnalysisPlan) {
   if (!normalized) {
     node.hidden = true;
     node.innerHTML = '';
-    delete node.dataset.paramsTouched;
+    renderDataChartParameterPanel(null);
     return;
   }
   state.dataChartAnalysisPlan = normalized;
-  const paramsTouched = node.dataset.paramsTouched === '1';
+  const paramsTouched = $('#dataChartParameterPanel')?.dataset.paramsTouched === '1';
   if (!state.dataChartAnalysisParameters.length && normalized.parameters.length && !paramsTouched) {
     state.dataChartAnalysisParameters = normalized.parameters;
   }
   const requirements = normalized.requiredData.map((item) => String(item || '').trim()).filter(Boolean);
-  const params = state.dataChartAnalysisParameters.length ? state.dataChartAnalysisParameters : normalized.parameters;
-  const defaultParams = !paramsTouched && /β|beta|回归|方程|模型|系数/i.test(`${normalized.equation} ${normalized.analysisType} ${normalized.method}`)
-    ? [{ name: 'β0', meaning: '常数项', value: '' }, { name: 'β1', meaning: '核心解释变量系数', value: '' }]
-    : [];
-  const displayedParams = params.length ? params : defaultParams;
   node.hidden = false;
   node.innerHTML = `
     <div class="data-analysis-plan-grid">
@@ -4188,44 +4326,93 @@ function renderDataChartAnalysisPlan(plan = state.dataChartAnalysisPlan) {
         ${normalized.searchGuidance ? `<p><strong>搜索依据：</strong>${escapeHtml(normalized.searchGuidance)}</p>` : ''}
       </div>
     </div>
+  `;
+  renderDataChartParameterPanel(normalized);
+}
+
+function dataChartShouldShowParameterPanel(plan = state.dataChartAnalysisPlan) {
+  const target = currentDataChartTarget();
+  const role = dataChartTableRole(target);
+  return selectedDataChartArtifactType(target) === 'table'
+    && ['model_index', 'variable_analysis'].includes(role)
+    && Boolean(plan || state.dataChartAnalysisParameters.length || state.dataChartAnalysisExpression);
+}
+
+function renderDataChartParameterPanel(plan = state.dataChartAnalysisPlan) {
+  const node = $('#dataChartParameterPanel');
+  if (!node) return;
+  const normalized = normalizeDataChartAnalysisPlan(plan);
+  if (!dataChartShouldShowParameterPanel(normalized)) {
+    node.hidden = true;
+    node.innerHTML = '';
+    delete node.dataset.paramsTouched;
+    return;
+  }
+  const paramsTouched = node.dataset.paramsTouched === '1';
+  if (!state.dataChartAnalysisParameters.length && normalized?.parameters?.length && !paramsTouched) {
+    state.dataChartAnalysisParameters = normalized.parameters;
+  }
+  const params = state.dataChartAnalysisParameters.length ? state.dataChartAnalysisParameters : (normalized?.parameters || []);
+  const defaultParams = !paramsTouched && /β|beta|回归|方程|模型|系数/i.test(`${normalized?.equation || ''} ${normalized?.analysisType || ''} ${normalized?.method || ''}`)
+    ? [{ name: 'β0', meaning: '常数项', value: '' }, { name: 'β1', meaning: '核心解释变量系数', value: '' }]
+    : [];
+  const displayedParams = params.length ? params : defaultParams;
+  node.hidden = false;
+  node.innerHTML = `
     <div class="data-analysis-params">
       <div class="data-analysis-params-heading">
-        <h4>参数填写</h4>
-        <button class="secondary-button compact" data-analysis-add-param type="button">新增参数</button>
+        <div>
+          <h4>参数填写</h4>
+          <p class="mini-hint">先完成上方分析数据表，再计算参数；也可以手动补入软件计算出的系数。</p>
+        </div>
+        <div class="button-row compact-row">
+          <button class="secondary-button compact" id="dataChartCalculateParameters" type="button">计算参数</button>
+          <button class="secondary-button compact" data-analysis-add-param type="button">新增参数</button>
+        </div>
       </div>
       ${displayedParams.length ? displayedParams.map((item, index) => `
         <div class="data-analysis-param-row" data-analysis-param-row="${index}">
-          <input data-analysis-param-name aria-label="参数名" value="${escapeHtml(item.name || '')}" placeholder="β0 / β1 / F1" />
+          <input data-analysis-param-name aria-label="参数名" value="${escapeHtml(item.name || '')}" placeholder="β0 / β1 / γ1 / F1" />
           <input data-analysis-param-meaning aria-label="参数含义" value="${escapeHtml(item.meaning || '')}" placeholder="参数含义或变量说明" />
-          <input data-analysis-param-value aria-label="参数值" value="${escapeHtml(item.value || '')}" placeholder="用户填入计算值" />
+          <input data-analysis-param-value aria-label="参数值" value="${escapeHtml(item.value || '')}" placeholder="计算值或待填写" />
           <button class="secondary-button compact" data-analysis-remove-param="${index}" type="button">删除</button>
         </div>
-      `).join('') : '<p class="mini-hint">当前分析不需要额外填写系数；如有软件计算结果，可点击新增参数录入。</p>'}
+      `).join('') : '<p class="mini-hint">当前分析还没有识别到待估参数；可点击“计算参数”尝试从数据表推导，或点击“新增参数”手动录入。</p>'}
+      <label class="field-block data-analysis-expression-field">
+        <span>分析式</span>
+        <textarea class="text-box compact-textarea" data-analysis-expression placeholder="计算参数后会显示最终写入正文的分析式，例如 Y总=0.671F1+0.149F2。">${escapeHtml(state.dataChartAnalysisExpression || '')}</textarea>
+      </label>
+      ${state.dataChartAnalysisMethodNote ? `<p class="mini-hint data-analysis-method-note">${escapeHtml(state.dataChartAnalysisMethodNote)}</p>` : ''}
     </div>
   `;
-  $$('#dataChartAnalysisPlan input').forEach((input) => {
+  $$('#dataChartParameterPanel input').forEach((input) => {
     input.addEventListener('input', () => {
       syncDataChartAnalysisParameters();
       saveDraft();
     });
   });
-  $$('#dataChartAnalysisPlan [data-analysis-remove-param]').forEach((button) => {
+  $('#dataChartParameterPanel [data-analysis-expression]')?.addEventListener('input', (event) => {
+    state.dataChartAnalysisExpression = event.target.value || '';
+    saveDraft();
+  });
+  $$('#dataChartParameterPanel [data-analysis-remove-param]').forEach((button) => {
     button.addEventListener('click', () => {
       syncDataChartAnalysisParameters();
       const index = Number(button.dataset.analysisRemoveParam);
       if (Number.isInteger(index)) state.dataChartAnalysisParameters.splice(index, 1);
       node.dataset.paramsTouched = '1';
-      renderDataChartAnalysisPlan();
+      renderDataChartParameterPanel();
       saveDraft();
     });
   });
-  $('#dataChartAnalysisPlan [data-analysis-add-param]')?.addEventListener('click', () => {
+  $('#dataChartParameterPanel [data-analysis-add-param]')?.addEventListener('click', () => {
     syncDataChartAnalysisParameters();
     state.dataChartAnalysisParameters.push({ name: '', meaning: '', value: '' });
     node.dataset.paramsTouched = '1';
-    renderDataChartAnalysisPlan();
+    renderDataChartParameterPanel();
     saveDraft();
   });
+  $('#dataChartCalculateParameters')?.addEventListener('click', calculateDataChartParameters);
   syncDataChartAnalysisParameters();
 }
 
@@ -4315,6 +4502,7 @@ function renderDataChartEditableTable(rows = []) {
   $$('#dataChartEditableTable .data-chart-table-input').forEach((input) => {
     input.addEventListener('input', () => {
       syncDataChartTableFromEditable();
+      if (!state.dataChartPreviewResult && !state.dataChartResult) renderDataChartFinalPreview(null);
       saveDraft();
     });
   });
@@ -4331,10 +4519,12 @@ function renderDataChartEditableTable(rows = []) {
         renderDataChartEditableTable([]);
       }
       syncDataChartTableFromEditable();
+      if (!state.dataChartPreviewResult && !state.dataChartResult) renderDataChartFinalPreview(null);
       saveDraft();
     });
   });
   syncDataChartTableFromEditable();
+  if (!state.dataChartPreviewResult && !state.dataChartResult) renderDataChartFinalPreview(null);
 }
 
 function setDataChartTableText(text) {
@@ -4542,6 +4732,8 @@ async function findDataChartTargets() {
     state.dataChartAnalysisPlan = null;
     state.dataChartPreviewResult = null;
     state.dataChartAnalysisParameters = [];
+    state.dataChartAnalysisExpression = '';
+    state.dataChartAnalysisMethodNote = '';
     state.dataChartApproved = false;
     setText('#dataChartResultText', '');
     setDataChartTableText('');
@@ -4615,6 +4807,8 @@ async function analyzeDataChartData() {
   if (payloadTarget.artifactType === 'table' && payloadTarget.tableRole === 'impact_factors') {
     state.dataChartAnalysisPlan = null;
     state.dataChartAnalysisParameters = [];
+    state.dataChartAnalysisExpression = '';
+    state.dataChartAnalysisMethodNote = '';
     renderDataChartAnalysisPlan();
     setState('datachart', '影响因素表不需要数据分析计划，请直接点击“AI 搜索数据”提取因素。', 'running');
     return;
@@ -4642,6 +4836,8 @@ async function analyzeDataChartData() {
     }
     state.dataChartAnalysisPlan = normalized;
     state.dataChartAnalysisParameters = normalized.parameters || [];
+    state.dataChartAnalysisExpression = '';
+    state.dataChartAnalysisMethodNote = '';
     applyDataChartAnalysisPayloadToTarget(data, payloadTarget);
     const planNode = $('#dataChartAnalysisPlan');
     if (planNode) delete planNode.dataset.paramsTouched;
@@ -4702,6 +4898,8 @@ async function searchDataChartData() {
     }));
     state.dataChartSearchResult = data;
     const parameterUpdated = applyDataChartSearchParameters(data);
+    state.dataChartAnalysisExpression = String(data.analysisExpression || data.expression || '').trim();
+    state.dataChartAnalysisMethodNote = String(data.methodNote || data.analysisMethodNote || '').trim();
     const rows = dataChartRowsFromSearch(data);
     if (rows.length) {
       setDataChartRows(rows);
@@ -4715,6 +4913,7 @@ async function searchDataChartData() {
     if ($('#dataChartType')) $('#dataChartType').value = selectedDataChartArtifactType(target) === 'table' ? 'table' : (data.chartType || target.chartType || 'bar');
     updateDataChartTitleLabel(target);
     renderDataChartSourceList(data);
+    renderDataChartParameterPanel();
     updateDataChartStep(3);
     await updateDataChartPreview({ quiet: true, afterSearch: true });
     const manualMessage = data.sourceNote || (isImpact ? '未提取到影响因素，请在下方手动填写。' : '未检索到可直接使用的数据，请补充真实数值和来源后再生成图表。');
@@ -4771,6 +4970,10 @@ async function generateDataChart() {
     if (state.dataChartAnalysisPlan) {
       target.analysisPlan = state.dataChartAnalysisPlan;
       target.analysisParameters = state.dataChartAnalysisParameters;
+    }
+    if (state.dataChartAnalysisExpression) {
+      target.analysisExpression = state.dataChartAnalysisExpression;
+      target.analysisMethodNote = state.dataChartAnalysisMethodNote || '';
     }
   }
   syncDataChartTableFromEditable();
@@ -4899,6 +5102,7 @@ function bindDataChartActions() {
   $('#dataChartDataFile')?.addEventListener('change', (event) => readDataChartDataFile(event.target.files?.[0]));
   $('#dataChartType')?.addEventListener('change', () => {
     updateDataChartTitleLabel(currentDataChartTarget());
+    renderDataChartParameterPanel();
     refreshDataChartDiff();
     saveDraft();
   });
@@ -6019,6 +6223,10 @@ function restoreSelectedHistory() {
   state.selectedDataChartTargetId = record.selectedDataChartTargetId || '';
   state.dataChartResult = record.dataChartResult || null;
   state.dataChartSearchResult = record.dataChartSearchResult || null;
+  state.dataChartAnalysisPlan = record.dataChartAnalysisPlan || null;
+  state.dataChartAnalysisParameters = Array.isArray(record.dataChartAnalysisParameters) ? record.dataChartAnalysisParameters : [];
+  state.dataChartAnalysisExpression = record.dataChartAnalysisExpression || '';
+  state.dataChartAnalysisMethodNote = record.dataChartAnalysisMethodNote || '';
   state.dataChartApproved = Boolean(record.dataChartApproved);
   applyFields(record.fields || {});
   syncModeSelections();
@@ -6027,6 +6235,7 @@ function restoreSelectedHistory() {
   renderDataChartSourceList();
   renderDataChartResult();
   updateDataChartDataFileNote();
+  renderDataChartAnalysisPlan();
   if (record.page === 'correction' && record.analysis?.correction) {
     renderCorrection(record.analysis.correction);
   } else if (record.page === 'correction' && record.analysis) {

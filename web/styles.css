@@ -1258,6 +1258,18 @@ svg { width: 22px; height: 22px; fill: none; stroke: currentColor; stroke-width:
   gap: 0.38rem;
   min-width: 0;
 }
+.data-analysis-params-block {
+  display: grid;
+  gap: 0.62rem;
+  margin-top: 0.85rem;
+  padding: 0.85rem;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface-soft);
+}
+.data-analysis-params-block[hidden] {
+  display: none;
+}
 .data-analysis-params {
   display: grid;
   gap: 0.48rem;
@@ -1283,6 +1295,18 @@ svg { width: 22px; height: 22px; fill: none; stroke: currentColor; stroke-width:
   background: var(--surface);
   color: var(--text);
   padding: 0.45rem 0.55rem;
+}
+.data-analysis-expression-field {
+  margin-top: 0.15rem;
+}
+.text-box.compact-textarea {
+  min-height: 86px;
+  border-radius: 8px;
+  padding: 0.65rem 0.72rem;
+  line-height: 1.55;
+}
+.data-analysis-method-note {
+  white-space: pre-wrap;
 }
 .data-final-preview-block {
   display: grid;
@@ -2029,6 +2053,10 @@ svg { width: 22px; height: 22px; fill: none; stroke: currentColor; stroke-width:
   }
   .data-analysis-plan-grid {
     grid-template-columns: 1fr;
+  }
+  .data-analysis-params-heading {
+    align-items: stretch;
+    flex-direction: column;
   }
   .data-analysis-param-row {
     grid-template-columns: minmax(0, 1fr);

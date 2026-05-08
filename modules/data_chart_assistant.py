@@ -2217,6 +2217,8 @@ AI 建议标题：{(target or {}).get('chartTitle') or (target or {}).get('title
                     if symbol and symbol in meaning:
                         name = str(parameter.get('name') or '')
                         break
+            if not name and re.search(r'常数|截距|intercept|constant', label, flags=re.IGNORECASE):
+                name = 'β0'
             if not name:
                 name = f'β{beta_index}'
                 beta_index += 1
@@ -3480,6 +3482,220 @@ AI 数据分析计划 JSON：
             'referenceEntries': [],
         }
 
+    @classmethod
+    def _parameter_value_map(cls, parameters):
+        values = {}
+        for parameter in parameters or []:
+            if not isinstance(parameter, dict):
+                continue
+            name = str(parameter.get('name') or parameter.get('symbol') or parameter.get('label') or '').strip()
+            value = str(parameter.get('value') or parameter.get('rawValue') or '').strip()
+            if not name or not value:
+                continue
+            values[cls._analysis_parameter_key({'name': name})] = value
+        return values
+
+    @classmethod
+    def _substitute_equation_parameters(cls, equation, parameters):
+        expression = cls._normalize_text(equation)
+        if not expression or '=' not in expression:
+            return ''
+        for parameter in sorted(parameters or [], key=lambda item: len(str(item.get('name') or '')), reverse=True):
+            name = str(parameter.get('name') or '').strip()
+            value = str(parameter.get('value') or '').strip()
+            if not name or not value:
+                continue
+            variants = {name, name.replace('β', 'beta'), name.replace('β', 'Beta')}
+            for variant in variants:
+                if not variant:
+                    continue
+                expression = re.sub(re.escape(variant), value, expression, flags=re.IGNORECASE)
+        return re.sub(r'\s+', '', expression).strip()
+
+    @classmethod
+    def _factor_expression_from_rows(cls, rows, equation=''):
+        candidates = []
+        for row in rows or []:
+            stat_type = str(row.get('statType') or '').strip().lower()
+            label = str(row.get('label') or '').strip()
+            value = cls._parse_number(row.get('rawValue', row.get('value', '')))
+            if value is None:
+                continue
+            is_contribution = (
+                stat_type in {'contributionrate', 'contribution_rate', 'variancecontribution', '贡献率'}
+                or '贡献率' in label
+                or '方差贡献' in label
+            )
+            if not is_contribution:
+                continue
+            symbol = str(row.get('symbol') or '').strip()
+            if not symbol:
+                match = re.search(r'\b(?:F|Y|X|PC|Factor)\s*\d+\b', f'{label} {row.get("variable", "")}', flags=re.IGNORECASE)
+                symbol = re.sub(r'\s+', '', match.group(0)) if match else f'F{len(candidates) + 1}'
+            clean_label = re.sub(r'(?:累计)?贡献率|方差贡献率|特征根', '', label).strip()
+            candidates.append({
+                'symbol': symbol,
+                'label': clean_label or symbol,
+                'value': value,
+            })
+        if not candidates:
+            return '', []
+        total = sum(abs(item['value']) for item in candidates)
+        if total <= 0:
+            return '', []
+        max_value = max(abs(item['value']) for item in candidates)
+        denominator = 100 if max_value > 1 else (1 if total <= 1.05 else total)
+        left = ''
+        if equation and '=' in equation:
+            left = equation.split('=', 1)[0].strip()
+        left = left or 'Y总'
+        parameters = []
+        terms = []
+        for index, item in enumerate(candidates, start=1):
+            weight = item['value'] / denominator
+            value_text = f'{weight:.3f}'.rstrip('0').rstrip('.')
+            gamma = f'γ{index}'
+            parameters.append({
+                'name': gamma,
+                'meaning': f'{item["symbol"]}（{item["label"]}）权重',
+                'value': value_text,
+            })
+            terms.append(f'{value_text}{item["symbol"]}')
+        return f'{left}=' + '+'.join(terms), parameters
+
+    @classmethod
+    def _fallback_analysis_calculation(cls, rows, analysis_plan=None, analysis_parameters=None, target=None, title=''):
+        plan = analysis_plan if isinstance(analysis_plan, dict) else {}
+        merged_parameters = cls._merge_analysis_parameters(analysis_parameters or [], {}, rows)
+        factor_expression, factor_parameters = cls._factor_expression_from_rows(rows, plan.get('equation') or '')
+        if factor_parameters:
+            merged_parameters = cls._merge_analysis_parameters(merged_parameters, {'analysisParameters': factor_parameters}, rows)
+        expression = factor_expression or cls._substitute_equation_parameters(plan.get('equation') or '', merged_parameters)
+        if not expression and plan.get('equation'):
+            expression = cls._normalize_text(plan.get('equation'))
+        table_label = cls._target_artifact_label(target or {}, 'table')
+        method_note = ''
+        if factor_expression:
+            method_note = f'已根据{table_label}中贡献率换算各因子权重，并生成综合分析式。'
+        elif expression and cls._parameter_value_map(merged_parameters):
+            method_note = f'已将已填写或数据表中识别到的参数代入原关系式，生成可写入正文的分析式。'
+        else:
+            method_note = '已整理参数清单；仍为空的参数需要用户用推荐软件完成计算后填写。'
+        return {
+            'analysisParameters': merged_parameters,
+            'analysisExpression': expression,
+            'methodNote': method_note,
+            'tableReferences': [table_label] if table_label else [],
+            'dataRows': cls._public_rows(rows),
+            'title': title or plan.get('title') or '',
+        }
+
+    def calculate_analysis_parameters(self, *, table_text='', target=None, analysis_plan=None, analysis_parameters=None, title='', unit=''):
+        target = target or {}
+        artifact_type = self._normalize_artifact_type(target.get('artifactType') or target.get('insertType'))
+        table_role = self._normalize_table_role(
+            target.get('tableRole') or target.get('role'),
+            self._table_context_text(title or target.get('tableTitle') or target.get('chartTitle') or '', target),
+        )
+        if artifact_type == 'table' and table_role == 'impact_factors':
+            return {
+                'analysisParameters': [],
+                'analysisExpression': '',
+                'methodNote': '影响因素表是论文内容整理表，不需要计算参数或生成分析式。',
+                'tableReferences': [],
+            }
+        plan = (
+            self._normalize_analysis_plan_payload(analysis_plan, target, table_role)
+            if isinstance(analysis_plan, dict) and analysis_plan
+            else self._normalize_analysis_plan_payload(target.get('analysisPlan') or {}, target, table_role)
+        )
+        rows = self.parse_data_table(table_text, require_numeric=False)
+        if artifact_type == 'table':
+            rows = self._apply_article_variable_symbols(rows, {**target, 'tableRole': table_role}, table_text)
+        fallback = self._fallback_analysis_calculation(rows, plan, analysis_parameters or target.get('analysisParameters') or [], target, title)
+        if not self.api or not hasattr(self.api, 'call_json_sync'):
+            return fallback
+        rows_payload = [
+            {
+                'label': row.get('label', ''),
+                'year': row.get('year', ''),
+                'variable': row.get('variable', ''),
+                'symbol': row.get('symbol', ''),
+                'statType': row.get('statType', ''),
+                'relatedVariable': row.get('relatedVariable', ''),
+                'value': row.get('value'),
+                'rawValue': row.get('rawValue', row.get('value', '')),
+                'coefficient': row.get('coefficient', ''),
+                'stdError': row.get('stdError', ''),
+                'tStatistic': row.get('tStatistic', ''),
+                'pValue': row.get('pValue', ''),
+                'correlation': row.get('correlation', ''),
+                'note': row.get('note', ''),
+            }
+            for row in rows
+        ]
+        try:
+            payload = self.api.call_json_sync(
+                f'''请根据用户已经审核或正在编辑的“分析数据表”计算论文参数，并生成最终可写入正文的分析式。
+
+要求：
+1. 只能使用数据表中已有数值、已填写参数和数据分析计划，不要编造缺失参数。
+2. 如果表格是总方差解释、主成分、因子贡献率类结果，请把贡献率转换为小数权重；若正文明确要求综合得分且只保留部分因子，可按累计贡献率归一化，生成类似“Y总=0.671F1+0.149F2”的分析式。
+3. 如果正文有关系式或回归方程，请把能确认的 β、γ、权重等参数代入；缺失参数保留为空并在 methodNote 中说明。
+4. analysisParameters 要返回完整参数清单，已有参数也要保留；value 只填可以由表格或已填写信息确认的数值。
+5. analysisExpression 是最后应写入论文正文的表达式，不要写数据来源，不要写 Markdown。
+
+表题：{title or plan.get('title') or target.get('tableTitle') or '未提供'}
+单位：{unit or '未注明'}
+表格编号：{self._target_artifact_label(target, 'table')}
+数据分析计划 JSON：
+{json.dumps(plan, ensure_ascii=False, indent=2)}
+当前参数 JSON：
+{json.dumps(analysis_parameters or target.get('analysisParameters') or [], ensure_ascii=False, indent=2)}
+分析数据表 JSON：
+{json.dumps(rows_payload, ensure_ascii=False, indent=2)}
+
+返回 JSON：
+{{
+  "analysisParameters": [
+    {{"name": "γ1", "meaning": "F1 权重", "value": "0.671"}}
+  ],
+  "analysisExpression": "Y总=0.671F1+0.149F2",
+  "methodNote": "说明这些参数如何由表格计算得出；若有缺失参数，说明需要用户用什么方法补算",
+  "tableReferences": ["{self._target_artifact_label(target, 'table')}"]
+}}''',
+                system='你是论文计量分析与公式整理助手。输出必须是严格 JSON，只根据已给数据计算或整理参数。',
+                temperature=0.05,
+                max_tokens=1800,
+                request_timeout=120,
+                schema_name='data_chart_calculate_parameters',
+                usage_context=self._usage_context('data_chart.calculate_parameters'),
+            )
+            if not isinstance(payload, dict):
+                return fallback
+            merged = self._merge_analysis_parameters(fallback.get('analysisParameters') or [], payload, rows)
+            fallback_values = self._parameter_value_map(fallback.get('analysisParameters') or [])
+            if fallback.get('analysisExpression') and fallback_values:
+                for parameter in merged:
+                    key = self._analysis_parameter_key(parameter)
+                    value = str(parameter.get('value') or '').strip()
+                    if key in fallback_values and ('%' in value or (self._parse_number(value) or 0) > 1):
+                        parameter['value'] = fallback_values[key]
+            expression = self._normalize_text(payload.get('analysisExpression') or payload.get('expression') or fallback.get('analysisExpression') or '')
+            return {
+                'analysisParameters': merged,
+                'analysisExpression': expression,
+                'methodNote': self._normalize_text(payload.get('methodNote') or payload.get('analysisMethodNote') or fallback.get('methodNote') or ''),
+                'tableReferences': payload.get('tableReferences') if isinstance(payload.get('tableReferences'), list) else fallback.get('tableReferences', []),
+                'dataRows': self._public_rows(rows),
+                'title': title or plan.get('title') or '',
+            }
+        except Exception as exc:
+            return {
+                **fallback,
+                'methodNote': f'{fallback.get("methodNote") or "已使用本地规则整理参数。"} AI 参数计算未返回：{exc}',
+            }
+
     def _generate_table_result(self, rows, *, target=None, title='', unit='', chart_type='bar'):
         target = target or {}
         caption = self._build_table_caption(title)
@@ -3645,6 +3861,25 @@ AI 数据分析计划 JSON：
                 variables = [str(item[0]) for item in body if item and str(item[0]).strip()]
                 return f'描述性统计表汇总了{"、".join(variables[:4])}等变量的均值、标准差及取值范围，用于概括样本分布特征。'
         if kind == 'test_result':
+            contribution_rows = [
+                row for row in rows or []
+                if cls._row_stat_type(row) in {'contributionRate', 'cumulativeRate', 'eigenvalue'}
+            ]
+            if contribution_rows:
+                parts = []
+                for row in contribution_rows:
+                    stat = cls._row_stat_type(row)
+                    if stat != 'contributionRate':
+                        continue
+                    variable = cls._row_variable_name(row) or cls._clean_variable_symbol(row.get('symbol', '')) or str(row.get('label', '') or '').strip()
+                    value = cls._value_text(row)
+                    if variable and value:
+                        parts.append(f'{variable}贡献率为{value}%')
+                    if len(parts) >= 3:
+                        break
+                if parts:
+                    return f'总方差解释或因子结果表显示，{"，".join(parts)}，可据此确定综合评价式中的因子权重。'
+                return '总方差解释或因子结果表汇总了特征根、贡献率和累计贡献率，可用于确定综合评价式中的因子权重。'
             return '检验结果表用于汇总统计检验、因子载荷或稳健性结果，以支撑后续模型设定和实证解释。'
         return ''
 
@@ -4397,10 +4632,10 @@ AI 数据分析计划 JSON：
             return 'correlation'
         if re.search(r'回归结果|回归分析|参数估计|估计结果|稳健性|模型结果|回归系数', context, flags=re.IGNORECASE):
             return 'regression'
-        if re.search(r'描述性统计|描述统计|描述性分析|样本统计|均值|标准差|最大值|最小值|方差', context, flags=re.IGNORECASE):
-            return 'descriptive'
-        if re.search(r'KMO|Bartlett|因子载荷|检验结果|贡献率|主成分', context, flags=re.IGNORECASE):
+        if re.search(r'总方差|方差解释|KMO|Bartlett|因子载荷|检验结果|贡献率|主成分|特征根|累计方差', context, flags=re.IGNORECASE):
             return 'test_result'
+        if re.search(r'描述性统计|描述统计|描述性分析|样本统计|均值|标准差|最大值|最小值', context, flags=re.IGNORECASE):
+            return 'descriptive'
         if role == 'variable_analysis':
             return 'test_result'
         if cls._context_requests_numeric_table(context):
@@ -4423,6 +4658,8 @@ AI 数据分析计划 JSON：
             return 'regression'
         if any(cls._row_field_text(row, 'correlation', 'relatedLabel', 'relatedVariable') for row in rows or []) or 'correlation' in stat_types:
             return 'correlation'
+        if stat_types.intersection({'eigenvalue', 'contributionRate', 'cumulativeRate'}):
+            return 'test_result'
         if any(cls._row_field_text(row, 'mean', 'stdDev', 'min', 'max', 'sampleSize') for row in rows or []) or stat_types.intersection({'mean', 'stdDev', 'min', 'max', 'sampleSize'}):
             return 'descriptive'
         if len(cls._numeric_rows(rows)) >= 1:
@@ -4668,11 +4905,12 @@ AI 数据分析计划 JSON：
     @classmethod
     def _numeric_pivot_table(cls, rows, symbol_only=False, role='evidence_data'):
         numeric_rows = cls._numeric_rows(rows)
-        symbol_map = cls._symbolic_variable_map(numeric_rows, role) if symbol_only else {}
+        pivot_rows = rows or numeric_rows
+        symbol_map = cls._symbolic_variable_map(pivot_rows, role) if symbol_only else {}
         years = []
         series = []
         points = {}
-        for row in numeric_rows:
+        for row in pivot_rows:
             year = cls._row_year(row)
             name = cls._row_variable_name(row)
             display_name = cls._symbolic_name(name, symbol_map) if symbol_only else name
@@ -4688,14 +4926,14 @@ AI 数据分析计划 JSON：
             points[(year, display_name)] = value
         if years and series and (len(years) >= 2 or len(series) >= 2):
             years.sort(key=lambda item: int(re.search(r'\d{4}', item).group(0)) if re.search(r'\d{4}', item) else 0)
-            headers = ['t'] + series if symbol_only else ['年份'] + series
+            headers = ['年份'] + series
             body = [[year.replace('年', '')] + [points.get((year, name), '') for name in series] for year in years]
             return headers, body
         structure = cls._series_structure(numeric_rows)
         if structure:
             raw_series = list(structure.get('series') or [])
             mapped_series = [cls._symbolic_name(name, symbol_map) if symbol_only else name for name in raw_series]
-            headers = (['t'] if symbol_only else ['年份']) + mapped_series
+            headers = ['年份'] + mapped_series
             body = []
             values = structure.get('values') or {}
             for year in structure.get('years') or []:
@@ -4720,7 +4958,7 @@ AI 数据分析计划 JSON：
         if len(years) >= 2 and series:
             years.sort(key=lambda item: int(re.search(r'\d{4}', item).group(0)) if re.search(r'\d{4}', item) else 0)
             mapped_series = [cls._symbolic_name(name, symbol_map) if symbol_only else name for name in series]
-            headers = (['t'] if symbol_only else ['年份']) + mapped_series
+            headers = ['年份'] + mapped_series
             body = [[year.replace('年', '')] + [points.get((year, name), '') for name in series] for year in years]
             return headers, body
         source_rows = rows or numeric_rows
@@ -4925,11 +5163,15 @@ AI 数据分析计划 JSON：
         table_role = self._normalize_table_role(target.get('tableRole') or target.get('role'), self._table_context_text(caption, target))
         analysis_plan = target.get('analysisPlan') if isinstance(target, dict) and isinstance(target.get('analysisPlan'), dict) else None
         analysis_parameters = target.get('analysisParameters') if isinstance(target, dict) and isinstance(target.get('analysisParameters'), list) else []
+        analysis_expression = self._normalize_text(target.get('analysisExpression', '') if isinstance(target, dict) else '')
+        analysis_method_note = self._normalize_text(target.get('analysisMethodNote', '') if isinstance(target, dict) else '')
         analysis_note = ''
-        if analysis_plan or analysis_parameters:
+        if analysis_plan or analysis_parameters or analysis_expression:
             analysis_note = json.dumps({
                 'analysisPlan': analysis_plan or {},
                 'analysisParameters': analysis_parameters,
+                'analysisExpression': analysis_expression,
+                'analysisMethodNote': analysis_method_note,
             }, ensure_ascii=False, indent=2)
         has_numeric = bool(self._numeric_rows(rows))
         analysis_text = self._chart_analysis(rows, unit)
@@ -5002,8 +5244,9 @@ AI 数据分析计划 JSON：
 3. 正文不要写来源名称、报告名、发布机构、URL或“数据来源为/来源来自”；来源由系统写入参考文献并用引用编号标注。
 4. 必须直接引用关键数值，并解释最高值、最低值、趋势、差距变化或结构占比中至少两类信息。
 5. 如果提供了 AI 数据分析计划或用户填写的 β/参数值，应结合这些信息说明表格如何服务于模型测算、方程代入或变量分析。
-6. 可以写成 1-2 个自然段，不要输出标题。
-7. 正文提到表时使用“{table_label}”，不要自行改成其他编号。
+6. 如果提供了“最终分析式”，必须把分析式写入正文，并说明该式与{table_label}中的变量、因子或参数结果如何对应。
+7. 可以写成 1-2 个自然段，不要输出标题。
+8. 正文提到表时使用“{table_label}”，不要自行改成其他编号。
 
 原段落：
 {original}
@@ -5016,6 +5259,8 @@ AI 数据分析计划 JSON：
 {analysis_text or '请根据数据行 JSON 自行归纳。'}
 AI 数据分析计划与用户填写参数：
 {analysis_note or '未提供'}
+最终分析式：
+{analysis_expression or '未提供'}
 数据行 JSON：
 {json.dumps(rows_payload, ensure_ascii=False)}
 
@@ -5055,10 +5300,15 @@ AI 数据分析计划与用户填写参数：
                 )
                 rewritten = self._normalize_text(rewritten)
                 if rewritten:
-                    return self._ensure_rewritten_has_table_analysis(rewritten, rows, unit, caption, table_label)
+                    rewritten = self._ensure_rewritten_has_table_analysis(rewritten, rows, unit, caption, table_label)
+                    if table_role != 'impact_factors':
+                        rewritten = self._ensure_rewritten_has_analysis_expression(rewritten, analysis_expression, table_label)
+                    return rewritten
             except Exception:
                 pass
         intro = self._build_table_analysis_paragraph(rows, unit, caption, table_label)
+        if analysis_expression and table_role != 'impact_factors':
+            intro = f'根据{table_label}的参数计算结果，可得到分析式：{analysis_expression}。该式与表中变量、因子或参数结果相对应，用于解释模型测算结果。\n\n{intro}'
         if not original:
             return intro
         if table_label in original or '如表' in original or '见表' in original:
@@ -5078,6 +5328,22 @@ AI 数据分析计划与用户填写参数：
         if cls._analysis_mentions_data(text, rows):
             return text
         return f'{text}\n\n{analysis_paragraph}'.strip()
+
+    @classmethod
+    def _ensure_rewritten_has_analysis_expression(cls, rewritten, expression='', table_label='表1'):
+        expression = cls._normalize_text(expression)
+        text = cls._normalize_text(rewritten)
+        if not expression or not text:
+            return text or expression
+        compact_text = re.sub(r'\s+', '', text)
+        compact_expression = re.sub(r'\s+', '', expression)
+        if compact_expression and compact_expression in compact_text:
+            return text
+        return (
+            f'{text}\n\n'
+            f'根据{table_label}的参数计算结果，可得到分析式：{expression}。'
+            f'该式与表中变量、因子或参数结果相对应，用于进一步解释模型测算和变量分析结果。'
+        ).strip()
 
     @staticmethod
     def _source_summary(rows, limit=4):
