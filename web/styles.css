@@ -760,6 +760,30 @@ svg { width: 22px; height: 22px; fill: none; stroke: currentColor; stroke-width:
   margin: 0.5rem 0 1rem;
   align-items: center;
 }
+.data-action-file {
+  min-height: 42px;
+  display: inline-flex;
+  align-items: center;
+  gap: 0.5rem;
+  max-width: 320px;
+  padding: 0.52rem 0.7rem;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface-soft);
+  color: var(--text);
+  font-size: 0.9rem;
+  line-height: 1.2;
+}
+.data-action-file span {
+  flex: 0 0 auto;
+  color: var(--muted);
+  font-weight: 700;
+}
+.data-action-file input {
+  min-width: 0;
+  max-width: 190px;
+  font-size: 0.86rem;
+}
 .paper-export-format {
   width: 128px;
   min-height: 42px;
@@ -1197,6 +1221,92 @@ svg { width: 22px; height: 22px; fill: none; stroke: currentColor; stroke-width:
   line-height: 1.45;
   padding: 0.35rem 0 0.55rem;
 }
+.data-analysis-plan {
+  display: grid;
+  gap: 0.7rem;
+  margin: 0.85rem 0;
+  padding: 0.85rem;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface-soft);
+}
+.data-analysis-plan[hidden] {
+  display: none;
+}
+.data-analysis-plan h4 {
+  margin: 0;
+  font-size: 0.96rem;
+}
+.data-analysis-plan p,
+.data-analysis-plan li {
+  margin: 0;
+  color: var(--muted);
+  line-height: 1.55;
+  font-size: 0.9rem;
+}
+.data-analysis-plan ul {
+  margin: 0;
+  padding-left: 1.1rem;
+}
+.data-analysis-plan-grid {
+  display: grid;
+  gap: 0.65rem;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+.data-analysis-plan-card {
+  display: grid;
+  gap: 0.38rem;
+  min-width: 0;
+}
+.data-analysis-params {
+  display: grid;
+  gap: 0.48rem;
+}
+.data-analysis-params-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem;
+}
+.data-analysis-param-row {
+  display: grid;
+  grid-template-columns: minmax(74px, 0.35fr) minmax(0, 1fr) minmax(110px, 0.45fr) 62px;
+  gap: 0.5rem;
+  align-items: center;
+}
+.data-analysis-param-row input {
+  width: 100%;
+  min-width: 0;
+  min-height: 36px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface);
+  color: var(--text);
+  padding: 0.45rem 0.55rem;
+}
+.data-final-preview-block {
+  display: grid;
+  gap: 0.55rem;
+  margin-top: 1rem;
+}
+.data-final-preview {
+  min-height: 140px;
+  max-height: 520px;
+  overflow: auto;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface-soft);
+  color: var(--muted);
+  padding: 0.75rem;
+}
+.data-final-preview .data-chart-diff-table,
+.data-final-preview .data-chart-diff-figure {
+  margin: 0;
+}
+.data-final-preview .data-chart-diff-figure img {
+  max-height: 360px;
+  object-fit: contain;
+}
 #dataChartTitle {
   min-width: 0;
 }
@@ -1437,6 +1547,10 @@ svg { width: 22px; height: 22px; fill: none; stroke: currentColor; stroke-width:
 .data-chart-diff-table td:last-child,
 .data-chart-diff-table th:last-child {
   text-align: right;
+}
+.data-chart-diff-table table[data-columns="1"] td,
+.data-chart-diff-table table[data-columns="1"] th {
+  text-align: left;
 }
 .data-chart-diff-table tbody tr:last-child td {
   border-bottom: 0;
@@ -1902,8 +2016,22 @@ svg { width: 22px; height: 22px; fill: none; stroke: currentColor; stroke-width:
   }
   .paper-actions > .primary-button,
   .paper-actions > .secondary-button,
-  .paper-actions > .input-box {
+  .paper-actions > .input-box,
+  .paper-actions > .data-action-file {
     width: 100%;
+  }
+  .data-action-file {
+    max-width: none;
+    justify-content: space-between;
+  }
+  .data-action-file input {
+    max-width: min(100%, 220px);
+  }
+  .data-analysis-plan-grid {
+    grid-template-columns: 1fr;
+  }
+  .data-analysis-param-row {
+    grid-template-columns: minmax(0, 1fr);
   }
   .paper-export-format {
     flex-basis: auto;

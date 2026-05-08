@@ -26,7 +26,7 @@ from urllib.parse import parse_qs, unquote, urlparse
 
 from modules.ai_reducer import AIReducer
 from modules.api_client import APIClient
-from modules.config import ConfigManager, resolve_model_display_name
+from modules.config import ConfigManager, PUBLIC_DEFAULT_API_ID, resolve_model_display_name
 from modules.data_chart_assistant import DataChartAssistant
 from modules.intelligent_corrector import CATEGORY_LABELS, CATEGORY_ORDER, IntelligentCorrector
 from modules.plagiarism import PlagiarismReducer
@@ -60,10 +60,13 @@ from modules.reference_manager import (
 )
 from pages.api_config_support import merge_with_preset_defaults
 
-PROJECT_DIR = os.path.dirname(os.path.abspath(__file__))
+RUNTIME_PATHS = get_runtime_paths()
+PROJECT_DIR = RUNTIME_PATHS.resource_root
 WEB_DIR = os.path.join(PROJECT_DIR, 'web')
-DATA_CHART_ASSET_DIR = os.path.join(WEB_DIR, 'generated', 'charts')
-SERVER_ERROR_LOG = os.path.join(PROJECT_DIR, 'server_errors.log')
+WEB_GENERATED_DIR = RUNTIME_PATHS.resolve_data('web', 'generated')
+DATA_CHART_ASSET_DIR = os.path.join(WEB_GENERATED_DIR, 'charts')
+PAPER_PPT_OUTPUT_DIR = RUNTIME_PATHS.resolve_data('output', 'paper_ppt_agent')
+SERVER_ERROR_LOG = os.path.join(RUNTIME_PATHS.logs_dir, 'server_errors.log')
 WEB_USER_COOKIE = 'thesisworkshop_web_user'
 LEGACY_WEB_USER_COOKIES = ('paperlab_web_user',)
 WEB_USER_COOKIE_MAX_AGE = 60 * 60 * 24 * 365
@@ -72,6 +75,7 @@ WEB_USERS_DIR_NAME = 'web_users'
 
 def _write_server_error_log(exc, payload=None):
     try:
+        os.makedirs(os.path.dirname(SERVER_ERROR_LOG), exist_ok=True)
         with open(SERVER_ERROR_LOG, 'a', encoding='utf-8') as handle:
             handle.write(f'[{datetime.now().isoformat(timespec="seconds")}] {type(exc).__name__}: {exc}\n')
             if payload is not None:
@@ -110,9 +114,19 @@ def _target_reference_count_for_words(value):
     total = _positive_int(value)
     if not total:
         return 0
-    scaled = (total + 699) // 700
-    floor = 15 if total >= 10000 else 6
-    return min(60, max(floor, scaled))
+    if total < 3000:
+        return 5
+    if total < 5000:
+        return 8
+    if total < 8000:
+        return 10
+    if total < 10000:
+        return 12
+    if total < 15000:
+        return 15
+    if total < 20000:
+        return 20
+    return min(60, max(25, (total + 799) // 800))
 
 
 def _persist_data_chart_image(data_url, title='chart'):
@@ -1157,6 +1171,36 @@ class WebWorkbench:
             'data_chart': DataChartAssistant(api_client),
         }
 
+    def _seed_user_public_config_from_default(self, data_root):
+        default_config = self._default_session['config']
+        public_cfg = default_config.get_api_config(PUBLIC_DEFAULT_API_ID)
+        if not (
+            public_cfg
+            and str(public_cfg.get('key', '') or '').strip()
+            and str(public_cfg.get('model', '') or '').strip()
+        ):
+            return
+
+        user_config = ConfigManager(data_root)
+        has_private_config = any(
+            api_id != PUBLIC_DEFAULT_API_ID
+            and str(cfg.get('key', '') or '').strip()
+            and str(cfg.get('model', '') or '').strip()
+            for api_id, cfg in user_config.list_saved_apis()
+        )
+        existing_public = user_config.get_api_config(PUBLIC_DEFAULT_API_ID)
+        public_missing = not (
+            existing_public
+            and str(existing_public.get('key', '') or '').strip()
+            and str(existing_public.get('model', '') or '').strip()
+        )
+        if public_missing:
+            user_config.set_api_config(PUBLIC_DEFAULT_API_ID, public_cfg)
+        if public_missing and not has_private_config:
+            user_config.active_api = PUBLIC_DEFAULT_API_ID
+        if public_missing:
+            user_config.save()
+
     def _session_for_user(self, user_id=''):
         safe_id = _safe_web_user_id(user_id)
         if not safe_id:
@@ -1167,6 +1211,7 @@ class WebWorkbench:
                 return session
             data_root = os.path.join(self.base_user_data_root, safe_id)
             os.makedirs(data_root, exist_ok=True)
+            self._seed_user_public_config_from_default(data_root)
             session = self._create_session(data_root)
             self._sessions[safe_id] = session
             return session
@@ -1415,6 +1460,13 @@ class WebWorkbench:
                 sections=payload.get('sections'),
                 limit=payload.get('limit', 8),
             )
+        if action == 'analyze':
+            return data_chart.analyze_data(
+                query=payload.get('query', ''),
+                target=target,
+                full_text=payload.get('fullText', '') or payload.get('text', ''),
+                data_file=payload.get('dataFile') if isinstance(payload.get('dataFile'), dict) else None,
+            )
         if action == 'search':
             return data_chart.search_data(
                 query=payload.get('query', ''),
@@ -1422,6 +1474,16 @@ class WebWorkbench:
                 full_text=payload.get('fullText', '') or payload.get('text', ''),
                 user_data=payload.get('userData', ''),
                 data_file=payload.get('dataFile') if isinstance(payload.get('dataFile'), dict) else None,
+                analysis_plan=payload.get('analysisPlan') if isinstance(payload.get('analysisPlan'), dict) else None,
+                analysis_parameters=payload.get('analysisParameters') if isinstance(payload.get('analysisParameters'), list) else None,
+            )
+        if action == 'preview':
+            return data_chart.preview_chart(
+                table_text=payload.get('tableText', ''),
+                chart_type=payload.get('chartType', 'bar'),
+                title=payload.get('title', ''),
+                unit=payload.get('unit', ''),
+                target=target,
             )
         if action == 'generate':
             result = data_chart.generate_chart(
@@ -1437,14 +1499,29 @@ class WebWorkbench:
                 if image_url:
                     chart['imageUrl'] = image_url
                     chart['dataUrl'] = image_url
-            reference_entries = _data_chart_reference_payload(result)
-            reference_result = _append_data_chart_references(
-                payload.get('allSections', []),
-                target.get('sectionTitle', '') if isinstance(target, dict) else '',
-                result.get('replacementText', ''),
-                reference_entries,
-                payload.get('referenceStyle', 'GB/T 7714'),
-                target.get('originalText', '') if isinstance(target, dict) else '',
+            is_impact_factor_table = (
+                isinstance(result, dict)
+                and result.get('artifactType') == 'table'
+                and result.get('tableRole') == 'impact_factors'
+            )
+            reference_entries = [] if is_impact_factor_table else _data_chart_reference_payload(result)
+            reference_result = (
+                {
+                    'content': result.get('replacementText', ''),
+                    'references': None,
+                    'updatedSections': [],
+                    'citation': '',
+                    'citationNumber': None,
+                }
+                if is_impact_factor_table
+                else _append_data_chart_references(
+                    payload.get('allSections', []),
+                    target.get('sectionTitle', '') if isinstance(target, dict) else '',
+                    result.get('replacementText', ''),
+                    reference_entries,
+                    payload.get('referenceStyle', 'GB/T 7714'),
+                    target.get('originalText', '') if isinstance(target, dict) else '',
+                )
             )
             result['replacementText'] = reference_result['content']
             result['referenceEntries'] = reference_entries
@@ -1462,7 +1539,7 @@ class WebWorkbench:
         raise ValueError('未知数据图表操作')
 
     def generate_paper_ppt(self, payload, user_id=''):
-        return generate_ppt_from_paper(payload, self._config(user_id), PROJECT_DIR, WEB_DIR)
+        return generate_ppt_from_paper(payload, self._config(user_id), PROJECT_DIR, WEB_DIR, WEB_GENERATED_DIR, PAPER_PPT_OUTPUT_DIR)
 
     def start_paper_ppt(self, payload, user_id=''):
         job_id = uuid.uuid4().hex[:12]
@@ -1542,6 +1619,8 @@ class WebWorkbench:
                 self._config(user_id),
                 PROJECT_DIR,
                 WEB_DIR,
+                WEB_GENERATED_DIR,
+                PAPER_PPT_OUTPUT_DIR,
                 progress_callback=lambda event: self._record_ppt_event(job_id, event),
             )
             slides = read_ppt_preview(result.get('project_dir') or '')
@@ -1566,6 +1645,7 @@ class WebWorkbench:
                 {**payload, 'jobId': job_id},
                 self._config(user_id),
                 PROJECT_DIR,
+                PAPER_PPT_OUTPUT_DIR,
                 progress_callback=lambda event: self._record_ppt_event(job_id, event),
             )
             slides = read_ppt_preview(result.get('project_dir') or payload.get('projectDir') or '')
@@ -2101,7 +2181,7 @@ class RequestHandler(BaseHTTPRequestHandler):
             elif parsed.path == '/api/data-chart':
                 data = self.workbench.run_data_chart(payload, user_id)
             elif parsed.path == '/api/paper/export':
-                exported = export_paper_document(payload, PROJECT_DIR, WEB_DIR)
+                exported = export_paper_document(payload, PROJECT_DIR, WEB_DIR, WEB_GENERATED_DIR)
                 self._send_binary(exported.body, exported.filename, exported.content_type)
                 return
             elif parsed.path == '/api/paper/ppt/start':
@@ -2124,8 +2204,14 @@ class RequestHandler(BaseHTTPRequestHandler):
         relative = unquote(path.lstrip('/') or 'index.html')
         if relative.endswith('/'):
             relative += 'index.html'
-        file_path = os.path.abspath(os.path.join(WEB_DIR, relative))
-        if not file_path.startswith(os.path.abspath(WEB_DIR)) or not os.path.isfile(file_path):
+        if relative == 'generated' or relative.startswith('generated/'):
+            static_root = WEB_GENERATED_DIR
+            relative_path = relative[len('generated'):].lstrip('/\\')
+        else:
+            static_root = WEB_DIR
+            relative_path = relative
+        file_path = os.path.abspath(os.path.join(static_root, relative_path))
+        if not file_path.startswith(os.path.abspath(static_root)) or not os.path.isfile(file_path):
             self.send_error(404)
             return
         content_type = mimetypes.guess_type(file_path)[0] or 'application/octet-stream'

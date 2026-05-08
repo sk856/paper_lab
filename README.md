@@ -1,6 +1,6 @@
 # 论文工坊
 
-论文工坊是一款本地运行的 AI 论文工作台。当前项目同时保留桌面端入口和本地 Web 工作台，核心功能围绕论文写作、数据图表、PPT 制作、降 AI 检测、降查重率、学术润色、智能纠错、模型配置和历史草稿管理展开。
+论文工坊是一款本地运行的 AI 论文 Web 工作台。当前项目以本地 Web 端为主，核心功能围绕论文写作、数据图表、PPT 制作、降 AI 检测、降查重率、学术润色、智能纠错、模型配置和历史草稿管理展开。
 
 项目默认把界面和数据放在本地，AI 功能通过你配置的模型接口调用外部服务。适合在 Windows 上直接运行，也提供跨平台打包脚本用于生成 Windows、macOS 和 Linux 发布包。
 
@@ -133,15 +133,11 @@ http://127.0.0.1:8765/
 .\.venv\Scripts\python.exe web_server.py --host 127.0.0.1 --port 8765 --no-open
 ```
 
-### 3. 启动桌面端
+### 3. Web-only 入口
 
-项目仍保留桌面端入口：
+`main.py` 和 `web_main.py` 都指向本地 Web 工作台，打包产物启动后会打开浏览器访问本机服务。
 
-```powershell
-.\.venv\Scripts\python.exe main.py
-```
-
-桌面端主要由 `modules/app_shell.py` 提供界面逻辑，Web 工作台由 `web_server.py`、`web/index.html`、`web/app.js` 和 `web/styles.css` 提供。
+Web 工作台由 `web_server.py`、`web/index.html`、`web/app.js` 和 `web/styles.css` 提供。
 
 ## 模型接口配置
 
@@ -167,7 +163,7 @@ http://127.0.0.1:8765/
 ## 文件与数据
 
 - `config.enc`：本地模型接口配置文件。
-- `history.json`：桌面端历史记录。
+- `history.json`：旧版本地历史记录文件。
 - `usage_events.jsonl`：模型调用用量记录。
 - `web/generated/charts/`：Web 端生成的数据图表图片。
 - `server_errors.log`：Web 服务端异常日志。
@@ -194,7 +190,7 @@ http://127.0.0.1:8765/
 
 ## 打包发布
 
-项目使用 PyInstaller 打包，并提供跨平台构建脚本：
+项目使用 PyInstaller 打包，并提供 Web-only 构建脚本：
 
 ```powershell
 .\.venv\Scripts\python.exe build.py --clean
@@ -212,7 +208,7 @@ http://127.0.0.1:8765/
 
 - Windows：生成 `.exe`，可选生成 Inno Setup 安装程序。
 - macOS：生成 `.dmg`。
-- Linux：生成 AppImage、DEB 和 RPM。
+- Linux：生成可执行文件，可选生成 `.tar.gz` 归档。
 
 GitHub Actions 会在推送 `v*` 标签或手动触发时执行跨平台构建。
 
@@ -220,16 +216,18 @@ GitHub Actions 会在推送 `v*` 标签或手动触发时执行跨平台构建�
 
 ```text
 .
-├── main.py                  # 桌面端启动入口
+├── main.py                  # Web 工作台启动入口
+├── web_main.py              # Web-only 打包入口
 ├── web_server.py            # 本地 Web 工作台后端
 ├── web/                     # Web 前端静态文件
 ├── modules/                 # 核心功能模块
 ├── paper-ppt-agent-master/  # 论文 PPT 生成工作流
-├── pages/                   # 配置页辅助逻辑
+├── pages/                   # 旧版桌面端页面代码，Web-only 构建不再引入
 ├── installers/              # 安装与打包辅助脚本
 ├── Introduction/            # 历史预览图与说明素材
 ├── output/playwright/       # README 预览图与界面检查截图
-├── build.py                 # 跨平台构建脚本
+├── web_workbench.spec       # Web-only PyInstaller 配置
+├── build.py                 # Web-only 构建脚本
 ├── requirements.txt         # Python 依赖
 └── run.bat                  # Windows Web 工作台启动脚本
 ```

@@ -25,3 +25,4 @@ server*.log
 /test_normalize.py
 /.ppt
 *.spec
+!web_workbench.spec

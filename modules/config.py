@@ -231,9 +231,19 @@ class ConfigManager:
         desired = self._public_default_api_record()
         existing = apis.get(PUBLIC_DEFAULT_API_ID)
         changed = False
-        if existing != desired:
+        if existing:
             updated = dict(existing or {})
-            updated.update(desired)
+            for key, value in desired.items():
+                if (
+                    key in {'base_url', 'key', 'model', 'model_display_name'}
+                    and not str(value or '').strip()
+                    and str(updated.get(key, '') or '').strip()
+                ):
+                    continue
+                updated[key] = value
+        else:
+            updated = dict(desired)
+        if existing != updated:
             apis[PUBLIC_DEFAULT_API_ID] = self._normalize_api_record(PUBLIC_DEFAULT_API_ID, updated)
             changed = True
         if not self._data.get('active_api') or self._data.get('active_api') not in apis:

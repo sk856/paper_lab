@@ -1,7 +1,5 @@
 # -*- coding: utf-8 -*-
-"""
-论文工坊 启动程序
-"""
+"""论文工坊 Web-only 启动入口。"""
 
 from web_server import main
 

@@ -5,7 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>论文工坊 Web 工作台</title>
     <link rel="icon" href="data:," />
-    <link rel="stylesheet" href="/styles.css?v=20260506-mobile" />
+    <link rel="stylesheet" href="/styles.css?v=20260508-backfill-renumber3" />
 </head>
 <body>
   <div class="app-shell">
@@ -235,10 +235,16 @@
           </div>
           <div class="paper-actions">
             <button class="primary-button" id="dataChartFindTargets" type="button">AI 阅读全文</button>
+            <button class="secondary-button" id="dataChartAnalyzeData" type="button">AI 数据分析</button>
             <button class="secondary-button" id="dataChartSearchData" type="button">AI 搜索数据</button>
+            <label class="data-action-file" for="dataChartDataFile">
+              <span>辅助数据</span>
+              <input id="dataChartDataFile" type="file" accept=".csv,.txt,.tsv,.xlsx,.xlsm" />
+            </label>
             <button class="secondary-button" id="dataChartGenerate" type="button">生成图/表</button>
             <button class="secondary-button" id="dataChartBackfill" type="button">回填</button>
           </div>
+          <div class="data-file-note" id="dataChartDataFileNote">可选上传 CSV、TXT 或 XLSX，供 AI 辅助检索和抽数；不上传也可以继续。</div>
         </section>
 
         <section class="workbench-grid data-chart-grid">
@@ -261,7 +267,7 @@
         <section class="workbench-grid data-chart-grid">
           <div class="panel">
             <div class="panel-header-row">
-              <div><p class="eyebrow">Search</p><h3>数据检索与审核</h3></div>
+              <div><p class="eyebrow">Search</p><h3 id="dataChartSearchPanelTitle">数据检索与审核</h3></div>
               <button class="secondary-button compact" id="dataChartUseSample" type="button">示例表头</button>
             </div>
             <div class="paper-form-grid data-chart-form-grid">
@@ -269,17 +275,25 @@
               <label class="field-block"><span>图表类型</span><select id="dataChartType" class="input-box"><option value="bar">柱状图</option><option value="line">折线图</option><option value="pie">结构图</option><option value="table">表格</option></select></label>
               <label class="field-block"><span>单位</span><input id="dataChartUnit" class="input-box" placeholder="例如：%、亿元、分" /></label>
               <label class="field-block data-title-field"><span>图表标题</span><input id="dataChartTitle" class="input-box" placeholder="例如：金融科技发展水平变化趋势" /></label>
-              <label class="field-block data-file-field"><span>辅助数据文件</span><input id="dataChartDataFile" class="input-box" type="file" accept=".csv,.txt,.tsv,.xlsx,.xlsm" /></label>
-              <div class="data-file-note" id="dataChartDataFileNote">可选上传 CSV、TXT 或 XLSX，供 AI 辅助检索和抽数；不上传也可以继续。</div>
             </div>
             <div id="dataChartSourceList" class="data-source-list">AI 搜索数据后，这里会列出可点击核验的来源。</div>
+            <div id="dataChartAnalysisPlan" class="data-analysis-plan" hidden></div>
             <div class="field-block data-table-field">
               <div class="data-table-heading-row">
-                <span>可编辑数据表</span>
-                <button class="secondary-button compact" id="dataChartAddRow" type="button">新增行</button>
+                <span id="dataChartEditableTableTitle">可编辑数据表</span>
+                <div class="button-row compact-row">
+                  <button class="secondary-button compact" id="dataChartSavePreview" type="button">保存并更新预览</button>
+                  <button class="secondary-button compact" id="dataChartAddRow" type="button">新增行</button>
+                </div>
               </div>
               <div id="dataChartEditableTable" class="data-chart-editable-table" aria-label="可编辑数据表"></div>
               <textarea id="dataChartDataTable" hidden></textarea>
+            </div>
+            <div class="data-final-preview-block">
+              <div class="data-table-heading-row">
+                <span>最终数据图/表预览</span>
+              </div>
+              <div id="dataChartFinalPreview" class="data-final-preview">生成图/表后，这里会显示最终插入论文的图或表。</div>
             </div>
           </div>
           <div class="panel editor-panel result-preview-panel">
@@ -658,6 +672,6 @@
     </div>
   </div>
 
-  <script src="/app.js?v=20260506-history-fix"></script>
+  <script src="/app.js?v=20260508-backfill-renumber3"></script>
 </body>
 </html>

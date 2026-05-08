@@ -24,8 +24,11 @@ const state = {
   selectedDataChartTargetId: '',
   dataChartResult: null,
   dataChartSearchResult: null,
+  dataChartAnalysisPlan: null,
+  dataChartPreviewResult: null,
   dataChartApproved: false,
   dataChartDataFile: null,
+  dataChartAnalysisParameters: [],
   ppt: {
     sourcePayload: null,
     currentJobId: '',
@@ -348,7 +351,7 @@ function splitPaperArticleBlocks(text) {
     tableBlock = false;
   };
 
-  const isTableSeparator = (line) => /^\s*\|?\s*:?-{3,}:?\s*(?:\|\s*:?-{3,}:?\s*)+\|?\s*$/.test(line);
+  const isTableSeparator = (line) => isMarkdownTableSeparatorLine(line);
   const beginsTableBlock = (index) => {
     const current = lines[index] || '';
     const next = lines[index + 1] || '';
@@ -818,7 +821,9 @@ function saveDraft() {
     selectedDataChartTargetId: state.selectedDataChartTargetId,
     dataChartResult: state.dataChartResult,
     dataChartSearchResult: state.dataChartSearchResult,
+    dataChartAnalysisPlan: state.dataChartAnalysisPlan,
     dataChartApproved: state.dataChartApproved,
+    dataChartAnalysisParameters: state.dataChartAnalysisParameters,
     promptTemplates: state.promptTemplates,
     fields: captureFields(),
     savedAt: new Date().toISOString(),
@@ -840,8 +845,11 @@ function restoreDraft() {
   state.selectedDataChartTargetId = draft.selectedDataChartTargetId || '';
   state.dataChartResult = draft.dataChartResult || null;
   state.dataChartSearchResult = draft.dataChartSearchResult || null;
+  state.dataChartAnalysisPlan = draft.dataChartAnalysisPlan || null;
+  state.dataChartPreviewResult = null;
   state.dataChartApproved = Boolean(draft.dataChartApproved);
   state.dataChartDataFile = null;
+  state.dataChartAnalysisParameters = Array.isArray(draft.dataChartAnalysisParameters) ? draft.dataChartAnalysisParameters : [];
   state.promptTemplates = normalizePromptTemplates(draft.promptTemplates || {});
   applyFields(draft.fields);
   syncModeSelections();
@@ -852,6 +860,7 @@ function restoreDraft() {
   renderDataChartSourceList();
   renderDataChartResult();
   updateDataChartDataFileNote();
+  renderDataChartAnalysisPlan();
 }
 
 function getHistoryRecords() {
@@ -1869,11 +1878,33 @@ function collectPaperPushPayload(scopeValue) {
   };
 }
 
+function paperSectionDisplayTitle(section, index, numbers = outlineSectionNumbers(state.paperSections || [])) {
+  const rawText = String(section?.raw || '').replace(/^\s*#{1,6}\s+/, '').trim();
+  if (dataChartSectionNumber(rawText)) return rawText;
+  const parsedRawTitle = analyzeOutlineHeading(section?.raw)?.title || '';
+  if (dataChartSectionNumber(parsedRawTitle)) return parsedRawTitle;
+  if (dataChartSectionNumber(section?.title)) return section?.title || '';
+  const kind = paperSpecialKind(section?.title);
+  const number = formatOutlineSectionNumber(numbers[index] ?? '');
+  return number && !kind ? `${number} ${section.title}` : section?.title || '';
+}
+
+function paperDisplayTitleForTitle(title) {
+  const resolved = findPaperSectionTitleLike(title) || title;
+  const sections = state.paperSections || [];
+  const index = sections.findIndex((section) => section.title === resolved);
+  if (index < 0) return title || '';
+  return paperSectionDisplayTitle(sections[index], index, outlineSectionNumbers(sections));
+}
+
 function collectPaperSectionsPayload(includeReference = false) {
   storeCurrentPaperEditor({ skipEmptyOverwrite: true });
-  return (state.paperSections || [])
-    .map((section) => ({
+  const sections = state.paperSections || [];
+  const numbers = outlineSectionNumbers(sections);
+  return sections
+    .map((section, index) => ({
       title: section.title,
+      displayTitle: paperSectionDisplayTitle(section, index, numbers),
       content: state.paperSectionContents?.[section.title] || '',
     }))
     .filter((section) => section.content && (includeReference || paperSpecialKind(section.title) !== 'reference'));
@@ -1888,8 +1919,7 @@ function collectPaperExportSections() {
       const content = paperSectionBodyContent(section.title);
       const hasChildren = paperSectionHasChildren(section.title);
       const kind = paperSpecialKind(section.title);
-      const number = formatOutlineSectionNumber(numbers[index] ?? '');
-      const displayTitle = number && !kind ? `${number} ${section.title}` : section.title;
+      const displayTitle = paperSectionDisplayTitle(section, index, numbers);
       return {
         title: section.title,
         displayTitle,
@@ -2361,8 +2391,11 @@ function resetDataChartResultsForNewInput() {
   state.selectedDataChartTargetId = '';
   state.dataChartResult = null;
   state.dataChartSearchResult = null;
+  state.dataChartAnalysisPlan = null;
+  state.dataChartPreviewResult = null;
   state.dataChartApproved = false;
   state.dataChartDataFile = null;
+  state.dataChartAnalysisParameters = [];
   setText('#dataChartQuery', '');
   setDataChartTableText('');
   renderDataChartSourceList();
@@ -2371,6 +2404,7 @@ function resetDataChartResultsForNewInput() {
   renderDataChartTargets();
   renderDataChartResult();
   updateDataChartDataFileNote();
+  renderDataChartAnalysisPlan();
   updateDataChartStep(1);
 }
 
@@ -2921,7 +2955,10 @@ function dataChartLooksLikeBackfilledBlock(block) {
   const text = String(block || '').trim();
   if (!text) return false;
   if (parseMarkdownImageLine(text)) return true;
+  if (parseMarkdownTableBlock(text)) return true;
+  if (/^\|.+\|$/.test(text) || isMarkdownTableSeparatorLine(text)) return true;
   return /^(?:图\s*\d+|Figure\s*\d+)/i.test(text)
+    || /^(?:表\s*\d+(?:\.\d+)?|如表|见表)/i.test(text)
     || /(?:如图|见图|图\s*\d+\s*所示|figure\s*\d+)/i.test(text)
     || /(?:最高值|最低值|首末项|升至|降至|扩大|缩小|差距|占比|变化趋势|可视化结果)/.test(text);
 }
@@ -2957,16 +2994,19 @@ function replacePaperSectionParagraph(sectionTitle, originalText, replacementTex
   const existing = state.paperSectionContents?.[target] || '';
   const original = String(originalText || '').trim();
   const replacement = String(replacementText || '').trim();
+  const previous = String(options.previousText || '').trim();
   if (!replacement) return { ok: false, message: '没有可回填的处理结果' };
   let next = '';
-  if (original && existing.includes(original)) {
+  if (!existing.trim()) {
+    next = replacement;
+  } else if (previous && existing.includes(previous)) {
+    next = existing.replace(previous, replacement);
+  } else if (Number.isInteger(Number(options.paragraphIndex))) {
+    next = replacePaperParagraphByIndex(existing, Number(options.paragraphIndex), replacement);
+  } else if (original && existing.includes(original)) {
     next = existing.replace(original, replacement);
   } else if (existing.includes(replacement)) {
     next = removeRepeatedTextOccurrence(existing, replacement);
-  } else if (options.previousText && existing.includes(String(options.previousText).trim())) {
-    next = existing.replace(String(options.previousText).trim(), replacement);
-  } else if (Number.isInteger(Number(options.paragraphIndex))) {
-    next = replacePaperParagraphByIndex(existing, Number(options.paragraphIndex), replacement);
   } else {
     return {
       ok: false,
@@ -2981,6 +3021,12 @@ function replacePaperSectionParagraph(sectionTitle, originalText, replacementTex
   }
   writePaperContentToSection(target, next);
   return { ok: true, title: target };
+}
+
+function syncPaperEditorForSection(sectionTitle) {
+  const target = findPaperSectionTitleLike(sectionTitle);
+  if (!target || state.paperEditorSection !== target) return;
+  storeCurrentPaperEditor({ markUser: state.paperEditorDirty });
 }
 
 function applyDataChartReferenceResult(result) {
@@ -3016,12 +3062,64 @@ function currentDataChartTarget() {
 
 function dataChartArtifactType(targetOrResult = currentDataChartTarget()) {
   const value = String(targetOrResult?.artifactType || targetOrResult?.insertType || '').toLowerCase();
+  if (targetOrResult && (targetOrResult.tableMarkdown || targetOrResult.table)) return 'table';
   if (!targetOrResult && $('#dataChartType')?.value === 'table') return 'table';
   return value === 'table' ? 'table' : 'figure';
 }
 
 function selectedDataChartArtifactType(target = currentDataChartTarget()) {
   return $('#dataChartType')?.value === 'table' || dataChartArtifactType(target) === 'table' ? 'table' : 'figure';
+}
+
+function dataChartTableRole(target = currentDataChartTarget()) {
+  const value = String(target?.tableRole || target?.role || '').trim().toLowerCase();
+  if (['impact_factors', 'model_index', 'variable_analysis', 'evidence_data'].includes(value)) return value;
+  const context = [
+    target?.reason,
+    target?.intent,
+    target?.dataNeed,
+    target?.tableTitle,
+    target?.query,
+  ].join('');
+  if (/影响因素|作用因素|驱动因素|制约因素/.test(context)) return 'impact_factors';
+  if (/模型|方程|代入|测算|综合指标|效果指数|指数得分|Y[_A-Za-z0-9]?|X\d+/.test(context)) return 'model_index';
+  if (/变量分析|总方差|方差解释|特征根|贡献率|因子载荷|KMO|Bartlett|相关系数|描述性统计/i.test(context)) return 'variable_analysis';
+  return 'evidence_data';
+}
+
+function dataChartTableKindForTarget(target = currentDataChartTarget()) {
+  const explicit = String(target?.tableKind || '').trim().toLowerCase();
+  if (['impact_factors', 'numeric', 'correlation', 'regression', 'descriptive', 'test_result'].includes(explicit)) return explicit;
+  const role = dataChartTableRole(target);
+  if (role === 'impact_factors') return 'impact_factors';
+  if (role === 'variable_analysis') return 'test_result';
+  return 'numeric';
+}
+
+function cleanDataChartImpactTitle(value, target = currentDataChartTarget()) {
+  let text = String(value || '').replace(/\s+/g, '').trim();
+  text = text
+    .replace(/^表\s*\d+(?:\.\d+)?\s*/i, '')
+    .replace(/\s*\[[\d,\-\s]+\]\s*$/g, '')
+    .replace(/[（(]\s*(?:19|20)\d{2}[^）)]*[）)]?$/g, '')
+    .replace(/[（(][^）)]*$/g, '')
+    .replace(/(?:图表|数据图|统计图|折线图|柱状图|条形图|饼图|结构图|图|表)$/g, '')
+    .replace(/(?:的)?(?:制约条件|约束条件|作用方向|风险表现|风险因素|作用机制)(?:[、和与及].*)?$/g, '的影响因素');
+  if (!text || /^(?:影响因素|因素|因素表|影响因素表|论文数据表|数据表|相关指标表)$/.test(text)) {
+    const candidates = [target?.tableTitle, target?.dataNeed, target?.intent, target?.suggestion, target?.reason, target?.query, target?.sectionTitle];
+    for (const candidate of candidates) {
+      const cleaned = cleanDataChartImpactTitle(candidate || '', null);
+      if (cleaned && !/^(?:影响因素|因素|因素表|影响因素表)$/.test(cleaned)) {
+        text = cleaned;
+        break;
+      }
+    }
+  }
+  if (!text) text = '影响因素';
+  if (!text.includes('影响因素')) {
+    text = `${text.replace(/(?:的)?(?:制约条件|约束条件|作用方向|风险表现|风险因素|作用机制)(?:[、和与及].*)?$/g, '').replace(/的$/g, '')}的影响因素`;
+  }
+  return text.slice(0, 34);
 }
 
 function dataChartTargetIntent(target = currentDataChartTarget()) {
@@ -3031,6 +3129,7 @@ function dataChartTargetIntent(target = currentDataChartTarget()) {
 function dataChartTitleFromIntent(value, target = currentDataChartTarget()) {
   const dataNeed = String(target?.dataNeed || '').replace(/\s+/g, '');
   if (dataChartArtifactType(target) === 'table') {
+    if (dataChartTableRole(target) === 'impact_factors') return cleanDataChartImpactTitle(value || target?.tableTitle || target?.dataNeed || '', target);
     const indicatorMatch = dataNeed.match(/^(.{2,24}?指标体系)/);
     if (indicatorMatch) return `${indicatorMatch[1]}表`;
     const variableMatch = dataNeed.match(/^(.{2,20}?(?:变量|口径|定义|数据来源))/);
@@ -3061,12 +3160,27 @@ function updateDataChartTitleLabel(target = currentDataChartTarget()) {
     if (dataChartArtifactType(target) === 'table') type.value = 'table';
     else type.value = type.value || target?.chartType || 'bar';
   }
+  updateDataChartReviewLabels(target);
+}
+
+function updateDataChartReviewLabels(target = currentDataChartTarget()) {
+  const isImpact = selectedDataChartArtifactType(target) === 'table' && dataChartTableRole(target) === 'impact_factors';
+  const isAnalysis = selectedDataChartArtifactType(target) === 'table' && ['model_index', 'variable_analysis'].includes(dataChartTableRole(target));
+  const panelTitle = $('#dataChartSearchPanelTitle');
+  const tableTitle = $('#dataChartEditableTableTitle');
+  if (panelTitle) panelTitle.textContent = isImpact ? '因素提取与审核' : (isAnalysis ? '数据分析与审核' : '数据检索与审核');
+  if (tableTitle) tableTitle.textContent = isImpact ? '因素提取与审核' : (isAnalysis ? '分析数据表' : '可编辑数据表');
 }
 
 function defaultDataChartTitle(target = currentDataChartTarget()) {
   if (!target) return '论文数据图表';
+  if (dataChartArtifactType(target) === 'table' && dataChartTableRole(target) === 'impact_factors') {
+    return cleanDataChartImpactTitle(target.tableTitle || target.title || dataChartTargetIntent(target) || target.dataNeed || '', target);
+  }
+  const explicitTitle = String(target.tableTitle || target.chartTitle || target.title || '').trim();
+  if (explicitTitle) return explicitTitle;
   const intentTitle = dataChartTitleFromIntent(dataChartTargetIntent(target), target);
-  const title = String(intentTitle || target.tableTitle || target.chartTitle || target.title || '').trim();
+  const title = String(intentTitle || '').trim();
   if (title) return title;
   const need = String(target.dataNeed || '').replace(/^补充/, '').replace(/数据$/, '').trim();
   return need ? `${need}${dataChartArtifactType(target) === 'table' ? '表' : '图'}` : '论文数据图表';
@@ -3148,9 +3262,13 @@ function selectDataChartTarget(targetId) {
   if (previousTargetId && previousTargetId !== target.id) {
     state.dataChartResult = null;
     state.dataChartSearchResult = null;
+    state.dataChartAnalysisPlan = null;
+    state.dataChartPreviewResult = null;
+    state.dataChartAnalysisParameters = [];
     setText('#dataChartResultText', '');
     setDataChartTableText('');
     renderDataChartSourceList();
+    renderDataChartAnalysisPlan();
     resetDataChartDiff();
   }
   renderDataChartTargets();
@@ -3247,6 +3365,16 @@ function dataChartBackfillText() {
   return normalizeDataChartBackfillTextContent(textValue('#dataChartResultText'), state.dataChartResult);
 }
 
+function renumberDataChartBackfillLabels(text, target = currentDataChartTarget(), result = state.dataChartResult) {
+  const artifactType = dataChartArtifactType(result || target);
+  const prefix = artifactType === 'table' ? '表' : '图';
+  const sectionTitle = paperDisplayTitleForTitle(target?.sectionTitle || target?.title) || target?.sectionTitle || '';
+  const sectionNumber = dataChartSectionNumber(sectionTitle);
+  if (!sectionNumber) return String(text || '');
+  const label = dataChartDefaultArtifactLabel({ ...(target || {}), sectionTitle }, artifactType);
+  return String(text || '').replace(new RegExp(`${prefix}\\s*\\d+(?:\\.\\d+)?`, 'g'), label);
+}
+
 function dataChartHistoryStateSnapshot() {
   storeCurrentPaperEditor({ skipEmptyOverwrite: true, markUser: state.paperEditorDirty });
   const output = collectPaperSectionsPayload(true)
@@ -3286,9 +3414,15 @@ function dataChartTextWithoutFigures(text) {
     .trim();
 }
 
+function isMarkdownTableSeparatorLine(line) {
+  const text = String(line || '').trim();
+  if (!text.includes('|')) return false;
+  return /^\|?\s*:?-{3,}:?\s*(?:\|\s*:?-{3,}:?\s*)*\|?$/.test(text);
+}
+
 function splitMarkdownTableBlock(text) {
   const lines = String(text || '').replace(/\r\n/g, '\n').replace(/\r/g, '\n').split('\n');
-  const sepIndex = lines.findIndex((line) => /^\s*\|?\s*:?-{3,}:?\s*(?:\|\s*:?-{3,}:?\s*)+\|?\s*$/.test(line));
+  const sepIndex = lines.findIndex(isMarkdownTableSeparatorLine);
   if (sepIndex <= 0) return { found: false, before: String(text || '').trim(), table: '', after: '' };
   let start = sepIndex - 1;
   while (start > 0 && lines[start - 1].trim()) {
@@ -3309,7 +3443,7 @@ function splitMarkdownTableBlock(text) {
 
 function parseMarkdownTableBlock(tableMarkdown) {
   const lines = String(tableMarkdown || '').split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
-  const sepIndex = lines.findIndex((line) => /^\|?\s*:?-{3,}:?\s*(?:\|\s*:?-{3,}:?\s*)+\|?$/.test(line));
+  const sepIndex = lines.findIndex(isMarkdownTableSeparatorLine);
   if (sepIndex <= 0) return null;
   const captionLines = lines.slice(0, sepIndex - 1);
   const headerLine = lines[sepIndex - 1];
@@ -3335,7 +3469,7 @@ function markdownTableToHtml(tableMarkdown) {
     <figure class="data-chart-diff-table">
       ${table.captions.map((line) => `<figcaption>${escapeHtml(line)}</figcaption>`).join('')}
       <div class="data-chart-diff-table-wrap">
-        <table>
+        <table data-columns="${table.headers.length}">
           <thead><tr>${table.headers.map((cell) => `<th>${escapeHtml(cell)}</th>`).join('')}</tr></thead>
           <tbody>${table.rows.map((row) => `<tr>${table.headers.map((_, index) => `<td>${escapeHtml(row[index] || '')}</td>`).join('')}</tr>`).join('')}</tbody>
         </table>
@@ -3343,6 +3477,114 @@ function markdownTableToHtml(tableMarkdown) {
       ${table.notes.map((line) => `<p>${escapeHtml(line)}</p>`).join('')}
     </figure>
   `;
+}
+
+function renderDataChartFinalPreview(result = state.dataChartResult) {
+  const node = $('#dataChartFinalPreview');
+  if (!node) return;
+  if (!result) {
+    node.innerHTML = '生成图/表后，这里会显示最终插入论文的图或表。';
+    return;
+  }
+  if (dataChartArtifactType(result) === 'table') {
+    const tableMarkdown = normalizeDataChartTableMarkdown(result.tableMarkdown || '');
+    node.innerHTML = tableMarkdown
+      ? markdownTableToHtml(tableMarkdown)
+      : '表格已生成，但没有可预览的表格内容。';
+    return;
+  }
+  const figure = dataChartFigureParts(result);
+  if (figure.image?.src) {
+    node.innerHTML = `
+      <figure class="data-chart-diff-figure">
+        <img src="${escapeHtml(figure.image.src)}" alt="${escapeHtml(figure.image.alt || '数据图表')}" />
+        <figcaption>${escapeHtml(figure.caption || figure.image.alt || '')}</figcaption>
+      </figure>
+    `;
+    return;
+  }
+  node.innerHTML = '图表已生成，但没有可预览的图片内容。';
+}
+
+function setDataChartPreviewMessage(message) {
+  const node = $('#dataChartFinalPreview');
+  if (node) node.innerHTML = escapeHtml(message || '生成图/表后，这里会显示最终插入论文的图或表。');
+}
+
+function buildDataChartPreviewTarget() {
+  const currentTarget = currentDataChartTarget();
+  const artifactType = selectedDataChartArtifactType(currentTarget);
+  const target = currentTarget ? { ...currentTarget, artifactType, insertType: artifactType } : null;
+  if (!target) return null;
+  target.sectionTitle = paperDisplayTitleForTitle(target.sectionTitle || target.title) || target.sectionTitle || '';
+  if (artifactType === 'table') {
+    target.tableTitle = textValue('#dataChartTitle') || target.tableTitle || target.chartTitle || target.title || '';
+    target.tableKind = dataChartTableMode({
+      tableKind: state.dataChartSearchResult?.tableKind,
+      dataRows: dataChartEditableRows(),
+    });
+    target.tableRole = dataChartTableRole(target);
+    target.variableDefinitionContext = textValue('#dataChartFullText') || target.variableDefinitionContext || target.originalText || '';
+  }
+  syncDataChartAnalysisParameters();
+  if (state.dataChartAnalysisPlan) {
+    target.analysisPlan = state.dataChartAnalysisPlan;
+    target.analysisParameters = state.dataChartAnalysisParameters;
+  }
+  return target;
+}
+
+async function updateDataChartPreview(options = {}) {
+  const quiet = Boolean(options.quiet);
+  const target = buildDataChartPreviewTarget();
+  if (!target) {
+    if (!quiet) setState('datachart', '请先选择候选段落。', 'error');
+    return null;
+  }
+  syncDataChartTableFromEditable();
+  const artifactType = selectedDataChartArtifactType(target);
+  if (!textValue('#dataChartDataTable')) {
+    setDataChartPreviewMessage('请先搜索或填写数据表，再更新预览。');
+    if (!quiet) setState('datachart', '请先搜索或填写数据表。', 'error');
+    return null;
+  }
+  if (artifactType === 'table') {
+    if (dataChartRowsReadyForTable().length < 1) {
+      setDataChartPreviewMessage('当前表格还没有可预览的有效行。');
+      if (!quiet) setState('datachart', '当前表格还没有可预览的有效行。', 'error');
+      return null;
+    }
+  } else if (dataChartRowsWithNumericValues().length < 2) {
+    setDataChartPreviewMessage('当前数据还不足以生成预览图，请至少保留 2 行数值。');
+    if (!quiet) setState('datachart', '当前数据还不足以生成预览图，请至少保留 2 行数值。', 'error');
+    return null;
+  }
+  try {
+    const data = await requestJson('/api/data-chart', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        action: 'preview',
+        target,
+        tableText: textValue('#dataChartDataTable'),
+        chartType: artifactType === 'table' ? (target.chartType || 'bar') : ($('#dataChartType')?.value || target.chartType || 'bar'),
+        title: textValue('#dataChartTitle'),
+        unit: textValue('#dataChartUnit'),
+      }),
+    }, {
+      timeoutMs: DATA_CHART_GENERATE_TIMEOUT_MS,
+      timeoutMessage: '预览生成等待超时，请稍后重试。',
+    });
+    state.dataChartPreviewResult = data;
+    renderDataChartFinalPreview(data);
+    if (!quiet) setState('datachart', '已保存当前数据并更新预览。', 'done');
+    saveDraft();
+    return data;
+  } catch (error) {
+    setDataChartPreviewMessage(`预览生成失败：${error.message}`);
+    if (!quiet) setState('datachart', `预览生成失败：${error.message}`, 'error');
+    return null;
+  }
 }
 
 function dataChartFigureParts(result = state.dataChartResult) {
@@ -3381,6 +3623,7 @@ function resetDataChartDiff() {
   const status = $('#dataChartDiffStatus');
   if (status) status.textContent = '红色为删除，绿色为新增。图或表会直接显示在差异区域内。';
   setText('#dataChartDiff', '差异预览会显示在这里。');
+  renderDataChartFinalPreview(null);
 }
 
 function refreshDataChartDiff() {
@@ -3420,6 +3663,7 @@ function refreshDataChartDiff() {
 function renderDataChartResult() {
   const result = state.dataChartResult || null;
   if (!result) {
+    renderDataChartFinalPreview(null);
     refreshDataChartDiff();
     return;
   }
@@ -3429,6 +3673,7 @@ function renderDataChartResult() {
   if ((!currentResultText || currentResultText === replacementText) && backfillText) {
     setText('#dataChartResultText', backfillText);
   }
+  renderDataChartFinalPreview(result);
   refreshDataChartDiff();
 }
 
@@ -3490,6 +3735,22 @@ const DATA_CHART_NUMERIC_COLUMNS = [
   ...DATA_CHART_HIDDEN_META_COLUMNS,
 ];
 
+const DATA_CHART_SYMBOLIC_COLUMNS = [
+  { key: 'label', label: '变量含义/数据项', placeholder: '正文中该符号定义的含义', fallback: 0 },
+  { key: 'symbol', label: '变量符号', placeholder: '使用正文已定义符号，如 Y / Y_fin / GDP', fallback: 10 },
+  { key: 'year', label: '年份', placeholder: '如 2000', fallback: 6 },
+  { key: 'value', label: '数值', placeholder: '真实或待核验数值', fallback: 1 },
+  { key: 'sourceName', label: '来源名称', placeholder: '报告/年鉴/数据库', fallback: 2 },
+  { key: 'publisher', label: '发布机构', placeholder: '发布机构', fallback: 3 },
+  { key: 'url', label: '链接', placeholder: '核验链接', fallback: 4 },
+  { key: 'note', label: '备注', placeholder: '口径/页码/表号', fallback: 5 },
+  ...DATA_CHART_HIDDEN_META_COLUMNS.filter((column) => !['symbol', 'year'].includes(column.key)),
+];
+
+const DATA_CHART_IMPACT_COLUMNS = [
+  { key: 'label', label: '影响因素', placeholder: '每行一个影响因素', fallback: 0 },
+];
+
 const DATA_CHART_DEFINITION_COLUMNS = [
   { key: 'label', label: '指标/变量', placeholder: '变量或指标名称', fallback: 0 },
   { key: 'symbol', label: '变量符号', placeholder: '如 PGDP / EDU', fallback: 2 },
@@ -3506,7 +3767,7 @@ const DATA_CHART_SOURCE_COLUMNS = [
 
 function dataChartTableMode(data = state.dataChartSearchResult) {
   const explicit = String(data?.tableKind || '').trim().toLowerCase();
-  if (['correlation', 'regression', 'descriptive', 'test_result'].includes(explicit)) return explicit;
+  if (['impact_factors', 'correlation', 'regression', 'descriptive', 'test_result'].includes(explicit)) return explicit;
   if (explicit) return 'numeric';
   const target = currentDataChartTarget();
   const isTable = selectedDataChartArtifactType(target) === 'table';
@@ -3524,12 +3785,22 @@ function dataChartTableMode(data = state.dataChartSearchResult) {
   if (/相关系数|相关矩阵|相关性/.test(context)) return 'correlation';
   if (/回归结果|回归分析|回归系数|估计结果|参数估计|稳健性|模型结果/.test(context)) return 'regression';
   if (/描述性统计|描述统计|样本统计|均值|标准差|最大值|最小值/.test(context)) return 'descriptive';
+  if (dataChartTableRole(target) === 'impact_factors') return 'impact_factors';
+  if (dataChartTableRole(target) === 'variable_analysis') return 'test_result';
   if (rows.some((row) => String(row?.rawValue || row?.value || '').trim())) return 'numeric';
   return 'numeric';
 }
 
 function dataChartTableColumnsForMode(mode = dataChartTableMode()) {
+  if (mode === 'impact_factors') return DATA_CHART_IMPACT_COLUMNS;
   if (mode === 'definition') return DATA_CHART_DEFINITION_COLUMNS;
+  if (
+    selectedDataChartArtifactType() === 'table'
+    && dataChartTableRole() !== 'impact_factors'
+    && ['numeric', 'correlation', 'regression', 'descriptive', 'test_result'].includes(mode)
+  ) {
+    return DATA_CHART_SYMBOLIC_COLUMNS;
+  }
   return DATA_CHART_NUMERIC_COLUMNS;
 }
 
@@ -3623,6 +3894,9 @@ function dataChartRowsReadyForGeneration(rows = dataChartEditableRows()) {
 
 function dataChartRowsReadyForTable(rows = dataChartEditableRows()) {
   const mode = dataChartTableMode();
+  if (mode === 'impact_factors') {
+    return (rows || []).filter((row) => String(row.label || '').trim());
+  }
   if (mode === 'definition') {
     return (rows || []).filter((row) => (
       String(row.label || '').trim()
@@ -3710,7 +3984,8 @@ function parseDataChartTableText(text) {
       if (headerMap[key] === undefined && names.map((name) => name.toLowerCase()).includes(cell)) headerMap[key] = index;
     });
   });
-  const hasHeader = Object.keys(headerMap).length >= 2;
+  const hasHeader = Object.keys(headerMap).length >= 2
+    || (dataChartTableMode() === 'impact_factors' && headerMap.label !== undefined);
   const dataLines = hasHeader ? lines.slice(1) : lines;
   const cellFor = (cells, key, fallback) => {
     const index = headerMap[key] ?? fallback;
@@ -3768,6 +4043,190 @@ function updateDataChartDataFileNote() {
   }
   const sizeKb = Math.max(1, Math.round((Number(file.size) || 0) / 1024));
   note.textContent = `已选择：${file.name || '数据文件'}，约 ${sizeKb} KB。AI 会把它作为辅助材料，不会强制依赖。`;
+}
+
+function dataChartNeedsAnalysisPlan(target = currentDataChartTarget()) {
+  return selectedDataChartArtifactType(target) === 'table'
+    && ['model_index', 'variable_analysis'].includes(dataChartTableRole(target));
+}
+
+function normalizeDataChartAnalysisPlan(plan = null) {
+  const source = plan?.analysisPlan || plan || {};
+  if (!source || typeof source !== 'object') return null;
+  const parameters = Array.isArray(source.parameters) ? source.parameters : (Array.isArray(source.coefficients) ? source.coefficients : []);
+  return {
+    analysisType: String(source.analysisType || source.type || '').trim(),
+    equation: String(source.equation || source.model || '').trim(),
+    requiredData: Array.isArray(source.requiredData) ? source.requiredData : (Array.isArray(source.dataRequirements) ? source.dataRequirements : []),
+    software: String(source.software || source.recommendedSoftware || '').trim(),
+    method: String(source.method || source.calculationMethod || '').trim(),
+    searchGuidance: String(source.searchGuidance || source.searchQuery || source.query || '').trim(),
+    tableKind: String(source.tableKind || '').trim(),
+    title: String(source.title || source.tableTitle || '').trim(),
+    unit: String(source.unit || '').trim(),
+    parameters: parameters.map((item) => ({
+      name: String(item?.name || item?.symbol || item?.label || '').trim(),
+      meaning: String(item?.meaning || item?.description || item?.label || '').trim(),
+      value: String(item?.value || '').trim(),
+    })).filter((item) => item.name || item.meaning || item.value),
+  };
+}
+
+function dataChartAnalysisParameterRows() {
+  return $$('#dataChartAnalysisPlan [data-analysis-param-row]').map((row) => ({
+    name: row.querySelector('[data-analysis-param-name]')?.value || '',
+    meaning: row.querySelector('[data-analysis-param-meaning]')?.value || '',
+    value: row.querySelector('[data-analysis-param-value]')?.value || '',
+  })).filter((item) => Object.values(item).some((value) => String(value || '').trim()));
+}
+
+function syncDataChartAnalysisParameters() {
+  const rows = dataChartAnalysisParameterRows();
+  if (rows.length || $('#dataChartAnalysisPlan')) state.dataChartAnalysisParameters = rows;
+}
+
+function dataChartParameterKey(parameter = {}) {
+  return String(parameter.name || parameter.symbol || parameter.label || '')
+    .replace(/beta/ig, 'β')
+    .replace(/\s+/g, '')
+    .toLowerCase();
+}
+
+function normalizeDataChartAnalysisParameter(parameter = {}) {
+  return {
+    name: String(parameter?.name || parameter?.symbol || parameter?.label || '').trim(),
+    meaning: String(parameter?.meaning || parameter?.description || parameter?.note || parameter?.label || '').trim(),
+    value: String(parameter?.value ?? parameter?.rawValue ?? '').trim(),
+  };
+}
+
+function mergeDataChartAnalysisParameters(incoming = []) {
+  const normalizedIncoming = (Array.isArray(incoming) ? incoming : [])
+    .map(normalizeDataChartAnalysisParameter)
+    .filter((item) => item.name || item.meaning || item.value);
+  if (!normalizedIncoming.length) return false;
+  syncDataChartAnalysisParameters();
+  const current = state.dataChartAnalysisParameters.length
+    ? state.dataChartAnalysisParameters.map(normalizeDataChartAnalysisParameter)
+    : (normalizeDataChartAnalysisPlan(state.dataChartAnalysisPlan)?.parameters || []);
+  let changed = false;
+  normalizedIncoming.forEach((item) => {
+    const key = dataChartParameterKey(item);
+    const index = current.findIndex((row) => {
+      const rowKey = dataChartParameterKey(row);
+      if (key && rowKey && key === rowKey) return true;
+      return item.meaning && row.meaning && (
+        item.meaning.includes(row.meaning)
+        || row.meaning.includes(item.meaning)
+        || (row.name && item.meaning.includes(row.name))
+      );
+    });
+    if (index >= 0) {
+      const existing = current[index];
+      const next = { ...existing };
+      if (item.name && !next.name) next.name = item.name;
+      if (item.meaning && (!next.meaning || next.meaning.length < item.meaning.length)) next.meaning = item.meaning;
+      if (item.value && next.value !== item.value) next.value = item.value;
+      if (JSON.stringify(next) !== JSON.stringify(existing)) {
+        current[index] = next;
+        changed = true;
+      }
+    } else {
+      current.push(item);
+      changed = true;
+    }
+  });
+  if (changed) {
+    state.dataChartAnalysisParameters = current;
+    renderDataChartAnalysisPlan();
+  }
+  return changed;
+}
+
+function applyDataChartSearchParameters(data = {}) {
+  const incoming = []
+    .concat(Array.isArray(data.analysisParameters) ? data.analysisParameters : [])
+    .concat(Array.isArray(data.parameters) ? data.parameters : [])
+    .concat(Array.isArray(data.parameterRows) ? data.parameterRows : []);
+  return mergeDataChartAnalysisParameters(incoming);
+}
+
+function renderDataChartAnalysisPlan(plan = state.dataChartAnalysisPlan) {
+  const node = $('#dataChartAnalysisPlan');
+  if (!node) return;
+  const normalized = normalizeDataChartAnalysisPlan(plan);
+  if (!normalized) {
+    node.hidden = true;
+    node.innerHTML = '';
+    delete node.dataset.paramsTouched;
+    return;
+  }
+  state.dataChartAnalysisPlan = normalized;
+  const paramsTouched = node.dataset.paramsTouched === '1';
+  if (!state.dataChartAnalysisParameters.length && normalized.parameters.length && !paramsTouched) {
+    state.dataChartAnalysisParameters = normalized.parameters;
+  }
+  const requirements = normalized.requiredData.map((item) => String(item || '').trim()).filter(Boolean);
+  const params = state.dataChartAnalysisParameters.length ? state.dataChartAnalysisParameters : normalized.parameters;
+  const defaultParams = !paramsTouched && /β|beta|回归|方程|模型|系数/i.test(`${normalized.equation} ${normalized.analysisType} ${normalized.method}`)
+    ? [{ name: 'β0', meaning: '常数项', value: '' }, { name: 'β1', meaning: '核心解释变量系数', value: '' }]
+    : [];
+  const displayedParams = params.length ? params : defaultParams;
+  node.hidden = false;
+  node.innerHTML = `
+    <div class="data-analysis-plan-grid">
+      <div class="data-analysis-plan-card">
+        <h4>AI 数据分析</h4>
+        ${normalized.equation ? `<p><strong>关系式：</strong>${escapeHtml(normalized.equation)}</p>` : ''}
+        ${normalized.analysisType ? `<p><strong>分析类型：</strong>${escapeHtml(normalized.analysisType)}</p>` : ''}
+        ${requirements.length ? `<ul>${requirements.map((item) => `<li>${escapeHtml(item)}</li>`).join('')}</ul>` : '<p>AI 会根据候选段落判断需要哪些数据。</p>'}
+      </div>
+      <div class="data-analysis-plan-card">
+        <h4>计算方式</h4>
+        <p><strong>推荐软件：</strong>${escapeHtml(normalized.software || 'SPSS / Stata / Python / Excel，按模型复杂度选择')}</p>
+        <p>${escapeHtml(normalized.method || '根据变量类型选择回归、因子分析、相关分析、描述统计或指数测算。')}</p>
+        ${normalized.searchGuidance ? `<p><strong>搜索依据：</strong>${escapeHtml(normalized.searchGuidance)}</p>` : ''}
+      </div>
+    </div>
+    <div class="data-analysis-params">
+      <div class="data-analysis-params-heading">
+        <h4>参数填写</h4>
+        <button class="secondary-button compact" data-analysis-add-param type="button">新增参数</button>
+      </div>
+      ${displayedParams.length ? displayedParams.map((item, index) => `
+        <div class="data-analysis-param-row" data-analysis-param-row="${index}">
+          <input data-analysis-param-name aria-label="参数名" value="${escapeHtml(item.name || '')}" placeholder="β0 / β1 / F1" />
+          <input data-analysis-param-meaning aria-label="参数含义" value="${escapeHtml(item.meaning || '')}" placeholder="参数含义或变量说明" />
+          <input data-analysis-param-value aria-label="参数值" value="${escapeHtml(item.value || '')}" placeholder="用户填入计算值" />
+          <button class="secondary-button compact" data-analysis-remove-param="${index}" type="button">删除</button>
+        </div>
+      `).join('') : '<p class="mini-hint">当前分析不需要额外填写系数；如有软件计算结果，可点击新增参数录入。</p>'}
+    </div>
+  `;
+  $$('#dataChartAnalysisPlan input').forEach((input) => {
+    input.addEventListener('input', () => {
+      syncDataChartAnalysisParameters();
+      saveDraft();
+    });
+  });
+  $$('#dataChartAnalysisPlan [data-analysis-remove-param]').forEach((button) => {
+    button.addEventListener('click', () => {
+      syncDataChartAnalysisParameters();
+      const index = Number(button.dataset.analysisRemoveParam);
+      if (Number.isInteger(index)) state.dataChartAnalysisParameters.splice(index, 1);
+      node.dataset.paramsTouched = '1';
+      renderDataChartAnalysisPlan();
+      saveDraft();
+    });
+  });
+  $('#dataChartAnalysisPlan [data-analysis-add-param]')?.addEventListener('click', () => {
+    syncDataChartAnalysisParameters();
+    state.dataChartAnalysisParameters.push({ name: '', meaning: '', value: '' });
+    node.dataset.paramsTouched = '1';
+    renderDataChartAnalysisPlan();
+    saveDraft();
+  });
+  syncDataChartAnalysisParameters();
 }
 
 function readDataChartDataFile(file) {
@@ -3839,7 +4298,7 @@ function renderDataChartEditableTable(rows = []) {
     <div class="data-chart-table-body">
       ${normalizedRows.map((row, index) => `
         <div class="data-chart-table-row" data-data-table-row="${index}">
-          ${DATA_CHART_HIDDEN_META_COLUMNS.map((column) => `
+          ${columns.filter((column) => column.hidden).map((column) => `
             <input type="hidden" data-data-table-cell="${column.key}" value="${escapeHtml(row?.[column.key] || '')}" />
           `).join('')}
           ${visibleColumns.map((column) => `
@@ -3919,6 +4378,7 @@ function dataChartRowSummary(row) {
 }
 
 function dataChartSourceItemsFromSearch(data = state.dataChartSearchResult) {
+  if (selectedDataChartArtifactType() === 'table' && dataChartTableRole() === 'impact_factors') return [];
   if (!data) return [];
   if (Array.isArray(data.sourceItems) && data.sourceItems.length) return data.sourceItems;
   const rows = Array.isArray(data.dataRows) ? data.dataRows : [];
@@ -3953,6 +4413,18 @@ function dataChartSourceItemsFromSearch(data = state.dataChartSearchResult) {
 function renderDataChartSourceList(data = state.dataChartSearchResult) {
   const list = $('#dataChartSourceList');
   if (!list) return;
+  if (selectedDataChartArtifactType() === 'table' && dataChartTableRole() === 'impact_factors') {
+    list.innerHTML = `
+      <article class="data-source-card">
+        <div class="data-source-index">i</div>
+        <div class="data-source-body">
+          <div class="data-source-title"><strong>影响因素表不新增参考文献</strong></div>
+          <div class="data-source-summary">该表根据论文全文和候选段落归纳影响因素，只需审核下方因素名称，不需要填写数据来源、链接或数值。</div>
+        </div>
+      </article>
+    `;
+    return;
+  }
   const items = dataChartSourceItemsFromSearch(data);
   if (!items.length) {
     list.textContent = 'AI 搜索数据后，这里会列出可点击核验的来源。';
@@ -3987,6 +4459,13 @@ function dataChartTableSummary(data = state.dataChartSearchResult) {
   const rowCount = rows.length || Math.max(0, lines.length - 1);
   const sourceNote = String(data?.sourceNote || '').trim();
   const isTable = selectedDataChartArtifactType() === 'table';
+  if (isTable && dataChartTableRole() === 'impact_factors') {
+    return [
+      sourceNote || '已根据论文内容提取影响因素；该表不新增数据来源和参考文献。',
+      rowCount ? `已汇总 ${rowCount} 个影响因素。` : '尚未提取到影响因素。',
+      '最终用于生成论文表格的内容以“因素提取与审核”为准，每行一个影响因素。',
+    ].join('\n');
+  }
   return [
     sourceNote || (isTable ? '请审核下方数据表，确认每行指标、口径和来源后再生成表格。' : '请审核下方数据表，确认每行数据、单位和来源后再生成图表。'),
     rowCount ? `已汇总 ${rowCount} 行候选数据。` : '尚未汇总到可作图数据。',
@@ -4060,10 +4539,14 @@ async function findDataChartTargets() {
     state.selectedDataChartTargetId = state.dataChartTargets[0]?.id || '';
     state.dataChartResult = null;
     state.dataChartSearchResult = null;
+    state.dataChartAnalysisPlan = null;
+    state.dataChartPreviewResult = null;
+    state.dataChartAnalysisParameters = [];
     state.dataChartApproved = false;
     setText('#dataChartResultText', '');
     setDataChartTableText('');
     renderDataChartSourceList();
+    renderDataChartAnalysisPlan();
     resetDataChartDiff();
     const selected = currentDataChartTarget();
     if (selected) {
@@ -4081,6 +4564,107 @@ async function findDataChartTargets() {
   }
 }
 
+function buildDataChartPayloadTarget(target = currentDataChartTarget()) {
+  if (!target) return null;
+  const intent = dataChartTargetIntent(target);
+  const artifactType = selectedDataChartArtifactType(target);
+  const payloadTarget = {
+    ...target,
+    sectionTitle: paperDisplayTitleForTitle(target.sectionTitle || target.title) || target.sectionTitle || '',
+    intent: intent || target.intent || target.reason || '',
+    suggestion: target.suggestion || target.reason || '',
+    artifactType,
+    insertType: artifactType,
+    variableDefinitionContext: textValue('#dataChartFullText') || target.variableDefinitionContext || target.originalText || '',
+  };
+  if (payloadTarget.artifactType === 'table') {
+    payloadTarget.tableRole = dataChartTableRole(payloadTarget);
+    payloadTarget.tableKind = dataChartTableKindForTarget(payloadTarget);
+  }
+  return payloadTarget;
+}
+
+function applyDataChartAnalysisPayloadToTarget(data = {}, payloadTarget = currentDataChartTarget()) {
+  const selectedId = state.selectedDataChartTargetId;
+  if (!selectedId) return;
+  const updates = {};
+  const plan = normalizeDataChartAnalysisPlan(data.analysisPlan || data);
+  const title = data.title || plan?.title || '';
+  const tableKind = data.tableKind || plan?.tableKind || '';
+  const tableRole = data.tableRole || payloadTarget?.tableRole || '';
+  if (title) {
+    updates.tableTitle = title;
+    updates.chartTitle = title;
+  }
+  if (tableKind) updates.tableKind = tableKind;
+  if (tableRole) updates.tableRole = tableRole;
+  if (!Object.keys(updates).length) return;
+  state.dataChartTargets = (state.dataChartTargets || []).map((target) => (
+    target.id === selectedId ? { ...target, ...updates } : target
+  ));
+}
+
+async function analyzeDataChartData() {
+  const target = currentDataChartTarget();
+  if (!target) {
+    setState('datachart', '请先定位并选择一个候选段落。', 'error');
+    return;
+  }
+  const payloadTarget = buildDataChartPayloadTarget(target);
+  if (!payloadTarget) return;
+  if (payloadTarget.artifactType === 'table' && payloadTarget.tableRole === 'impact_factors') {
+    state.dataChartAnalysisPlan = null;
+    state.dataChartAnalysisParameters = [];
+    renderDataChartAnalysisPlan();
+    setState('datachart', '影响因素表不需要数据分析计划，请直接点击“AI 搜索数据”提取因素。', 'running');
+    return;
+  }
+  try {
+    const searchQuery = textValue('#dataChartQuery') || payloadTarget.intent || payloadTarget.query || '';
+    const data = await withRunningState('datachart', 'AI 正在分析模型、变量和所需数据...', async () => requestJson('/api/data-chart', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        action: 'analyze',
+        query: searchQuery,
+        target: payloadTarget,
+        fullText: textValue('#dataChartFullText'),
+        dataFile: state.dataChartDataFile || null,
+      }),
+    }, {
+      timeoutMs: DATA_CHART_SEARCH_TIMEOUT_MS,
+      timeoutMessage: `AI 数据分析请求等待超过 ${Math.round(DATA_CHART_SEARCH_TIMEOUT_MS / 1000)} 秒仍未返回。请稍后重试，或切换接口/模型。`,
+    }));
+    const normalized = normalizeDataChartAnalysisPlan(data.analysisPlan || data);
+    if (!normalized) {
+      setState('datachart', 'AI 没有返回可用的数据分析计划，请换一个候选段落或补充全文内容。', 'error');
+      return;
+    }
+    state.dataChartAnalysisPlan = normalized;
+    state.dataChartAnalysisParameters = normalized.parameters || [];
+    applyDataChartAnalysisPayloadToTarget(data, payloadTarget);
+    const planNode = $('#dataChartAnalysisPlan');
+    if (planNode) delete planNode.dataset.paramsTouched;
+    renderDataChartAnalysisPlan();
+    if (normalized.searchGuidance) setText('#dataChartQuery', normalized.searchGuidance);
+    if (data.title || normalized.title) setText('#dataChartTitle', data.title || normalized.title);
+    if (normalized.unit && !textValue('#dataChartUnit')) setText('#dataChartUnit', normalized.unit);
+    state.dataChartSearchResult = {
+      ...(state.dataChartSearchResult || {}),
+      tableKind: data.tableKind || normalized.tableKind || state.dataChartSearchResult?.tableKind || '',
+      tableRole: data.tableRole || payloadTarget.tableRole || state.dataChartSearchResult?.tableRole || '',
+    };
+    renderDataChartTargets();
+    renderDataChartEditableTable(dataChartEditableRows());
+    updateDataChartTitleLabel(currentDataChartTarget());
+    updateDataChartStep(3);
+    setState('datachart', 'AI 数据分析已完成，请核对所需数据、计算方式和参数后再点击“AI 搜索数据”。', 'done');
+    saveDraft();
+  } catch (error) {
+    setState('datachart', `AI 数据分析失败：${error.message}`, 'error');
+  }
+}
+
 async function searchDataChartData() {
   const target = currentDataChartTarget();
   if (!target) {
@@ -4088,19 +4672,19 @@ async function searchDataChartData() {
     return;
   }
   try {
-    const intent = dataChartTargetIntent(target);
-    const searchQuery = textValue('#dataChartQuery') || intent || target.query || '';
-    const payloadTarget = {
-      ...target,
-      intent: intent || target.intent || target.reason || '',
-      suggestion: target.suggestion || target.reason || '',
-      artifactType: selectedDataChartArtifactType(target),
-      insertType: selectedDataChartArtifactType(target),
-    };
-    if (payloadTarget.artifactType === 'table') {
-      payloadTarget.tableKind = 'numeric';
+    const payloadTarget = buildDataChartPayloadTarget(target);
+    const searchQuery = textValue('#dataChartQuery') || payloadTarget.intent || target.query || '';
+    if (dataChartNeedsAnalysisPlan(payloadTarget) && !state.dataChartAnalysisPlan) {
+      setState('datachart', '该候选属于模型/变量分析表，请先点击“AI 数据分析”，确认需要哪些数据和计算方式后再搜索。', 'error');
+      return;
     }
-    const data = await withRunningState('datachart', 'AI 正在检索数据并整理来源...', async () => requestJson('/api/data-chart', {
+    syncDataChartAnalysisParameters();
+    if (state.dataChartAnalysisPlan) {
+      payloadTarget.analysisPlan = state.dataChartAnalysisPlan;
+      payloadTarget.analysisParameters = state.dataChartAnalysisParameters;
+    }
+    const isImpact = payloadTarget.artifactType === 'table' && payloadTarget.tableRole === 'impact_factors';
+    const data = await withRunningState('datachart', isImpact ? 'AI 正在阅读全文并提取影响因素...' : 'AI 正在检索数据并整理来源...', async () => requestJson('/api/data-chart', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
@@ -4109,12 +4693,15 @@ async function searchDataChartData() {
         target: payloadTarget,
         fullText: textValue('#dataChartFullText'),
         dataFile: state.dataChartDataFile || null,
+        analysisPlan: state.dataChartAnalysisPlan,
+        analysisParameters: state.dataChartAnalysisParameters,
       }),
     }, {
       timeoutMs: DATA_CHART_SEARCH_TIMEOUT_MS,
       timeoutMessage: `数据检索请求等待超过 ${Math.round(DATA_CHART_SEARCH_TIMEOUT_MS / 1000)} 秒仍未返回。请检查网络状态，或到「配置管理」切换接口/模型后重试。`,
     }));
     state.dataChartSearchResult = data;
+    const parameterUpdated = applyDataChartSearchParameters(data);
     const rows = dataChartRowsFromSearch(data);
     if (rows.length) {
       setDataChartRows(rows);
@@ -4129,8 +4716,10 @@ async function searchDataChartData() {
     updateDataChartTitleLabel(target);
     renderDataChartSourceList(data);
     updateDataChartStep(3);
-    const manualMessage = data.sourceNote || '未检索到可直接使用的数据，请补充真实数值和来源后再生成图表。';
-    setState('datachart', data.needsManualData ? manualMessage : '数据已整理，请审核', data.needsManualData ? 'running' : 'done');
+    await updateDataChartPreview({ quiet: true, afterSearch: true });
+    const manualMessage = data.sourceNote || (isImpact ? '未提取到影响因素，请在下方手动填写。' : '未检索到可直接使用的数据，请补充真实数值和来源后再生成图表。');
+    const doneMessage = isImpact ? '影响因素已提取，请审核' : (parameterUpdated ? '数据和参数已整理，请审核' : '数据已整理，请审核');
+    setState('datachart', data.needsManualData ? manualMessage : doneMessage, data.needsManualData ? 'running' : 'done');
     saveDraft();
   } catch (error) {
     setState('datachart', `搜索数据失败：${error.message}`, 'error');
@@ -4169,21 +4758,29 @@ async function generateDataChart() {
     setState('datachart', '请先选择候选段落。', 'error');
     return;
   }
+  target.sectionTitle = paperDisplayTitleForTitle(target.sectionTitle || target.title) || target.sectionTitle || '';
   if (artifactType === 'table') {
     target.tableTitle = textValue('#dataChartTitle') || target.tableTitle || target.chartTitle || target.title || '';
     target.tableKind = dataChartTableMode({
       tableKind: state.dataChartSearchResult?.tableKind,
       dataRows: dataChartEditableRows(),
     });
+    target.tableRole = dataChartTableRole(target);
+    target.variableDefinitionContext = textValue('#dataChartFullText') || target.variableDefinitionContext || target.originalText || '';
+    syncDataChartAnalysisParameters();
+    if (state.dataChartAnalysisPlan) {
+      target.analysisPlan = state.dataChartAnalysisPlan;
+      target.analysisParameters = state.dataChartAnalysisParameters;
+    }
   }
   syncDataChartTableFromEditable();
   if (!textValue('#dataChartDataTable')) {
-    setState('datachart', '请先搜索或填写已审核的数据表。', 'error');
+    setState('datachart', dataChartTableRole(target) === 'impact_factors' ? '请先提取或填写至少 1 个影响因素。' : '请先搜索或填写已审核的数据表。', 'error');
     return;
   }
   if (artifactType === 'table') {
     if (dataChartRowsReadyForTable().length < 1) {
-      setState('datachart', '当前表格还没有可用行。请至少保留 1 行指标/变量及来源或备注后再生成表格。', 'error');
+      setState('datachart', dataChartTableRole(target) === 'impact_factors' ? '当前还没有可用影响因素。请至少保留 1 行因素后再生成表格。' : '当前表格还没有可用行。请至少保留 1 行指标/变量及来源或备注后再生成表格。', 'error');
       return;
     }
   } else if (dataChartRowsReadyForGeneration().length < 2) {
@@ -4214,6 +4811,7 @@ async function generateDataChart() {
       timeoutMessage: `图表生成请求等待超过 ${Math.round(DATA_CHART_GENERATE_TIMEOUT_MS / 1000)} 秒仍未返回。请检查网络状态，或稍后重试。`,
     }));
     state.dataChartResult = data;
+    state.dataChartPreviewResult = data;
     state.dataChartApproved = false;
     const backfillText = dataChartComposedBackfillText(data);
     setText('#dataChartResultText', backfillText);
@@ -4252,12 +4850,14 @@ function backfillDataChartResult(options = {}) {
     return;
   }
   state.dataChartApproved = true;
-  const replacement = dataChartBackfillText();
+  syncPaperEditorForSection(target.sectionTitle);
+  const replacement = renumberDataChartBackfillLabels(dataChartBackfillText(), target, state.dataChartResult);
+  if (replacement && replacement !== textValue('#dataChartResultText')) setText('#dataChartResultText', replacement);
   const beforeSnapshot = dataChartHistoryStateSnapshot();
-  const previousText = dataChartComposedBackfillText(state.dataChartResult);
+  const previousText = renumberDataChartBackfillLabels(dataChartComposedBackfillText(state.dataChartResult), target, state.dataChartResult);
   const outcome = replacePaperSectionParagraph(target.sectionTitle, target.originalText, replacement, {
     paragraphIndex: target.paragraphIndex,
-    previousText: previousText && previousText !== replacement ? previousText : '',
+    previousText: previousText || replacement,
   });
   if (!outcome.ok) {
     setState('datachart', outcome.message || '回填失败', 'error');
@@ -4289,11 +4889,13 @@ function backfillDataChartResult(options = {}) {
 function bindDataChartActions() {
   $('#dataChartLoadFullText')?.addEventListener('click', loadDataChartFullText);
   $('#dataChartFindTargets')?.addEventListener('click', findDataChartTargets);
+  $('#dataChartAnalyzeData')?.addEventListener('click', analyzeDataChartData);
   $('#dataChartSearchData')?.addEventListener('click', searchDataChartData);
   $('#dataChartGenerate')?.addEventListener('click', generateDataChart);
   $('#dataChartBackfill')?.addEventListener('click', backfillDataChartResult);
   $('#dataChartUseSample')?.addEventListener('click', fillDataChartSampleTable);
   $('#dataChartAddRow')?.addEventListener('click', () => addDataChartEditableRow());
+  $('#dataChartSavePreview')?.addEventListener('click', () => updateDataChartPreview());
   $('#dataChartDataFile')?.addEventListener('change', (event) => readDataChartDataFile(event.target.files?.[0]));
   $('#dataChartType')?.addEventListener('change', () => {
     updateDataChartTitleLabel(currentDataChartTarget());
@@ -4467,9 +5069,13 @@ function customTotalWordCount() {
 function targetReferenceCountForPaper(totalWordCount = customTotalWordCount()) {
   const total = Number(totalWordCount || 0);
   if (!Number.isFinite(total) || total <= 0) return 0;
-  const scaled = Math.ceil(total / 700);
-  const floor = total >= 10000 ? 15 : 6;
-  return Math.min(60, Math.max(floor, scaled));
+  if (total < 3000) return 5;
+  if (total < 5000) return 8;
+  if (total < 8000) return 10;
+  if (total < 10000) return 12;
+  if (total < 15000) return 15;
+  if (total < 20000) return 20;
+  return Math.min(60, Math.max(25, Math.ceil(total / 800)));
 }
 
 function countReferenceEntriesInText(text) {
@@ -4692,7 +5298,7 @@ async function runBatchWriteAllSections() {
   // 警告确认
   if (targets.length > 8 || wordCount > 1200 || totalWords > 12000) {
     const targetText = totalTarget ? `全文目标字数 ${totalTarget} 字，` : '';
-    const referenceText = targetReferenceCount ? `参考文献目标不少于 ${targetReferenceCount} 条，` : '';
+    const referenceText = targetReferenceCount ? `按全文目标字数参考文献不少于 ${targetReferenceCount} 条，` : '';
     const warningMsg = `即将批量写作 ${targets.length} 个章节，${targetText}${referenceText}按每节约 ${wordCount} 字预计生成约 ${totalWords} 字。\n\n这可能需要较长时间并消耗较多 API 额度。\n\n是否继续？`;
     if (!confirm(warningMsg)) {
       setState('paper', '已取消批量写作', 'error');
@@ -4970,7 +5576,7 @@ async function runPaperAction(action) {
       const detail = Number.isFinite(entryCount) ? `，共 ${entryCount} 条参考文献` : '';
       const citationDetail = Number.isFinite(citationCount) ? `，扫描到 ${citationCount} 处正文引用` : '';
       if (Number.isFinite(shortfall) && shortfall > 0 && Number.isFinite(targetCount)) {
-        setState('paper', `参考文献已整理${detail}${citationDetail}，低于目标 ${targetCount} 条，还差 ${shortfall} 条真实带链接文献`, 'running');
+        setState('paper', `参考文献已整理${detail}${citationDetail}，低于按全文目标字数计算的目标 ${targetCount} 条，还差 ${shortfall} 条真实带链接文献`, 'running');
       } else {
         setState('paper', `参考文献已按整篇文章引用顺序整理${detail}${citationDetail}`, 'done');
       }

@@ -8,12 +8,14 @@ import os
 import re
 import shutil
 import subprocess
+import sys
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 from urllib.parse import unquote, urlparse
 
 from modules.paper_exporter import ExportedPaper
+from modules.runtime_paths import get_runtime_paths
 from modules.provider_registry import (
     API_FORMAT_ANTHROPIC_MESSAGES,
     API_FORMAT_GOOGLE_GENERATIVE_AI,
@@ -38,13 +40,13 @@ class PptAgentConfig:
     base_url: str = ""
 
 
-def run_ppt_generation_task(payload, config_mgr, project_dir, web_dir, progress_callback=None) -> dict:
+def run_ppt_generation_task(payload, config_mgr, project_dir, web_dir, generated_dir=None, output_root=None, progress_callback=None) -> dict:
     agent_config = _ppt_agent_config(config_mgr)
-    run_dir = _prepare_agent_run_dir(project_dir)
+    run_dir = _prepare_agent_run_dir(project_dir, output_root)
     source_dir = run_dir / "source"
     source_dir.mkdir(parents=True, exist_ok=True)
     tex_path = source_dir / "paper_for_ppt.tex"
-    tex_path.write_text(_paper_payload_to_latex(payload, source_dir, project_dir, web_dir), encoding="utf-8")
+    tex_path.write_text(_paper_payload_to_latex(payload, source_dir, project_dir, web_dir, generated_dir), encoding="utf-8")
 
     options = payload.get("pptOptions") or {}
     request = {
@@ -68,19 +70,19 @@ def run_ppt_generation_task(payload, config_mgr, project_dir, web_dir, progress_
     return result
 
 
-def run_ppt_refine_task(payload, config_mgr, project_dir, progress_callback=None) -> dict:
+def run_ppt_refine_task(payload, config_mgr, project_dir, output_root=None, progress_callback=None) -> dict:
     project_path = Path(str(payload.get("projectDir") or ""))
     if not project_path.is_dir():
         raise ValueError("没有可重做的 PPT 项目，请先完成一次生成")
 
-    agent_root = Path(project_dir) / "paper-ppt-agent-master"
+    agent_root = _agent_work_dir(project_dir)
     try:
         project_path.resolve().relative_to((agent_root / "workspaces").resolve())
     except (OSError, ValueError) as exc:
         raise ValueError("PPT 项目路径无效") from exc
 
     agent_config = _ppt_agent_config(config_mgr)
-    run_dir = _prepare_agent_run_dir(project_dir)
+    run_dir = _prepare_agent_run_dir(project_dir, output_root)
     request = {
         "mode": "refine",
         "project_dir": str(project_path),
@@ -107,8 +109,8 @@ def run_ppt_refine_task(payload, config_mgr, project_dir, progress_callback=None
     return result
 
 
-def generate_ppt_from_paper(payload, config_mgr, project_dir, web_dir) -> ExportedPaper:
-    result = run_ppt_generation_task(payload, config_mgr, project_dir, web_dir)
+def generate_ppt_from_paper(payload, config_mgr, project_dir, web_dir, generated_dir=None, output_root=None) -> ExportedPaper:
+    result = run_ppt_generation_task(payload, config_mgr, project_dir, web_dir, generated_dir, output_root)
     output_path = Path(str(result.get("output_path") or ""))
     if not output_path.is_file():
         raise RuntimeError("PPT Agent 未生成可下载的 PPTX 文件")
@@ -143,19 +145,19 @@ def read_ppt_preview(project_dir: str) -> list[dict]:
     return slides
 
 
-def _prepare_agent_run_dir(project_dir) -> Path:
-    agent_dir = Path(project_dir) / "paper-ppt-agent-master"
+def _prepare_agent_run_dir(project_dir, output_root=None) -> Path:
+    agent_dir = _agent_work_dir(project_dir)
     if not (agent_dir / "pyproject.toml").is_file() or not (agent_dir / "backend").is_dir():
         raise ValueError("未找到 paper-ppt-agent-master，无法生成 PPT")
 
     uv = shutil.which("uv")
     if not uv:
         raise ValueError("未找到 uv，请先安装 uv 或把 uv 加入 PATH")
-    return _new_run_dir(Path(project_dir))
+    return _new_run_dir(output_root)
 
 
 def _run_agent_request(request: dict, run_dir: Path, project_dir, progress_callback=None) -> dict:
-    agent_dir = Path(project_dir) / "paper-ppt-agent-master"
+    agent_dir = _agent_work_dir(project_dir)
     uv = shutil.which("uv")
     request_path = run_dir / "request.json"
     response_path = run_dir / "response.json"
@@ -223,8 +225,38 @@ def _ppt_agent_config(config_mgr) -> PptAgentConfig:
     return PptAgentConfig(provider=provider, model=model, api_key=api_key, base_url=base_url)
 
 
-def _new_run_dir(project_dir: Path) -> Path:
-    root = project_dir / "output" / "paper_ppt_agent"
+def _agent_work_dir(project_dir) -> Path:
+    source = Path(project_dir) / "paper-ppt-agent-master"
+    if not getattr(sys, "frozen", False):
+        return source
+
+    target = Path(get_runtime_paths().resolve_data("paper-ppt-agent-master"))
+    _sync_agent_runtime_copy(source, target)
+    return target
+
+
+def _sync_agent_runtime_copy(source: Path, target: Path) -> None:
+    if not source.is_dir():
+        return
+
+    ignore = shutil.ignore_patterns(
+        ".git",
+        ".runtime",
+        ".venv",
+        "__pycache__",
+        "node_modules",
+        "tests",
+        "workspaces",
+    )
+    shutil.copytree(source, target, dirs_exist_ok=True, ignore=ignore)
+    (target / "workspaces").mkdir(parents=True, exist_ok=True)
+
+
+def _new_run_dir(output_root=None) -> Path:
+    if output_root:
+        root = Path(output_root)
+    else:
+        root = Path(get_runtime_paths().resolve_data("output", "paper_ppt_agent"))
     root.mkdir(parents=True, exist_ok=True)
     stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     run_dir = root / stamp
@@ -236,7 +268,7 @@ def _new_run_dir(project_dir: Path) -> Path:
     return run_dir
 
 
-def _paper_payload_to_latex(payload, source_dir: Path, project_dir, web_dir) -> str:
+def _paper_payload_to_latex(payload, source_dir: Path, project_dir, web_dir, generated_dir=None) -> str:
     title = _clean_text(payload.get("title") or "论文")
     subject = _clean_text(payload.get("subject") or "")
     sections = payload.get("sections") or []
@@ -267,13 +299,13 @@ def _paper_payload_to_latex(payload, source_dir: Path, project_dir, web_dir) -> 
             command = ("section", "subsection", "subsubsection")[level - 1]
             parts.append(rf"\{command}{{{_latex_escape(display_title)}}}")
         if content and not has_children:
-            parts.append(_markdownish_to_latex(content, source_dir, project_dir, web_dir))
+            parts.append(_markdownish_to_latex(content, source_dir, project_dir, web_dir, generated_dir))
 
     parts.append(r"\end{document}")
     return "\n\n".join(part for part in parts if str(part or "").strip())
 
 
-def _markdownish_to_latex(content: str, source_dir: Path, project_dir, web_dir) -> str:
+def _markdownish_to_latex(content: str, source_dir: Path, project_dir, web_dir, generated_dir=None) -> str:
     output = []
     in_table = False
     for raw_line in str(content or "").replace("\r\n", "\n").replace("\r", "\n").split("\n"):
@@ -291,7 +323,7 @@ def _markdownish_to_latex(content: str, source_dir: Path, project_dir, web_dir) 
             if in_table:
                 output.append(r"\end{verbatim}")
                 in_table = False
-            figure_path = _copy_image_for_latex(image.group(2), source_dir, project_dir, web_dir)
+            figure_path = _copy_image_for_latex(image.group(2), source_dir, project_dir, web_dir, generated_dir)
             caption = _latex_escape(image.group(1) or "论文图表")
             if figure_path:
                 output.extend([
@@ -335,8 +367,8 @@ def _markdownish_to_latex(content: str, source_dir: Path, project_dir, web_dir) 
     return "\n".join(output)
 
 
-def _copy_image_for_latex(src, source_dir: Path, project_dir, web_dir) -> str:
-    source = _resolve_image_source(src, project_dir, web_dir)
+def _copy_image_for_latex(src, source_dir: Path, project_dir, web_dir, generated_dir=None) -> str:
+    source = _resolve_image_source(src, project_dir, web_dir, generated_dir)
     if not source:
         return ""
     images_dir = source_dir / "images"
@@ -358,7 +390,7 @@ def _copy_image_for_latex(src, source_dir: Path, project_dir, web_dir) -> str:
     return dest.relative_to(source_dir).as_posix()
 
 
-def _resolve_image_source(src, project_dir, web_dir):
+def _resolve_image_source(src, project_dir, web_dir, generated_dir=None):
     value = str(src or "").strip()
     if not value:
         return ""
@@ -370,15 +402,18 @@ def _resolve_image_source(src, project_dir, web_dir):
         return ""
     else:
         relative = unquote(value.lstrip("/\\"))
+        if generated_dir and (relative == "generated" or relative.startswith("generated/")):
+            candidates.append(os.path.join(generated_dir, relative[len("generated"):].lstrip("/\\")))
         candidates.append(os.path.join(web_dir, relative))
         candidates.append(os.path.join(project_dir, relative))
         if os.path.isabs(value):
             candidates.append(value)
-    project_abs = os.path.abspath(project_dir)
-    web_abs = os.path.abspath(web_dir)
+    allowed_roots = [os.path.abspath(project_dir), os.path.abspath(web_dir)]
+    if generated_dir:
+        allowed_roots.append(os.path.abspath(generated_dir))
     for candidate in candidates:
         path = os.path.abspath(candidate)
-        if os.path.isfile(path) and (path.startswith(project_abs) or path.startswith(web_abs)):
+        if os.path.isfile(path) and any(path.startswith(root) for root in allowed_roots):
             return path
     return ""
 

@@ -38,9 +38,19 @@ class PaperWriter:
         total = cls._positive_int(value)
         if not total:
             return 0
-        scaled = (total + 699) // 700
-        floor = 15 if total >= 10000 else 6
-        return min(60, max(floor, scaled))
+        if total < 3000:
+            return 5
+        if total < 5000:
+            return 8
+        if total < 8000:
+            return 10
+        if total < 10000:
+            return 12
+        if total < 15000:
+            return 15
+        if total < 20000:
+            return 20
+        return min(60, max(25, (total + 799) // 800))
 
     def _render_scene(self, scene_id, values):
         rendered = self.prompt_center.render_scene(scene_id, values)
@@ -485,7 +495,7 @@ class PaperWriter:
                 )
                 reference_density_prompt = (
                     '\n\n【参考文献数量硬约束】\n'
-                    f'全文目标字数约 {total_word_count or "未明确"} 字，最终参考文献不得少于 {target_reference_count} 条真实、可核验、带链接的中文来源。\n'
+                    f'按全文目标字数约 {total_word_count or "未明确"} 字计算，最终参考文献不得少于 {target_reference_count} 条真实、可核验、带链接的中文来源。\n'
                     f'当前已保留的有效参考文献约 {current_reference_count} 条，包含本章节在内预计还剩 {remaining_section_count} 个可写章节，仍需补足约 {remaining_reference_count} 条。\n'
                     f'本章节如果是正文实质小节，原则上请新增 {reference_target_for_section} 条不同的真实中文带链接参考文献，并在正文相应观点处使用编号引用。\n'
                     '文献综述、研究现状、变量选取、模型构建、实证分析、政策建议等章节优先使用 2-3 条，若前文不足可提高到本章节目标；摘要、结论或纯过渡章节可少引用，但不得虚构。\n'
@@ -494,7 +504,7 @@ class PaperWriter:
             else:
                 reference_density_prompt = (
                     '\n\n【参考文献数量硬约束】\n'
-                    f'全文参考文献目标为不少于 {target_reference_count} 条真实、可核验、带链接的中文来源，当前已达到或接近目标。\n'
+                    f'按全文目标字数计算，参考文献目标为不少于 {target_reference_count} 条真实、可核验、带链接的中文来源，当前已达到或接近目标。\n'
                     '本章节如继续引用，仍必须使用真实中文带链接来源，并避免与前文重复；不需要为了凑数添加无关文献。\n'
                 )
         prompt = (

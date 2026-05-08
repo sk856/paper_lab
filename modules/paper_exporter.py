@@ -23,7 +23,7 @@ class ExportedPaper:
 
 IMAGE_LINE_RE = re.compile(r'^\s*!\[([^\]]*)\]\(([^)]+)\)\s*$')
 MARKDOWN_IMAGE_RE = re.compile(r'!\[([^\]]*)\]\(([^)]+)\)')
-TABLE_SEPARATOR_RE = re.compile(r'^\s*\|?\s*:?-{3,}:?\s*(?:\|\s*:?-{3,}:?\s*)+\|?\s*$')
+TABLE_SEPARATOR_RE = re.compile(r'^\s*\|?\s*:?-{3,}:?\s*(?:\|\s*:?-{3,}:?\s*)*\|?\s*$')
 MATH_ENV_NAMES = r'equation\*?|align\*?|alignat\*?|aligned|gather\*?|multline\*?|flalign\*?'
 DISPLAY_MATH_ENV_START_RE = re.compile(rf'^\s*\\begin\{{({MATH_ENV_NAMES})\}}')
 DISPLAY_MATH_ENV_END_RE = re.compile(r'\\end\{([^}]+)\}')
@@ -35,7 +35,7 @@ BARE_LATEX_TOKEN_RE = re.compile(
 )
 
 
-def export_paper_document(payload, project_dir, web_dir):
+def export_paper_document(payload, project_dir, web_dir, generated_dir=None):
     fmt = str(payload.get('format', 'docx') or 'docx').strip().lower()
     if fmt not in {'docx', 'md', 'markdown', 'txt'}:
         raise ValueError('暂不支持该导出格式')
@@ -50,7 +50,7 @@ def export_paper_document(payload, project_dir, web_dir):
     title = _clean_text(payload.get('title') or '论文导出')
     base_name = _safe_filename(title or '论文导出')
     if fmt == 'docx':
-        body = _build_docx(payload, sections, project_dir, web_dir)
+        body = _build_docx(payload, sections, project_dir, web_dir, generated_dir)
         return ExportedPaper(
             filename=f'{base_name}.docx',
             content_type='application/vnd.openxmlformats-officedocument.wordprocessingml.document',
@@ -76,7 +76,7 @@ def _normalize_sections(payload):
             continue
         title = _clean_text(item.get('title') or '')
         display_title = _clean_text(item.get('displayTitle') or item.get('display_title') or title)
-        content = _normalize_newlines(item.get('content') or '').strip()
+        content = _renumber_section_table_labels(item.get('content') or '', display_title or title).strip()
         has_children = bool(item.get('hasChildren') or item.get('has_children'))
         if not title and not display_title and not content:
             continue
@@ -120,27 +120,97 @@ def _build_text(payload, sections):
     return text.strip() + '\n'
 
 
-def _build_docx(payload, sections, project_dir, web_dir):
+def _chinese_number_to_int(value):
+    text = str(value or '').strip()
+    if not text:
+        return None
+    if text.isdigit():
+        return int(text)
+    digits = {'零': 0, '〇': 0, '一': 1, '二': 2, '两': 2, '三': 3, '四': 4, '五': 5, '六': 6, '七': 7, '八': 8, '九': 9}
+    units = {'十': 10, '百': 100, '千': 1000}
+    total = 0
+    current = 0
+    for char in text:
+        if char in digits:
+            current = digits[char]
+        elif char in units:
+            total += (current or 1) * units[char]
+            current = 0
+        else:
+            return None
+    return total + current if total or current else None
+
+
+def _section_number_from_title(section_title):
+    text = re.sub(r'\s+', '', str(section_title or '').strip())
+    if not text:
+        return ''
+    match = re.match(r'^(?:第)?(\d+)(?:[章节篇部分]|[、.．])?', text)
+    if match:
+        return str(int(match.group(1)))
+    match = re.match(r'^第([一二两三四五六七八九十百千〇零]+)[章节篇部分]', text)
+    if not match:
+        match = re.match(r'^([一二两三四五六七八九十百千〇零]+)[、.．]', text)
+    if match:
+        value = _chinese_number_to_int(match.group(1))
+        return str(value) if value else ''
+    return ''
+
+
+def _renumber_section_table_labels(content, section_title):
+    text = _normalize_export_markdown_blocks(content)
+    section_number = _section_number_from_title(section_title)
+    if not section_number:
+        return text
+
+    lines = text.split('\n')
+    replacements = []
+    sequence = 0
+    caption_re = re.compile(r'^\s*(表)\s*(\d+(?:\.\d+)?)\s+')
+    for index, line in enumerate(lines):
+        caption_match = caption_re.match(line)
+        if not caption_match:
+            continue
+        if not _collect_markdown_table(lines, index):
+            continue
+        sequence += 1
+        old_label = f'{caption_match.group(1)}{caption_match.group(2)}'
+        new_label = f'表{section_number}.{sequence}'
+        if old_label == new_label:
+            continue
+        lines[index] = caption_re.sub(f'{new_label} ', line, count=1)
+        replacements.append((caption_match.group(2), new_label))
+
+    result = '\n'.join(lines)
+    for old_number, new_label in replacements:
+        result = re.sub(rf'表\s*{re.escape(old_number)}', new_label, result)
+    return result
+
+
+def _build_docx(payload, sections, project_dir, web_dir, generated_dir=None):
     pandoc = _find_pandoc()
     if pandoc:
         try:
-            return _build_docx_with_pandoc(payload, sections, project_dir, web_dir, pandoc)
+            return _build_docx_with_pandoc(payload, sections, project_dir, web_dir, generated_dir, pandoc)
         except Exception:
             pass
-    return _build_docx_with_python_docx(payload, sections, project_dir, web_dir)
+    return _build_docx_with_python_docx(payload, sections, project_dir, web_dir, generated_dir)
 
 
-def _build_docx_with_pandoc(payload, sections, project_dir, web_dir, pandoc):
+def _build_docx_with_pandoc(payload, sections, project_dir, web_dir, generated_dir, pandoc):
     with tempfile.TemporaryDirectory(prefix='paper_export_') as temp_dir:
         markdown = _build_markdown(payload, sections)
         markdown = _normalize_export_markdown_blocks(markdown)
         markdown = _normalize_math_for_pandoc(markdown)
-        markdown = _localize_markdown_images(markdown, temp_dir, project_dir, web_dir)
+        markdown = _localize_markdown_images(markdown, temp_dir, project_dir, web_dir, generated_dir)
         input_path = os.path.join(temp_dir, 'paper.md')
         output_path = os.path.join(temp_dir, 'paper.docx')
         with open(input_path, 'w', encoding='utf-8', newline='\n') as handle:
             handle.write(markdown)
-        resource_path = os.pathsep.join([temp_dir, web_dir, project_dir])
+        resource_roots = [temp_dir, web_dir, project_dir]
+        if generated_dir:
+            resource_roots.append(generated_dir)
+        resource_path = os.pathsep.join(resource_roots)
         subprocess.run(
             [
                 pandoc,
@@ -166,7 +236,7 @@ def _build_docx_with_pandoc(payload, sections, project_dir, web_dir, pandoc):
             return handle.read()
 
 
-def _build_docx_with_python_docx(payload, sections, project_dir, web_dir):
+def _build_docx_with_python_docx(payload, sections, project_dir, web_dir, generated_dir=None):
     from docx import Document
     from docx.enum.text import WD_ALIGN_PARAGRAPH
     from docx.oxml.ns import qn
@@ -212,7 +282,7 @@ def _build_docx_with_python_docx(payload, sections, project_dir, web_dir):
             for run in heading.runs:
                 _set_run_font(run, qn, east_asia='黑体', ascii_font='Times New Roman')
         if item['content']:
-            _add_markdown_content(document, item['content'], item.get('kind', ''), project_dir, web_dir, qn, Inches, Pt, WD_ALIGN_PARAGRAPH)
+            _add_markdown_content(document, item['content'], item.get('kind', ''), project_dir, web_dir, generated_dir, qn, Inches, Pt, WD_ALIGN_PARAGRAPH)
 
     stream = io.BytesIO()
     document.save(stream)
@@ -236,7 +306,7 @@ def _configure_docx_styles(document, qn, Pt):
         style.paragraph_format.space_after = Pt(6)
 
 
-def _add_markdown_content(document, content, kind, project_dir, web_dir, qn, Inches, Pt, WD_ALIGN_PARAGRAPH):
+def _add_markdown_content(document, content, kind, project_dir, web_dir, generated_dir, qn, Inches, Pt, WD_ALIGN_PARAGRAPH):
     lines = _normalize_export_markdown_blocks(content).split('\n')
     index = 0
     is_reference = kind == 'reference'
@@ -255,7 +325,7 @@ def _add_markdown_content(document, content, kind, project_dir, web_dir, qn, Inc
 
         image = _parse_image_line(line)
         if image:
-            _add_docx_image(document, image['src'], image['alt'], project_dir, web_dir, Inches, WD_ALIGN_PARAGRAPH)
+            _add_docx_image(document, image['src'], image['alt'], project_dir, web_dir, generated_dir, Inches, WD_ALIGN_PARAGRAPH)
             index += 1
             continue
 
@@ -432,12 +502,12 @@ def _normalize_flat_pipe_table_line(line):
     text = str(line or '').rstrip()
     if '|' not in text:
         return [text]
-    separator_match = re.search(r'\|\s*:?-{3,}:?\s*(?:\|\s*:?-{3,}:?\s*)+\|', text)
+    separator_match = re.search(r'\|\s*:?-{3,}:?\s*(?:\|\s*:?-{3,}:?\s*)*\|', text)
     if not separator_match:
         return [text]
     separator = separator_match.group(0).strip()
     column_count = len(_split_table_row(separator))
-    if column_count < 2:
+    if column_count < 1:
         return [text]
 
     before = text[:separator_match.start()].rstrip()
@@ -719,8 +789,8 @@ def _set_cell_margins(cell, qn, OxmlElement, top=60, bottom=60, left=90, right=9
         node.set(qn('w:type'), 'dxa')
 
 
-def _add_docx_image(document, src, alt, project_dir, web_dir, Inches, WD_ALIGN_PARAGRAPH):
-    image_stream_or_path = _resolve_image_source(src, project_dir, web_dir)
+def _add_docx_image(document, src, alt, project_dir, web_dir, generated_dir, Inches, WD_ALIGN_PARAGRAPH):
+    image_stream_or_path = _resolve_image_source(src, project_dir, web_dir, generated_dir)
     if not image_stream_or_path:
         paragraph = document.add_paragraph(f'[图片：{alt or "论文图表"}] {src}')
         return
@@ -733,7 +803,7 @@ def _add_docx_image(document, src, alt, project_dir, web_dir, Inches, WD_ALIGN_P
         paragraph.add_run(f'[图片：{alt or "论文图表"}] {src}')
 
 
-def _resolve_image_source(src, project_dir, web_dir):
+def _resolve_image_source(src, project_dir, web_dir, generated_dir=None):
     value = str(src or '').strip()
     if not value:
         return None
@@ -751,14 +821,19 @@ def _resolve_image_source(src, project_dir, web_dir):
         candidates.append(unquote(parsed.path))
     else:
         relative = unquote(value.lstrip('/\\'))
+        if generated_dir and (relative == 'generated' or relative.startswith('generated/')):
+            candidates.append(os.path.join(generated_dir, relative[len('generated'):].lstrip('/\\')))
         candidates.append(os.path.join(web_dir, relative))
         candidates.append(os.path.join(project_dir, relative))
         if os.path.isabs(value):
             candidates.append(value)
+    allowed_roots = [os.path.abspath(project_dir), os.path.abspath(web_dir)]
+    if generated_dir:
+        allowed_roots.append(os.path.abspath(generated_dir))
     for candidate in candidates:
         path = os.path.abspath(candidate)
         if os.path.isfile(path):
-            if path.startswith(os.path.abspath(project_dir)) or path.startswith(os.path.abspath(web_dir)):
+            if any(path.startswith(root) for root in allowed_roots):
                 return path
     return None
 
@@ -892,13 +967,13 @@ def _is_likely_math_expression(value):
     return bool(re.search(r'[Α-Ωα-ω]', text))
 
 
-def _localize_markdown_images(markdown, temp_dir, project_dir, web_dir):
+def _localize_markdown_images(markdown, temp_dir, project_dir, web_dir, generated_dir=None):
     image_counter = {'value': 0}
 
     def replace(match):
         alt = match.group(1)
         src = match.group(2).strip()
-        localized = _local_image_path_for_pandoc(src, temp_dir, project_dir, web_dir, image_counter)
+        localized = _local_image_path_for_pandoc(src, temp_dir, project_dir, web_dir, generated_dir, image_counter)
         if not localized:
             return match.group(0)
         return f'![{alt}]({localized})'
@@ -906,7 +981,7 @@ def _localize_markdown_images(markdown, temp_dir, project_dir, web_dir):
     return MARKDOWN_IMAGE_RE.sub(replace, markdown)
 
 
-def _local_image_path_for_pandoc(src, temp_dir, project_dir, web_dir, image_counter):
+def _local_image_path_for_pandoc(src, temp_dir, project_dir, web_dir, generated_dir, image_counter):
     value = str(src or '').strip()
     if not value:
         return ''
@@ -925,7 +1000,7 @@ def _local_image_path_for_pandoc(src, temp_dir, project_dir, web_dir, image_coun
         with open(path, 'wb') as handle:
             handle.write(raw)
         return path.replace('\\', '/')
-    source = _resolve_image_source(value, project_dir, web_dir)
+    source = _resolve_image_source(value, project_dir, web_dir, generated_dir)
     if isinstance(source, str) and os.path.isfile(source):
         image_counter['value'] += 1
         _, ext = os.path.splitext(source)

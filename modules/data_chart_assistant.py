@@ -120,7 +120,7 @@ class DataChartAssistant:
             for item in sections:
                 if not isinstance(item, dict):
                     continue
-                title = str(item.get('title', '') or '').strip() or '未命名章节'
+                title = str(item.get('displayTitle') or item.get('display_title') or item.get('title', '') or '').strip() or '未命名章节'
                 content = cls._normalize_text(item.get('content', ''))
                 if content:
                     normalized.append({'title': title, 'content': content})
@@ -182,6 +182,8 @@ class DataChartAssistant:
         reason = str(item.get('reason', '') or ('AI 判断该处适合补充数据表。' if artifact_type == 'table' else 'AI 判断该处适合补充数据图。')).strip()
         data_need = str(item.get('dataNeed', '') or '补充可核验数据').strip()
         intent = str(item.get('intent') or item.get('suggestion') or reason or data_need).strip()
+        table_role = self._normalize_table_role(item.get('tableRole') or item.get('role'), f'{reason} {data_need} {intent} {chart_title}')
+        table_kind = self._table_kind_for_role(table_role, item.get('tableKind'))
         if not chart_title and intent:
             chart_title = intent
         return {
@@ -200,6 +202,8 @@ class DataChartAssistant:
             'dataNeed': data_need,
             'query': str(item.get('query', '') or '').strip(),
             'chartType': self._normalize_chart_type(item.get('chartType')),
+            'tableRole': table_role,
+            'tableKind': table_kind,
             'chartTitle': self._normalize_chart_title(chart_title, [], item),
             'tableTitle': self._normalize_chart_title(item.get('tableTitle') or chart_title, [], item),
             'confidence': max(0.0, min(1.0, float(item.get('confidence') or 0.6))),
@@ -254,7 +258,7 @@ class DataChartAssistant:
     def _should_recompute_artifact_label(cls, value, section_title='', kind='figure'):
         parts = cls._artifact_label_parts(value, kind)
         if not parts:
-            return not str(value or '').strip()
+            return True
         section_number = cls._section_number_from_title(section_title) or '1'
         chapter, sequence = parts
         return (chapter != section_number) or not sequence
@@ -282,10 +286,15 @@ class DataChartAssistant:
         prompt = f'''请再次只从“插表”角度阅读论文段落列表，找出适合插入论文数据表的位置。
 
 判断原则：
-1. 不是看到关键词就选表，而是看该段论证是否需要保留多列原始数值、指标口径、变量定义、描述性统计、相关系数、回归结果、评价指标体系或测算结果。
-2. 如果数据需要让读者逐项核对、比较多个指标或展示模型/测算结果，优先选择 table。
-3. 如果全文确实没有适合插表的位置，返回空 targets，并在 summary 中说明原因。
-4. 每个候选仍必须围绕具体段落生成 dataNeed、query 和 tableTitle；不要使用论文总题目或章节题作为标题。
+1. 必须按论文功能找表，不是看到关键词就选表。优先寻找四类插表：
+   A. tableRole=impact_factors：在“影响因素/作用机制/驱动因素”论述处插入影响因素表，表体允许中文因素名称；
+   B. tableRole=model_index：在模型、方程、综合评价指数、效果指数构建或代入处插入模型测算表，表体只允许年份、数字和变量符号；
+   C. tableRole=variable_analysis：在变量选取、模型变量、因子/主成分/相关/描述性统计处插入变量分析表，表体只允许数字和变量符号；
+   D. tableRole=evidence_data：在需要用基础数据增强观点处插入数据表，表体只允许年份、数字和变量符号。
+2. 只要论文里有模型/方程/变量构建相关段落，就必须给出 model_index 或 variable_analysis 表候选；两者可来自同一段，也可分开。
+3. 图表插入的目的必须是增强文章对应观点的解释力，不能为了凑表而放在无关位置。
+4. 每个候选必须围绕具体段落生成 dataNeed、query、tableTitle、tableRole、tableKind；不要使用论文总题目或章节题作为标题。
+5. tableKind 规则：impact_factors 用 impact_factors；model_index/evidence_data 用 numeric；variable_analysis 可用 test_result、correlation、descriptive 或 regression。
 
 论文主题：{topic or '未提供'}
 论文大纲：{self._truncate_for_prompt(outline, 2400) or '未提供'}
@@ -303,6 +312,8 @@ class DataChartAssistant:
       "dataNeed": "需要什么表格数据",
       "query": "检索式",
       "chartType": "bar",
+      "tableRole": "impact_factors|model_index|variable_analysis|evidence_data",
+      "tableKind": "impact_factors|numeric|test_result|correlation|descriptive|regression",
       "chartTitle": "备用图题",
       "tableTitle": "建议表题",
       "confidence": 0.0
@@ -349,6 +360,58 @@ class DataChartAssistant:
         if text in {'table', '表格', '插表', '数据表', '表'}:
             return 'table'
         return 'figure'
+
+    @staticmethod
+    def _normalize_table_role(value='', context=''):
+        text = re.sub(r'[\s_\-]+', '', str(value or '').strip().lower())
+        aliases = {
+            'impact': 'impact_factors',
+            'impactfactor': 'impact_factors',
+            'impactfactors': 'impact_factors',
+            'factorlist': 'impact_factors',
+            'influence': 'impact_factors',
+            '影响因素': 'impact_factors',
+            '因素表': 'impact_factors',
+            'model': 'model_index',
+            'modelindex': 'model_index',
+            'equation': 'model_index',
+            'indexresult': 'model_index',
+            '模型测算': 'model_index',
+            '方程代入': 'model_index',
+            '综合指标': 'model_index',
+            'variable': 'variable_analysis',
+            'variableanalysis': 'variable_analysis',
+            'variance': 'variable_analysis',
+            'factoranalysis': 'variable_analysis',
+            '变量分析': 'variable_analysis',
+            '总方差解释': 'variable_analysis',
+            'data': 'evidence_data',
+            'evidencedata': 'evidence_data',
+            'rawdata': 'evidence_data',
+            '数据表': 'evidence_data',
+            '原始数据': 'evidence_data',
+        }
+        if text in aliases:
+            return aliases[text]
+        compact = re.sub(r'\s+', '', str(context or ''))
+        if re.search(r'影响因素|作用因素|驱动因素|制约因素|因素如[表图]|如表.*因素', compact):
+            return 'impact_factors'
+        if re.search(r'模型|方程|代入|测算|综合指标|效果指数|指数得分|Y[_A-Za-z\u4e00-\u9fff]*|X\d+', compact):
+            return 'model_index'
+        if re.search(r'变量分析|总方差|方差解释|特征根|贡献率|因子载荷|KMO|Bartlett|相关系数|描述性统计', compact, flags=re.IGNORECASE):
+            return 'variable_analysis'
+        return 'evidence_data'
+
+    @classmethod
+    def _table_kind_for_role(cls, role='', explicit=''):
+        normalized = cls._normalize_table_kind(explicit)
+        if normalized and not (role == 'impact_factors' and normalized in {'numeric', 'source'}):
+            return normalized
+        if role == 'impact_factors':
+            return 'impact_factors'
+        if role == 'variable_analysis':
+            return normalized if normalized in {'correlation', 'regression', 'descriptive', 'test_result'} else 'test_result'
+        return 'numeric'
 
     @staticmethod
     def _split_label_axis(label):
@@ -490,11 +553,18 @@ class DataChartAssistant:
         value = re.sub(r'\s+', '', str(title or '').strip())
         if re.search(r'(图表|数据图|统计图|折线图|柱状图|条形图|饼图|结构图|图)$', value):
             value = re.sub(r'(图表|数据图|统计图|折线图|柱状图|条形图|饼图|结构图|图)$', '表', value)
-        if len(value) > 28 or re.search(r'若不以|如果没有|建议|适合|应当|可以|需要|提出要|补充|展示|分析|比较|对比|绘制|生成|构建|呈现|说明|反映', value):
+        role = cls._normalize_table_role(target.get('tableRole') or target.get('role'), cls._table_context_text(value, target))
+        if role == 'impact_factors':
+            return cls._normalize_impact_factor_title(value, target)
+        bad_title = bool(re.fullmatch(r'(?:论文)?(?:数据|统计|图表)?表|图表标题|表格标题|相关指标表?', value))
+        instruction_like = bool(re.search(r'若不以|如果没有|建议|适合|应当|可以|需要|提出要|补充|展示|比较|对比|绘制|生成|构建|呈现|说明|反映', value))
+        if value and not bad_title and not instruction_like and len(value) <= 34:
+            return value
+        if len(value) > 28 or instruction_like:
             value = re.sub(r'^(?:该段|本文|本段|建议|适合|应当|可以|可|需|需要|提出要|提出|要|补充|展示|分析|比较|对比|绘制|生成|构建|呈现|说明|反映)+', '', value)
             value = re.sub(r'^(?:一张|一个|一份|有关|关于|用于|用来|体现|刻画|呈现)+', '', value)
             value = re.sub(r'(若不以|，|。|；|;).*$', '', value)
-        if not value or cls._title_needs_rewrite(value, rows or [], target):
+        if not value or bad_title:
             hint = cls._target_title_hint(target)
             data_need = re.sub(r'\s+', '', str(target.get('dataNeed', '') or ''))
             indicator_match = re.search(r'(.{0,20}?指标体系)', data_need)
@@ -511,9 +581,39 @@ class DataChartAssistant:
                 value = f'{hint}表'
             else:
                 value = '论文数据表'
-        if not value.endswith('表'):
+        if not re.search(r'(表|结果|统计|矩阵|分析|说明|测算|评价|影响因素|变量)$', value):
             value = f'{value}表'
         return value[:34] or '论文数据表'
+
+    @classmethod
+    def _normalize_impact_factor_title(cls, value, target=None):
+        target = target or {}
+        text = re.sub(r'\s+', '', str(value or '').strip())
+        text = re.sub(r'^\s*表\s*\d+(?:\.\d+)?\s*', '', text, flags=re.IGNORECASE)
+        text = re.sub(r'\s*\[[\d,\-\s]+\]\s*$', '', text)
+        text = re.sub(r'[（(]\s*(?:19|20)\d{2}[^）)]*[）)]?$', '', text)
+        text = re.sub(r'[（(][^）)]*$', '', text)
+        text = re.sub(r'(?:图表|数据图|统计图|折线图|柱状图|条形图|饼图|结构图|图|表)$', '', text)
+        text = re.sub(r'(?:的)?(?:制约条件|约束条件|作用方向|风险表现|风险因素|作用机制)(?:[、和与及].*)?$', '的影响因素', text)
+        generic = not text or re.fullmatch(r'(?:影响因素|因素|因素表|影响因素表|论文数据表|数据表|相关指标表)', text)
+        if generic:
+            for field in ('tableTitle', 'dataNeed', 'intent', 'suggestion', 'reason', 'query', 'sectionTitle'):
+                candidate = re.sub(r'\s+', '', str(target.get(field, '') or '').strip())
+                candidate = re.sub(r'^(?:该段|本文|本段|建议|适合|应当|可以|可|需|需要|提出要|提出|要|补充|展示|分析|比较|对比|绘制|生成|构建|呈现|说明|反映)+', '', candidate)
+                candidate = re.sub(r'[，。；;：:].*$', '', candidate)
+                candidate = re.sub(r'[（(]\s*(?:19|20)\d{2}[^）)]*[）)]?$', '', candidate)
+                candidate = re.sub(r'[（(][^）)]*$', '', candidate)
+                candidate = re.sub(r'(?:图表|数据图|统计图|折线图|柱状图|条形图|饼图|结构图|图|表)$', '', candidate)
+                candidate = re.sub(r'(?:的)?(?:制约条件|约束条件|作用方向|风险表现|风险因素|作用机制)(?:[、和与及].*)?$', '的影响因素', candidate)
+                if candidate and not re.fullmatch(r'(?:影响因素|因素|因素表|影响因素表)', candidate):
+                    text = candidate
+                    break
+        if not text:
+            text = '影响因素'
+        if '影响因素' not in text:
+            text = re.sub(r'(?:的)?(?:制约条件|约束条件|作用方向|风险表现|风险因素|作用机制)(?:[、和与及].*)?$', '', text).rstrip('的')
+            text = f'{text}的影响因素' if text else '影响因素'
+        return text[:34]
 
     @classmethod
     def _choose_chart_type(cls, chart_type, rows, target=None):
@@ -745,10 +845,13 @@ AI 建议标题：{(target or {}).get('chartTitle') or (target or {}).get('title
             p_value = str(row.get('pValue', '') or row.get('p', '') or '').strip()
             significance = str(row.get('significance', '') or row.get('stars', '') or '').strip()
             correlation = str(row.get('correlation', '') or row.get('corr', '') or row.get('correlationCoefficient', '') or '').strip()
+            eigenvalue = str(row.get('eigenvalue', '') or row.get('eigenValue', '') or row.get('eigen', '') or '').strip()
+            contribution_rate = str(row.get('contributionRate', '') or row.get('varianceContribution', '') or row.get('varianceRate', '') or '').strip()
+            cumulative_rate = str(row.get('cumulativeRate', '') or row.get('cumulativeContribution', '') or row.get('cumContribution', '') or '').strip()
             if not any((
                 label, symbol, measure, raw_value, source_name, publisher, url, note, source, year, variable, stat_type,
                 related_label, sample_size, mean, std_dev, min_value, max_value, coefficient,
-                std_error, t_statistic, p_value, significance, correlation,
+                std_error, t_statistic, p_value, significance, correlation, eigenvalue, contribution_rate, cumulative_rate,
             )):
                 continue
             result.append({
@@ -783,6 +886,9 @@ AI 建议标题：{(target or {}).get('chartTitle') or (target or {}).get('title
                 'pValue': p_value,
                 'significance': significance,
                 'correlation': correlation,
+                'eigenvalue': eigenvalue,
+                'contributionRate': contribution_rate,
+                'cumulativeRate': cumulative_rate,
             })
         return cls._flatten_table_rows_to_single_value(result)
 
@@ -800,6 +906,9 @@ AI 建议标题：{(target or {}).get('chartTitle') or (target or {}).get('title
             ('tStatistic', 't统计量'),
             ('pValue', 'P值'),
             ('correlation', '相关系数'),
+            ('eigenvalue', '特征根'),
+            ('contributionRate', '贡献率'),
+            ('cumulativeRate', '累计贡献率'),
         ]
         for row in rows or []:
             item = dict(row)
@@ -826,6 +935,9 @@ AI 建议标题：{(target or {}).get('chartTitle') or (target or {}).get('title
                     'tStatistic': 'tStatistic',
                     'pValue': 'pValue',
                     'correlation': 'correlation',
+                    'eigenvalue': 'eigenvalue',
+                    'contributionRate': 'contributionRate',
+                    'cumulativeRate': 'cumulativeRate',
                 }.get(field, field)
                 label_parts = [str(item.get('label', '') or '').strip()]
                 if field == 'correlation' and str(item.get('relatedLabel', '') or '').strip():
@@ -1435,6 +1547,27 @@ AI 建议标题：{(target or {}).get('chartTitle') or (target or {}).get('title
                 break
         return rows or source_rows
 
+    @classmethod
+    def _fallback_impact_factor_rows(cls, target, search_query=''):
+        text = ' '.join(str(part or '') for part in (
+            search_query,
+            (target or {}).get('tableTitle') if isinstance(target, dict) else '',
+            (target or {}).get('dataNeed') if isinstance(target, dict) else '',
+            (target or {}).get('intent') if isinstance(target, dict) else '',
+            (target or {}).get('reason') if isinstance(target, dict) else '',
+        ))
+        terms = []
+        for term in cls._target_indicator_terms(target, text):
+            item = re.sub(r'\s+', '', str(term or '').strip('，,。.;；：: '))
+            item = re.sub(r'(?:影响因素|因素|表)$', '', item).strip('的')
+            if item and item not in {'数据', '指标', '论文', '表格'} and item not in terms:
+                terms.append(item)
+            if len(terms) >= 8:
+                break
+        if not terms:
+            terms = ['核心约束因素']
+        return [{'label': term, 'value': None, 'rawValue': '', 'source': '', 'sourceName': '', 'publisher': '', 'url': '', 'note': ''} for term in terms]
+
     @staticmethod
     def _indicator_keywords(term):
         text = re.sub(r'\s+', '', str(term or '').lower())
@@ -1855,13 +1988,19 @@ AI 建议标题：{(target or {}).get('chartTitle') or (target or {}).get('title
 
 要求：
 1. 只从给定 paragraph id 中选择位置，不要改写原文。
-2. 插图适合呈现趋势、结构、占比、组间对比和变化过程；插表适合呈现原始数据、指标口径、变量定义、相关系数、回归结果、描述性统计和多列数值。
-3. 如果全文确实没有合适位置，可以返回空 targets。
-4. 每个候选给出：paragraphId、artifactType、reason、dataNeed、query、chartType、chartTitle、tableTitle、confidence。
+2. 图表必须增强文章对应观点的解释力：插图用于解释趋势、结构、占比、组间对比和变化过程；插表用于呈现影响因素、模型测算值、变量分析或基础数据。
+3. 必须优先寻找以下表格候选：
+   A. 影响因素表：tableRole=impact_factors，放在解释“某内容的影响因素/作用机制/驱动因素”的段落，表体允许中文因素名称；
+   B. 模型测算表：tableRole=model_index，放在模型、方程、综合评价指数、效果指数构建或代入的段落，表体只允许年份、数字和变量符号；
+   C. 变量分析表：tableRole=variable_analysis，放在变量选取、模型变量、因子/主成分/相关/描述性统计相关段落，表体只允许数字和变量符号；
+   D. 基础数据表：tableRole=evidence_data，放在需要用数据强化论点的段落，表体只允许年份、数字和变量符号。
+4. 如果论文中出现模型/方程/变量构建相关内容，必须至少给出 model_index 或 variable_analysis 候选；如果两者都能支撑论证，应都给出。
+5. 每个候选给出：paragraphId、artifactType、reason、dataNeed、query、chartType、chartTitle、tableTitle、tableRole、tableKind、confidence。
 5. query 必须围绕该段真正需要说明的指标、对象、年份和地区生成，不要沿用论文总题目。
 6. chartTitle/tableTitle 必须概括“要呈现什么数据”，不要写论文总题目、章节题或“影响因素”这类泛化标题。
 7. artifactType 只能是 figure 或 table；chartType 只能是 line、bar、pie，插表时也给出一个备用 chartType。
-8. 至少保留 1 个插表候选；如果全文确实没有适合插表的位置，在 summary 中说明原因。
+8. tableKind 规则：impact_factors 用 impact_factors；model_index/evidence_data 用 numeric；variable_analysis 可用 test_result、correlation、descriptive 或 regression。
+9. 至少保留 1 个插表候选；如果全文确实没有适合插表的位置，在 summary 中说明原因。
 
 论文主题：{topic or '未提供'}
 论文大纲：{self._truncate_for_prompt(outline, 2400) or '未提供'}
@@ -1879,6 +2018,8 @@ AI 建议标题：{(target or {}).get('chartTitle') or (target or {}).get('title
       "dataNeed": "需要什么数据",
       "query": "检索式",
       "chartType": "line|bar|pie",
+      "tableRole": "impact_factors|model_index|variable_analysis|evidence_data",
+      "tableKind": "impact_factors|numeric|test_result|correlation|descriptive|regression",
       "chartTitle": "建议图表标题",
       "tableTitle": "建议表格标题",
       "confidence": 0.0
@@ -1898,21 +2039,33 @@ AI 建议标题：{(target or {}).get('chartTitle') or (target or {}).get('title
         candidates = self._coerce_target_candidates(raw_targets, paragraph_map)
         candidates = self._limit_targets_preserving_table(candidates, limit)
         table_summary = ''
-        if candidates and not any(item.get('artifactType') == 'table' for item in candidates):
+        existing_roles = {
+            item.get('tableRole')
+            for item in candidates
+            if item.get('artifactType') == 'table' and item.get('tableRole')
+        }
+        needs_table_pass = (
+            not any(item.get('artifactType') == 'table' for item in candidates)
+            or not existing_roles.intersection({'model_index', 'variable_analysis'})
+        )
+        if candidates and needs_table_pass:
             table_targets, table_summary = self._find_table_targets_with_ai(
                 api,
                 topic=topic,
                 outline=outline,
                 prompt_payload=prompt_payload,
                 paragraph_map=paragraph_map,
-                limit=2,
+                limit=4,
             )
-            seen_ids = {item.get('paragraphId') for item in candidates}
+            seen_keys = {(item.get('paragraphId'), item.get('tableRole')) for item in candidates}
             for table_target in table_targets:
-                if table_target.get('paragraphId') in seen_ids:
+                key = (table_target.get('paragraphId'), table_target.get('tableRole'))
+                if key in seen_keys:
+                    continue
+                if table_target.get('paragraphId') in {item.get('paragraphId') for item in candidates}:
                     table_target['id'] = f'{table_target.get("id")}-table-review'
                 candidates.append(table_target)
-                seen_ids.add(table_target.get('paragraphId'))
+                seen_keys.add(key)
             candidates = self._limit_targets_preserving_table(candidates, limit)
         if not candidates:
             table_targets, table_summary = self._find_table_targets_with_ai(
@@ -1921,7 +2074,7 @@ AI 建议标题：{(target or {}).get('chartTitle') or (target or {}).get('title
                 outline=outline,
                 prompt_payload=prompt_payload,
                 paragraph_map=paragraph_map,
-                limit=2,
+                limit=4,
             )
             candidates = self._limit_targets_preserving_table(table_targets, limit)
         candidates = self._renumber_target_candidates(candidates)
@@ -1931,6 +2084,379 @@ AI 建议标题：{(target or {}).get('chartTitle') or (target or {}).get('title
         return {
             'targets': candidates,
             'summary': summary,
+        }
+
+    @classmethod
+    def _extract_equation_from_text(cls, text):
+        normalized = cls._normalize_text(text)
+        if not normalized:
+            return ''
+        patterns = [
+            r'([A-Za-zYy][A-Za-z0-9_\u4e00-\u9fffβαε+\-*/×÷().（）,\s]{0,120}=[A-Za-z0-9_\u4e00-\u9fffβαε+\-*/×÷().（）,\s]{2,160})',
+            r'([A-Za-z]\s*=\s*β0[^。；;\n]{0,180})',
+        ]
+        for pattern in patterns:
+            match = re.search(pattern, normalized)
+            if not match:
+                continue
+            equation = re.sub(r'\s+', '', match.group(1)).strip('，,。；;')
+            if '=' in equation and len(equation) >= 5:
+                return equation[:180]
+        return ''
+
+    @staticmethod
+    def _coerce_analysis_list(value):
+        if isinstance(value, list):
+            return [str(item or '').strip() for item in value if str(item or '').strip()]
+        text = str(value or '').strip()
+        if not text:
+            return []
+        parts = re.split(r'[\n；;]+', text)
+        return [part.strip(' -•\t') for part in parts if part.strip(' -•\t')]
+
+    @classmethod
+    def _coerce_analysis_parameters(cls, value, equation='', definitions=None):
+        parameters = []
+        seen = set()
+
+        def add(name, meaning='', param_value=''):
+            name = str(name or '').strip()
+            meaning = str(meaning or '').strip()
+            param_value = str(param_value or '').strip()
+            if not name and not meaning and not param_value:
+                return
+            key = name or meaning
+            if key in seen:
+                return
+            seen.add(key)
+            parameters.append({'name': name, 'meaning': meaning, 'value': param_value})
+
+        if isinstance(value, list):
+            for item in value:
+                if isinstance(item, dict):
+                    add(
+                        item.get('name') or item.get('symbol') or item.get('label'),
+                        item.get('meaning') or item.get('description') or item.get('label'),
+                        item.get('value'),
+                    )
+                else:
+                    add(item)
+        equation_text = str(equation or '')
+        for beta in re.findall(r'β\s*\d+', equation_text):
+            compact = re.sub(r'\s+', '', beta)
+            meaning = '常数项' if compact == 'β0' else f'{compact} 对应变量的待估计系数'
+            add(compact, meaning, '')
+        if not parameters and re.search(r'回归|方程|模型|β|beta', equation_text, flags=re.IGNORECASE):
+            add('β0', '常数项', '')
+            add('β1', '核心解释变量系数', '')
+        if not re.search(r'β\s*\d+', equation_text):
+            for definition in definitions or []:
+                symbol = definition.get('symbol')
+                meaning = definition.get('meaning')
+                if symbol and meaning and symbol not in {'Y', 'y'} and len(parameters) < 8:
+                    add(f'β{len(parameters)}', f'{symbol}（{meaning}）对应系数', '')
+        return parameters[:12]
+
+    @staticmethod
+    def _analysis_parameter_key(parameter):
+        text = str((parameter or {}).get('name') or (parameter or {}).get('symbol') or (parameter or {}).get('label') or '').strip()
+        return re.sub(r'\s+', '', text.replace('beta', 'β').replace('Beta', 'β')).lower()
+
+    @classmethod
+    def _merge_analysis_parameters(cls, current=None, payload=None, rows=None):
+        merged = cls._coerce_analysis_parameters(current or [])
+
+        def add_or_update(parameter):
+            item = cls._coerce_analysis_parameters([parameter])
+            if not item:
+                return
+            item = item[0]
+            key = cls._analysis_parameter_key(item)
+            index = -1
+            if key:
+                index = next((i for i, row in enumerate(merged) if cls._analysis_parameter_key(row) == key), -1)
+            if index < 0 and item.get('meaning'):
+                meaning = str(item.get('meaning') or '')
+                index = next((
+                    i for i, row in enumerate(merged)
+                    if row.get('meaning') and (meaning in row.get('meaning', '') or row.get('meaning', '') in meaning)
+                ), -1)
+            if index >= 0:
+                existing = dict(merged[index])
+                if item.get('name') and not existing.get('name'):
+                    existing['name'] = item['name']
+                if item.get('meaning') and len(item.get('meaning', '')) > len(existing.get('meaning', '')):
+                    existing['meaning'] = item['meaning']
+                if str(item.get('value') or '').strip():
+                    existing['value'] = str(item.get('value') or '').strip()
+                merged[index] = existing
+            else:
+                merged.append(item)
+
+        payload = payload if isinstance(payload, dict) else {}
+        for field in ('analysisParameters', 'parameters', 'parameterRows', 'coefficients', 'coefficientParameters'):
+            for parameter in payload.get(field) or []:
+                if isinstance(parameter, dict):
+                    add_or_update(parameter)
+
+        coefficient_rows = [
+            row for row in rows or []
+            if str(row.get('statType') or '').lower() == 'coefficient'
+            or str(row.get('coefficient') or '').strip()
+            or re.search(r'β\s*\d+', str(row.get('label') or row.get('symbol') or ''))
+        ]
+        beta_index = 1
+        for row in coefficient_rows:
+            label = str(row.get('label') or row.get('symbol') or row.get('variable') or '').strip()
+            name_match = re.search(r'β\s*\d+', label)
+            name = re.sub(r'\s+', '', name_match.group(0)) if name_match else ''
+            if not name:
+                symbol = str(row.get('symbol') or row.get('variable') or '').strip()
+                for parameter in merged:
+                    meaning = str(parameter.get('meaning') or '')
+                    if symbol and symbol in meaning:
+                        name = str(parameter.get('name') or '')
+                        break
+            if not name:
+                name = f'β{beta_index}'
+                beta_index += 1
+            value = row.get('coefficient') or row.get('rawValue') or row.get('value') or ''
+            if value is None:
+                value = ''
+            add_or_update({
+                'name': name,
+                'meaning': label or str(row.get('note') or ''),
+                'value': str(value).strip(),
+            })
+        return [item for item in merged if item.get('name') or item.get('meaning') or item.get('value')][:16]
+
+    @classmethod
+    def _analysis_type_from_context(cls, text, table_role=''):
+        compact = re.sub(r'\s+', '', str(text or ''))
+        if re.search(r'总方差|方差解释|特征根|贡献率|KMO|Bartlett|因子|主成分', compact, flags=re.IGNORECASE):
+            return 'factor_analysis'
+        if re.search(r'相关系数|相关矩阵|相关性', compact):
+            return 'correlation'
+        if re.search(r'描述性统计|描述统计|均值|标准差|最大值|最小值', compact):
+            return 'descriptive'
+        if re.search(r'回归|β|beta|估计|方程|模型', compact, flags=re.IGNORECASE):
+            return 'regression'
+        if table_role == 'model_index':
+            return 'model_calculation'
+        if table_role == 'variable_analysis':
+            return 'variable_analysis'
+        return 'evidence_data'
+
+    @classmethod
+    def _default_analysis_table_kind(cls, analysis_type='', table_role=''):
+        value = str(analysis_type or '').lower()
+        if table_role == 'model_index':
+            return 'numeric'
+        if 'correlation' in value:
+            return 'correlation'
+        if 'regression' in value:
+            return 'regression'
+        if 'descriptive' in value:
+            return 'descriptive'
+        if table_role == 'variable_analysis' or any(part in value for part in ('factor', 'variable', 'kmo')):
+            return 'test_result'
+        return 'numeric'
+
+    @classmethod
+    def _fallback_analysis_required_data(cls, equation='', definitions=None, target=None):
+        definitions = definitions or []
+        equation_symbols = []
+        equation_text = re.sub(r'β\s*\d+', ' ', str(equation or ''))
+        for symbol in re.findall(r'\b[A-Za-z][A-Za-z0-9_]{0,18}\b', equation_text):
+            if symbol not in equation_symbols and symbol.lower() not in {'ln', 'log', 'exp'}:
+                equation_symbols.append(symbol)
+        if definitions:
+            rows = [
+                f'{item["symbol"]}：{item["meaning"]}，按论文研究对象、年份或样本单位收集原始数值'
+                for item in definitions[:10]
+                if item.get('symbol') and item.get('meaning')
+            ]
+            defined = {item.get('symbol') for item in definitions}
+            for symbol in equation_symbols:
+                if symbol not in defined and len(rows) < 12:
+                    rows.append(f'{symbol}：根据正文定义收集对应变量的年度或样本观测值')
+            return rows
+        if equation_symbols:
+            return [f'{symbol}：根据正文定义收集对应变量的年度或样本观测值' for symbol in equation_symbols[:8]]
+        data_need = str((target or {}).get('dataNeed') or '').strip()
+        if data_need:
+            return [data_need]
+        return ['围绕候选段落观点收集可核验的年份、变量符号和数值']
+
+    @classmethod
+    def _normalize_analysis_plan_payload(cls, payload, target=None, table_role=''):
+        source = payload.get('analysisPlan') if isinstance(payload, dict) and isinstance(payload.get('analysisPlan'), dict) else payload
+        if not isinstance(source, dict):
+            source = {}
+        target = target or {}
+        context = cls._variable_definition_context(target, '')
+        definitions = cls._variable_definitions_from_text(context)
+        equation = str(source.get('equation') or source.get('model') or '').strip()
+        if not equation:
+            equation = cls._extract_equation_from_text(context)
+        analysis_type = str(source.get('analysisType') or source.get('type') or '').strip()
+        if not analysis_type:
+            analysis_type = cls._analysis_type_from_context(f'{context} {equation}', table_role)
+        required_data = (
+            cls._coerce_analysis_list(source.get('requiredData') or source.get('dataRequirements'))
+            or cls._fallback_analysis_required_data(equation, definitions, target)
+        )
+        table_kind = cls._normalize_table_kind(source.get('tableKind') or '')
+        if not table_kind:
+            table_kind = cls._default_analysis_table_kind(analysis_type, table_role)
+        title = str(source.get('title') or source.get('tableTitle') or target.get('tableTitle') or target.get('chartTitle') or '').strip()
+        if not title:
+            if table_role == 'model_index':
+                title = '模型变量年度观测值'
+            elif table_role == 'variable_analysis':
+                title = '变量分析结果'
+            else:
+                title = cls._target_title_hint(target) or '数据分析表'
+        search_guidance = str(source.get('searchGuidance') or source.get('searchQuery') or source.get('query') or '').strip()
+        if not search_guidance:
+            search_guidance = '；'.join(required_data[:5])
+        software = str(source.get('software') or source.get('recommendedSoftware') or '').strip()
+        method = str(source.get('method') or source.get('calculationMethod') or '').strip()
+        if not software:
+            software = 'Stata / SPSS / Python statsmodels / R'
+        if not method:
+            if 'regression' in str(analysis_type or '').lower():
+                method = '先用多元线性回归、面板回归或正文指定模型估计 β0、β1 等参数，再将已核验变量观测值代入方程分析。'
+            elif table_kind == 'correlation':
+                method = '相关分析，输出变量间相关系数矩阵。'
+            elif table_kind == 'regression':
+                method = '多元线性回归或面板回归，估计各解释变量系数并检验显著性。'
+            elif table_kind == 'descriptive':
+                method = '描述性统计，计算样本量、均值、标准差、最小值和最大值。'
+            elif table_kind == 'test_result':
+                method = '因子分析、主成分分析或变量质量检验，输出特征根、贡献率、累计贡献率或检验统计量。'
+            else:
+                method = '按正文模型或指标定义整理年度/样本观测值，必要时进行标准化、加权或方程代入。'
+        parameters = cls._coerce_analysis_parameters(
+            source.get('parameters') or source.get('coefficients') or source.get('params'),
+            equation,
+            definitions,
+        )
+        return {
+            'analysisType': analysis_type,
+            'equation': equation,
+            'requiredData': required_data[:12],
+            'software': software,
+            'method': method,
+            'searchGuidance': search_guidance,
+            'tableKind': table_kind,
+            'title': title,
+            'unit': str(source.get('unit') or '').strip(),
+            'parameters': parameters,
+        }
+
+    def analyze_data(self, *, query='', target=None, full_text='', data_file=None):
+        target = target or {}
+        artifact_type = self._normalize_artifact_type(target.get('artifactType') or target.get('insertType'))
+        table_role = self._normalize_table_role(
+            target.get('tableRole') or target.get('role'),
+            self._table_context_text(target.get('tableTitle') or target.get('chartTitle') or query, target),
+        )
+        if artifact_type == 'table':
+            target = {**target, 'tableRole': table_role, 'tableKind': self._table_kind_for_role(table_role, target.get('tableKind'))}
+        if artifact_type == 'table' and table_role == 'impact_factors':
+            return {
+                'artifactType': artifact_type,
+                'tableRole': table_role,
+                'tableKind': 'impact_factors',
+                'title': self._normalize_table_title(target.get('tableTitle') or query, [], target),
+                'analysisPlan': None,
+                'sourceNote': '影响因素表是论文内容整理表，不需要先做数据分析计划。',
+            }
+
+        context = self._variable_definition_context(target, full_text)
+        variable_definitions = self._variable_definitions_from_text(context)
+        variable_definition_note = json.dumps(variable_definitions, ensure_ascii=False, indent=2) if variable_definitions else '未识别到明确变量符号定义。'
+        uploaded_data_note = self._decode_data_file_text(data_file)
+        fallback_plan = self._normalize_analysis_plan_payload({}, target, table_role)
+        try:
+            api = self._require_ai('data_chart.analyze')
+            prompt = f'''请阅读全文上下文和候选段落，先做“AI 数据分析计划”，不要检索最终数据。
+
+任务：
+1. 判断该候选属于哪种数据分析类型：regression、model_calculation、factor_analysis、correlation、descriptive、variable_analysis 或 evidence_data。
+2. 如果正文有关系式/方程/模型，例如 Y=β0+β1X+β2M+β3Controls+ε，必须提取原式，并说明需要收集哪些变量数据。
+3. 需要给出“需要哪些数据”“建议用什么软件和什么方法计算”“用户需要填写哪些参数/系数”的清单。
+4. 对 model_index：重点规划年度/样本观测值表，正式表体应类似“年份、Y、X、M、Controls”，只允许数字和变量符号。
+5. 对 variable_analysis：根据上下文规划总方差解释表、相关矩阵、描述性统计表、回归结果表等，正式表体只允许数字和变量符号。
+6. 分析计划必须给后续“AI 搜索数据”使用，searchGuidance 要清楚写明检索哪些变量、年份、地区、样本和口径。
+7. 辅助数据文件只是可选材料；如果里面有字段名或数值线索，可以纳入 requiredData，但不要要求必须上传。
+
+候选类型：{"插表" if artifact_type == "table" else "插图"}
+表格角色：{table_role if artifact_type == "table" else "非表格"}
+建议 tableKind：{target.get('tableKind') or fallback_plan.get('tableKind')}
+检索/分析意图：{query or target.get('intent') or target.get('reason') or '未提供'}
+建议标题：{target.get('tableTitle') or target.get('chartTitle') or target.get('title') or '未提供'}
+所在章节：{target.get('sectionTitle') or '未提供'}
+候选段落：
+{self._truncate_for_prompt(target.get('originalText') or target.get('excerpt'), 2200) or '未提供'}
+
+正文变量符号定义 JSON：
+{variable_definition_note}
+
+全文上下文：
+{self._truncate_for_prompt(full_text, 6500) or '未提供'}
+
+用户上传数据文件摘录（可选）：
+{self._truncate_for_prompt(uploaded_data_note, 5000) or '未上传'}
+
+返回 JSON：
+{{
+  "analysisPlan": {{
+    "analysisType": "regression|model_calculation|factor_analysis|correlation|descriptive|variable_analysis|evidence_data",
+    "equation": "从正文提取的方程，没有则为空",
+    "requiredData": ["Y：供应链金融发展水平，按年份收集", "X：区块链应用水平，按年份收集"],
+    "software": "Stata / SPSS / Python statsmodels / R / Excel",
+    "method": "具体计算方式，例如多元线性回归、主成分分析、总方差解释、相关分析、描述性统计",
+    "parameters": [
+      {{"name": "β0", "meaning": "常数项", "value": ""}},
+      {{"name": "β1", "meaning": "X 对 Y 的边际影响", "value": ""}}
+    ],
+    "searchGuidance": "给后续 AI 搜索数据使用的明确检索依据",
+    "tableKind": "numeric|regression|correlation|descriptive|test_result",
+    "title": "根据正文语义生成的表题",
+    "unit": ""
+  }},
+  "tableRole": "{table_role}",
+  "tableKind": "numeric|regression|correlation|descriptive|test_result",
+  "title": "表题"
+}}'''
+            payload = api.call_json_sync(
+                prompt,
+                system='你是论文计量与数据分析设计助手。先规划数据分析与计算方式，不检索最终数据，不编造数值。',
+                temperature=0.15,
+                max_tokens=2200,
+                request_timeout=160,
+                schema_name='data_chart_analysis_plan',
+                usage_context=self._usage_context('data_chart.analyze'),
+            )
+            plan = self._normalize_analysis_plan_payload(payload, target, table_role)
+        except Exception as exc:
+            plan = fallback_plan
+            plan['sourceNote'] = f'AI 数据分析未返回，已根据正文规则生成基础计划：{exc}'
+
+        table_kind = self._table_kind_for_role(table_role, plan.get('tableKind'))
+        title = self._normalize_table_title(plan.get('title') or target.get('tableTitle') or query, [], {**target, 'tableRole': table_role, 'tableKind': table_kind}) if artifact_type == 'table' else self._normalize_chart_title(plan.get('title') or target.get('chartTitle') or query, [], target)
+        plan['title'] = title
+        plan['tableKind'] = table_kind if artifact_type == 'table' else plan.get('tableKind')
+        return {
+            'artifactType': artifact_type,
+            'tableRole': table_role if artifact_type == 'table' else '',
+            'tableKind': plan.get('tableKind') or table_kind,
+            'title': title,
+            'unit': plan.get('unit', ''),
+            'analysisPlan': plan,
+            'sourceNote': plan.get('sourceNote') or 'AI 数据分析已完成；请核对所需数据、计算方式和参数后再搜索数据。',
         }
 
     @staticmethod
@@ -1976,7 +2502,7 @@ AI 建议标题：{(target or {}).get('chartTitle') or (target or {}).get('title
         header_map = {}
         for index, row in enumerate(rows[:3]):
             candidate_map = cls._data_table_header_map(row)
-            if len(candidate_map) >= 2:
+            if len(candidate_map) >= 2 or (not require_numeric and 'label' in candidate_map):
                 header_index = index
                 header_map = candidate_map
                 break
@@ -2115,35 +2641,108 @@ AI 建议标题：{(target or {}).get('chartTitle') or (target or {}).get('title
             return ''
         return str(row[index] or '').strip()
 
-    def _request_search_payload(self, api, *, artifact_type, target, search_query, chart_title_hint, full_text, evidence_note, uploaded_data_note='', quality_feedback=''):
+    def _request_search_payload(self, api, *, artifact_type, target, search_query, chart_title_hint, full_text, evidence_note, uploaded_data_note='', quality_feedback='', analysis_plan=None, analysis_parameters=None):
         feedback = ''
         intent = str(target.get('intent') or target.get('suggestion') or target.get('reason') or '').strip()
         title_hint = self._target_title_hint(target) or chart_title_hint
+        table_role = self._normalize_table_role(target.get('tableRole') or target.get('role'), f'{intent} {target.get("dataNeed", "")} {title_hint} {search_query}')
+        role_table_kind = self._table_kind_for_role(table_role, target.get('tableKind'))
+        variable_definitions = self._variable_definitions_from_text(self._variable_definition_context(target, full_text))
+        variable_definition_note = json.dumps(variable_definitions, ensure_ascii=False, indent=2) if variable_definitions else '未在正文中识别到明确变量符号定义。'
+        analysis_plan = self._normalize_analysis_plan_payload(analysis_plan or target.get('analysisPlan') or {}, target, table_role) if (analysis_plan or target.get('analysisPlan')) else None
+        if analysis_plan and artifact_type == 'table':
+            role_table_kind = self._table_kind_for_role(table_role, analysis_plan.get('tableKind') or role_table_kind)
+        analysis_parameters = analysis_parameters if isinstance(analysis_parameters, list) else target.get('analysisParameters')
+        analysis_note = '未提供。'
+        if analysis_plan:
+            analysis_note = json.dumps({
+                'analysisPlan': analysis_plan,
+                'analysisParameters': analysis_parameters if isinstance(analysis_parameters, list) else [],
+            }, ensure_ascii=False, indent=2)
         if quality_feedback:
             feedback = f'''
 
 上一次返回的数据被系统判定为不可用，原因：{quality_feedback}
 请重新检索真实统计值。不要返回变量代码、控制变量名称、指标编号、序号、变量定义或“预测方向”。如果只能找到可疑数值，也可以填写 value，但必须在 note 标明“待核验”并说明核验路径。'''
         if artifact_type == 'table':
-            row_requirements = (
-                '4. rows 至少 1 行；先根据候选建议拆出论文真正需要的变量/指标，再为每个变量/指标寻找可核验数值。'
-                '审核区每一行只核验一个数值，必须保留可重组正式表的元数据：year（年份，可为空）、variable（变量/指标列名）、'
-                'statType（统计项，可为空）、relatedVariable（相关矩阵的列变量，可为空）。\n'
-                '5. 除非候选建议明确要求“变量定义表、口径说明表、数据来源表、相关系数矩阵、回归结果表、描述性统计表”，'
-                'tableKind 一律返回 numeric。指标体系、综合评价指标体系、五个维度、正向/负向指标也要先按 numeric 返回可审核数值行，'
-                '不要返回变量符号、测度方法、数据来源清单来代替数值。\n'
-                '6. numeric 表：每行返回一个观测值，例如 {"year":"2021","variable":"GDP","label":"2021年GDP","value":123.4}。'
-                'correlation 表：每行返回一个变量对，例如 {"variable":"y","relatedVariable":"X1","statType":"correlation","label":"y-X1相关系数","value":0.82}。'
-                'regression 表：可以每行返回一个变量并填写 coefficient/stdError/tStatistic，也可以拆成多行并用 statType 标明 coefficient、stdError、tStatistic。\n'
-                '7. 尽量给出数值。若数值来自网页摘录但口径或年份不完全确定，也可以填 value，但必须在 note 中标明“待核验/可疑”，说明页码、表号、统计口径或核验路径。不要因为 URL 缺失就不填数值。\n'
-                '8. 如果确实找不到某一变量/指标的数值，仍要保留该行：label 写清楚待核验的指标和年份/地区，value 留空，'
-                'sourceName/publisher/url/note 写明最可能核验的来源路径。不要用样本量、均值、标准差等无关统计项凑数。\n'
-            )
+            if table_role == 'impact_factors':
+                row_requirements = (
+                    '4. 这是“影响因素表”。tableRole 必须返回 impact_factors，tableKind 必须返回 impact_factors。'
+                    '这是对论文全文和候选段落已有观点的结构化归纳，不是外部统计数据表。'
+                    'rows 每行只写一个影响因素，label 使用中文因素名称，value/sourceName/publisher/url/note 均可留空。\n'
+                    '5. 只有本类表允许正式表体出现中文。不要为影响因素表编造数值，不要输出变量符号表，不要新增参考文献来源。\n'
+                )
+            elif table_role == 'model_index':
+                row_requirements = (
+                    '4. 这是“模型测算/方程代入表”。tableRole 必须返回 model_index，tableKind 必须返回 numeric。'
+                    '先从论文正文已定义的变量符号中识别模型变量含义，再搜索原始数据或已构建指数，必要时按段落中的方程进行标准化、加权或代入计算。\n'
+                    '5. rows 每行只放一个年份-变量的数值：year 填年份，variable 和 symbol 必须使用“正文变量符号定义 JSON”中已经定义的符号（如 Y、Y_fin、X1、GDP），value 填数值。'
+                    '正式表体除首列年份外只允许数字和变量符号；不要把中文指标名放入 variable/symbol，不要自行创造未在正文定义的 X1/X2。\n'
+                    '6. 如果只能找到可疑数值，也要填 value 并在 note 标明“待核验”；确实没有数值时才留空并写清核验路径。\n'
+                )
+            elif table_role == 'variable_analysis':
+                row_requirements = (
+                    '4. 这是“变量分析表”。tableRole 必须返回 variable_analysis，tableKind 选择 test_result、correlation、descriptive 或 regression。'
+                    '用于变量方程构建处，必须能说明变量质量、因子/主成分贡献、相关性、描述性统计或回归结果。\n'
+                    '5. 正式表体只允许数字和变量符号。variable/symbol 必须优先使用“正文变量符号定义 JSON”中已经定义的符号；'
+                    '因子项可以使用 F1、F2 等模型自然符号。不要把中文变量名写入正式表字段，不要自行创造未在正文定义的普通变量符号。'
+                    '若为总方差/因子贡献表，使用 statType=eigenvalue/contributionRate/cumulativeRate；'
+                    '若为相关矩阵，使用 statType=correlation 和 relatedVariable；若为描述统计，使用 mean/stdDev/min/max/sampleSize。\n'
+                )
+            else:
+                row_requirements = (
+                    '4. 这是“基础数据强化表”。tableRole 必须返回 evidence_data，tableKind 必须返回 numeric。'
+                    '先拆出该段观点真正需要的变量，再搜索可核验数值。\n'
+                    '5. rows 每行只放一个年份-变量的数值：year 填年份，variable 和 symbol 优先使用“正文变量符号定义 JSON”中已经定义的符号或正文已有英文缩写（如 GDP、DEP、LOAN），value 填数值。'
+                    '正式表体除首列年份外只允许数字和变量符号；不要把中文指标名放入 variable/symbol，不要自行创造未在正文定义的 X1/X2。\n'
+                    '6. 若数值待核验，可以先填 value，但必须在 note 标明“待核验”和来源路径；确实没有数值时才留空。\n'
+                )
         else:
             row_requirements = (
                 '4. rows 至少 2 行；每行包含 label、value，并尽量填写 sourceName、publisher、url、note。没有 URL 时不要因为 URL 缺失而放弃，但 note 必须说明页码、表号、统计口径或核验路径。\n'
                 '5. value 只填真实统计数值，单位写在 unit；禁止把变量编号、排序序号、分类编码、变量名称、预测方向写成 value。\n'
                 '6. label 应该是年份、地区、组别、行业、指标项等可解释对象；禁止返回 pgdp、urban、fagri、indstr、edu、internet 等变量代码作为绘图标签。\n'
+            )
+        if artifact_type == 'table' and table_role == 'impact_factors':
+            prompt = f'''请围绕下面论文段落和全文内容，提取适合写入论文“影响因素表”的因素清单。
+
+硬性要求：
+1. 只根据论文全文、候选段落和候选位置建议归纳影响因素，不进行外部数据检索，不新增参考文献。
+2. rows 每行只写一个影响因素，label 使用中文因素名称；value、sourceName、publisher、url、note 留空。
+3. 不要输出数值、变量符号、来源名称、发布机构、URL 或“待核验来源”。
+4. title 必须直接概括该段讨论对象和影响因素，不要只写“影响因素”。
+
+候选位置建议/检索意图：{intent or search_query or target.get('dataNeed') or '未提供'}
+当前建议表题：{target.get('tableTitle') or chart_title_hint or '未提供'}
+所在章节：{target.get('sectionTitle') or '未提供'}
+候选段落：
+{self._truncate_for_prompt(target.get('originalText') or target.get('excerpt'), 1800) or '未提供'}
+
+全文摘录：
+{self._truncate_for_prompt(full_text, 5000) or '未提供'}
+
+返回 JSON：
+{{
+  "artifactType": "table",
+  "tableRole": "impact_factors",
+  "tableKind": "impact_factors",
+  "title": "表格标题",
+  "sourceNote": "已根据论文内容提取影响因素；该表不新增数据来源和参考文献。",
+  "rows": [
+    {{"label": "影响因素名称", "value": "", "sourceName": "", "publisher": "", "url": "", "note": ""}}
+  ],
+  "needsManualData": false,
+  "chartType": "bar",
+  "unit": ""
+}}'''
+            return api.call_json_sync(
+                prompt,
+                system='你是严谨的论文结构化编辑。请只归纳正文影响因素，不做外部数据检索，不新增参考文献。',
+                temperature=0.15,
+                max_tokens=1800,
+                request_timeout=160,
+                schema_name='data_chart_impact_factors',
+                usage_context=self._usage_context('data_chart.search.impact_factors'),
             )
         system = (
             '你是论文数据检索助手。你需要根据论文段落和检索式寻找可用于论文图表的数据，并给出清晰来源。'
@@ -2161,6 +2760,9 @@ AI 建议标题：{(target or {}).get('chartTitle') or (target or {}).get('title
 8. title 必须直接概括数据指标、对象和时间范围，不要使用论文总题目、章节题或“影响因素”这类泛化标题。
 9. 如果提供了“用户上传数据文件摘录”，它只是辅助检索和抽数的材料；可优先从中提取真实数值和来源，但不要要求用户必须上传文件。
 10. 如果找不到完全可靠的连续面板数值，不要只写“请用户补充”；请尽量返回可疑但可核验的候选数值，value 可以先填，note 必须说明“待核验”和核验路径。确实没有任何数值时才让 value 为空。
+11. 如果提供了“AI 数据分析计划 JSON”，必须优先围绕其中的 equation、requiredData、searchGuidance 和 tableKind 搜索数据；不要退回论文总题目泛化检索。
+12. 搜索顺序必须先找 AI 数据分析计划中的参数/系数/检验统计量：如果能直接得到 β0、β1、β2、ε、KMO、特征根、贡献率、回归系数等参数值，必须放入 analysisParameters；找不到时保留空值，不要把“用户填入计算值”当成值。
+13. 对 model_index，应返回年度/样本单位与正文变量符号的观测值，便于用户代入方程；对 variable_analysis，应按计划返回总方差解释、相关矩阵、描述性统计或回归结果所需的数值。
 {feedback}
 
 论文段落：
@@ -2170,6 +2772,12 @@ AI 建议标题：{(target or {}).get('chartTitle') or (target or {}).get('title
 候选位置黑色建议/检索意图：{intent or '未提供'}
 建议图题/表题：{title_hint or '未提供'}
 候选类型：{"插表" if artifact_type == "table" else "插图"}
+表格功能角色：{table_role if artifact_type == "table" else '非表格'}
+建议 tableKind：{role_table_kind if artifact_type == "table" else '非表格'}
+正文变量符号定义 JSON：
+{variable_definition_note}
+AI 数据分析计划 JSON：
+{analysis_note}
 检索方向：{search_query or '未提供'}
 全文上下文：
 {self._truncate_for_prompt(full_text, 6000)}
@@ -2185,7 +2793,8 @@ AI 建议标题：{(target or {}).get('chartTitle') or (target or {}).get('title
   "needsManualData": false,
   "unit": "%",
   "chartType": "line|bar|pie",
-  "tableKind": "numeric|correlation|regression|descriptive|definition|source|test_result",
+  "tableRole": "impact_factors|model_index|variable_analysis|evidence_data",
+  "tableKind": "impact_factors|numeric|correlation|regression|descriptive|test_result",
   "title": "图表标题",
   "sourceNote": "数据来源审核说明",
   "rows": [
@@ -2193,6 +2802,7 @@ AI 建议标题：{(target or {}).get('chartTitle') or (target or {}).get('title
       "label": "2021年",
       "year": "2021",
       "variable": "指标或变量名",
+      "symbol": "变量符号",
       "statType": "",
       "relatedVariable": "",
       "value": 12.5,
@@ -2200,6 +2810,17 @@ AI 建议标题：{(target or {}).get('chartTitle') or (target or {}).get('title
       "publisher": "发布机构",
       "url": "https://...",
       "note": "页码、表号、统计口径或核验说明"
+    }}
+  ],
+  "analysisParameters": [
+    {{
+      "name": "β1",
+      "meaning": "X 对 Y 的边际影响",
+      "value": "0.123",
+      "sourceName": "参数值来源报告/论文/用户上传文件",
+      "publisher": "发布机构",
+      "url": "https://...",
+      "note": "页码、表号、模型设定、待核验说明；若未找到值则 value 为空"
     }}
   ],
   "manualHint": "如果需要用户补充，写明应补充什么"
@@ -2214,10 +2835,15 @@ AI 建议标题：{(target or {}).get('chartTitle') or (target or {}).get('title
             usage_context=self._usage_context('data_chart.search.retry' if quality_feedback else 'data_chart.search'),
         )
 
-    def search_data(self, *, query='', target=None, full_text='', user_data='', data_file=None):
+    def search_data(self, *, query='', target=None, full_text='', user_data='', data_file=None, analysis_plan=None, analysis_parameters=None):
         if user_data and self._normalize_text(user_data):
             artifact_type = self._normalize_artifact_type((target or {}).get('artifactType') or (target or {}).get('insertType'))
+            table_role = self._normalize_table_role((target or {}).get('tableRole') or (target or {}).get('role'), f'{(target or {}).get("reason", "")} {(target or {}).get("intent", "")} {(target or {}).get("dataNeed", "")} {(target or {}).get("tableTitle", "")} {query}')
+            if artifact_type == 'table':
+                target = {**(target or {}), 'tableRole': table_role, 'tableKind': self._table_kind_for_role(table_role, (target or {}).get('tableKind'))}
             rows = self.parse_data_table(user_data, require_numeric=artifact_type != 'table')
+            if artifact_type == 'table':
+                rows = self._apply_article_variable_symbols(rows, target, user_data)
             title_seed = (target or {}).get('tableTitle') or (target or {}).get('chartTitle') or query
             title = (
                 self._normalize_table_title(title_seed, rows, target or {})
@@ -2228,6 +2854,7 @@ AI 建议标题：{(target or {}).get('chartTitle') or (target or {}).get('title
             table_kind = self._preferred_table_kind(rows, title, target or {}) if artifact_type == 'table' else 'numeric'
             return {
                 'artifactType': artifact_type,
+                'tableRole': table_role if artifact_type == 'table' else '',
                 'tableKind': table_kind,
                 'tableText': self._format_table(rows),
                 'sourceNote': '已使用用户提供的数据表；生成图表前仍建议核对来源与单位。',
@@ -2235,6 +2862,7 @@ AI 建议标题：{(target or {}).get('chartTitle') or (target or {}).get('title
                 'dataRows': self._public_rows(rows),
                 'dataSources': self._collect_row_sources(rows),
                 'sourceItems': self._build_source_items(rows, []),
+                'analysisParameters': self._merge_analysis_parameters(analysis_parameters, {}, rows),
                 'needsManualData': False,
                 'title': title,
                 'chartType': chart_type,
@@ -2244,6 +2872,24 @@ AI 建议标题：{(target or {}).get('chartTitle') or (target or {}).get('title
         api = self._require_ai('data_chart.search')
         target = target or {}
         artifact_type = self._normalize_artifact_type(target.get('artifactType') or target.get('insertType'))
+        table_role = self._normalize_table_role(target.get('tableRole') or target.get('role'), f'{target.get("reason", "")} {target.get("intent", "")} {target.get("dataNeed", "")} {target.get("tableTitle", "")} {query}')
+        if artifact_type == 'table':
+            target = {**target, 'tableRole': table_role, 'tableKind': self._table_kind_for_role(table_role, target.get('tableKind'))}
+        analysis_plan = analysis_plan if isinstance(analysis_plan, dict) else target.get('analysisPlan')
+        analysis_parameters = analysis_parameters if isinstance(analysis_parameters, list) else target.get('analysisParameters')
+        normalized_analysis_plan = (
+            self._normalize_analysis_plan_payload(analysis_plan, target, table_role)
+            if isinstance(analysis_plan, dict) and analysis_plan
+            else None
+        )
+        if normalized_analysis_plan:
+            target = {
+                **target,
+                'analysisPlan': normalized_analysis_plan,
+                'analysisParameters': analysis_parameters if isinstance(analysis_parameters, list) else [],
+            }
+            if artifact_type == 'table':
+                target['tableKind'] = self._table_kind_for_role(table_role, normalized_analysis_plan.get('tableKind') or target.get('tableKind'))
         uploaded_data_note = self._decode_data_file_text(data_file)
         uploaded_rows = []
         if uploaded_data_note:
@@ -2254,18 +2900,29 @@ AI 建议标题：{(target or {}).get('chartTitle') or (target or {}).get('title
         intent = str(target.get('intent') or target.get('suggestion') or target.get('reason') or '').strip()
         target_title_hint = self._target_title_hint(target)
         query_parts = []
-        for part in (intent, query, target.get('query'), target.get('dataNeed')):
+        plan_required = ' '.join((normalized_analysis_plan or {}).get('requiredData') or [])
+        plan_search = (normalized_analysis_plan or {}).get('searchGuidance') or ''
+        plan_equation = (normalized_analysis_plan or {}).get('equation') or ''
+        plan_parameters_text = ' '.join(
+            ' '.join(str(parameter.get(field, '') or '') for field in ('name', 'meaning'))
+            for parameter in (analysis_parameters if isinstance(analysis_parameters, list) else [])
+            if isinstance(parameter, dict)
+        )
+        for part in (plan_parameters_text, plan_search, plan_required, plan_equation, intent, query, target.get('query'), target.get('dataNeed')):
             text = str(part or '').strip()
             if text and text not in query_parts:
                 query_parts.append(text)
         search_query = ' '.join(query_parts)
-        chart_title_hint = str(target_title_hint or target.get('tableTitle') or target.get('chartTitle') or '').strip()
-        evidence_query = ' '.join(part for part in (intent, search_query, chart_title_hint, target.get('dataNeed')) if part).strip()
+        chart_title_hint = str((normalized_analysis_plan or {}).get('title') or target_title_hint or target.get('tableTitle') or target.get('chartTitle') or '').strip()
+        evidence_query = ' '.join(part for part in (plan_parameters_text, plan_search, plan_required, intent, search_query, chart_title_hint, target.get('dataNeed')) if part).strip()
         evidence_query = evidence_query or target.get('sectionTitle')
         if chart_title_hint and chart_title_hint not in evidence_query:
             evidence_query = f'{chart_title_hint} {evidence_query}'
-        evidence = self._collect_search_evidence(evidence_query, limit=5, page_limit=1)
-        if not evidence:
+        if artifact_type == 'table' and table_role == 'impact_factors':
+            evidence = []
+        else:
+            evidence = self._collect_search_evidence(evidence_query, limit=5, page_limit=1)
+        if not evidence and not (artifact_type == 'table' and table_role == 'impact_factors'):
             fallback_evidence = []
             seen_urls = set()
             for term in self._target_indicator_terms(target, search_query)[:5]:
@@ -2292,6 +2949,8 @@ AI 建议标题：{(target or {}).get('chartTitle') or (target or {}).get('title
                 'note': '从论文全文已有表述中自动抽取，需核验原文数据来源。',
             }, target=target, query=search_query, limit=12),
         ])
+        if artifact_type == 'table':
+            locally_extracted_rows = self._apply_article_variable_symbols(locally_extracted_rows, target, full_text)
         min_numeric_rows = 1 if artifact_type == 'table' else 2
         try:
             payload = self._request_search_payload(
@@ -2303,8 +2962,29 @@ AI 建议标题：{(target or {}).get('chartTitle') or (target or {}).get('title
                 full_text=full_text,
                 evidence_note=evidence_note,
                 uploaded_data_note=uploaded_data_note,
+                analysis_plan=normalized_analysis_plan,
+                analysis_parameters=analysis_parameters,
             )
         except Exception as exc:
+            if artifact_type == 'table' and table_role == 'impact_factors':
+                fallback_rows = self._fallback_impact_factor_rows(target, search_query)
+                title = self._normalize_table_title(chart_title_hint or query, fallback_rows, target)
+                return {
+                    'artifactType': artifact_type,
+                    'tableRole': table_role,
+                    'tableKind': 'impact_factors',
+                    'tableText': self._format_table(fallback_rows),
+                    'sourceNote': f'AI 提取影响因素时未返回：{exc}。已先根据候选位置整理可编辑因素清单；该表不新增数据来源和参考文献。',
+                    'foundRows': len(fallback_rows),
+                    'dataRows': self._public_rows(fallback_rows),
+                    'dataSources': [],
+                    'sourceItems': [],
+                    'needsManualData': False,
+                    'sourceRisk': False,
+                    'chartType': 'bar',
+                    'title': title,
+                    'unit': '',
+                }
             if len(locally_extracted_rows) >= min_numeric_rows:
                 title = (
                     self._normalize_table_title(chart_title_hint or query, locally_extracted_rows, target)
@@ -2313,6 +2993,7 @@ AI 建议标题：{(target or {}).get('chartTitle') or (target or {}).get('title
                 )
                 return {
                     'artifactType': artifact_type,
+                    'tableRole': table_role if artifact_type == 'table' else '',
                     'tableKind': self._preferred_table_kind(locally_extracted_rows, title, target) if artifact_type == 'table' else 'numeric',
                     'tableText': self._format_table(locally_extracted_rows),
                     'sourceNote': f'AI 整理数据时未返回：{exc}。已先使用本地抽取到的数值，请核验来源、口径和年份后再生成图表。',
@@ -2320,6 +3001,7 @@ AI 建议标题：{(target or {}).get('chartTitle') or (target or {}).get('title
                     'dataRows': self._public_rows(locally_extracted_rows),
                     'dataSources': self._collect_row_sources(locally_extracted_rows),
                     'sourceItems': self._build_source_items(locally_extracted_rows, evidence),
+                    'analysisParameters': self._merge_analysis_parameters(analysis_parameters, {}, locally_extracted_rows),
                     'needsManualData': False,
                     'sourceRisk': True,
                     'chartType': self._choose_chart_type(target.get('chartType'), locally_extracted_rows, target),
@@ -2334,6 +3016,7 @@ AI 建议标题：{(target or {}).get('chartTitle') or (target or {}).get('title
             )
             return {
                 'artifactType': artifact_type,
+                'tableRole': table_role if artifact_type == 'table' else '',
                 'tableKind': self._preferred_table_kind(fallback_rows, title, target) if artifact_type == 'table' else 'source',
                 'tableText': self._format_table(fallback_rows) if fallback_rows else '',
                 'sourceNote': (
@@ -2346,6 +3029,7 @@ AI 建议标题：{(target or {}).get('chartTitle') or (target or {}).get('title
                 'dataRows': self._public_rows(fallback_rows),
                 'dataSources': self._collect_evidence_sources(evidence),
                 'sourceItems': self._build_source_items(fallback_rows, evidence),
+                'analysisParameters': self._merge_analysis_parameters(analysis_parameters, {}, fallback_rows),
                 'needsManualData': True,
                 'sourceRisk': True,
                 'chartType': self._choose_chart_type(target.get('chartType'), [], target),
@@ -2358,22 +3042,32 @@ AI 建议标题：{(target or {}).get('chartTitle') or (target or {}).get('title
             if artifact_type != 'table'
             else self._coerce_ai_table_rows(raw_payload_rows)
         )
+        if artifact_type == 'table':
+            rows = self._apply_article_variable_symbols(rows, target, full_text)
+        updated_analysis_parameters = self._merge_analysis_parameters(analysis_parameters, payload, rows)
         payload_table_kind = str((payload or {}).get('tableKind') or '').strip().lower()
+        payload_table_role = self._normalize_table_role((payload or {}).get('tableRole') or table_role, f'{chart_title_hint} {search_query}')
+        table_role = payload_table_role if artifact_type == 'table' else table_role
         if artifact_type == 'table' and payload_table_kind:
-            target = {**target, 'tableKind': payload_table_kind}
+            target = {**target, 'tableRole': payload_table_role, 'tableKind': self._table_kind_for_role(payload_table_role, payload_table_kind)}
         rows_are_empty_value_table = (
             artifact_type == 'table'
             and rows
             and not any(row.get('value') is not None for row in rows)
             and self._table_kind(rows, chart_title_hint, target) in {'numeric', 'source'}
         )
-        if (len(rows) < min_numeric_rows or rows_are_empty_value_table) and len(locally_extracted_rows) >= min_numeric_rows:
+        if (
+            not (artifact_type == 'table' and table_role == 'impact_factors')
+            and (len(rows) < min_numeric_rows or rows_are_empty_value_table)
+            and len(locally_extracted_rows) >= min_numeric_rows
+        ):
             rows = locally_extracted_rows
             payload = {
                 **(payload if isinstance(payload, dict) else {}),
                 'sourceNote': '已从网页证据、上传文件或论文全文中自动识别出候选数值；请核验来源、口径和年份后再生成图表。',
                 'needsManualData': False,
             }
+            updated_analysis_parameters = self._merge_analysis_parameters(analysis_parameters, payload, rows)
         quality_issue = '' if artifact_type == 'table' else self._data_quality_issue(rows, target=target, payload=payload)
         if quality_issue and len(locally_extracted_rows) >= min_numeric_rows:
             local_issue = self._data_quality_issue(locally_extracted_rows, target=target, payload=payload)
@@ -2384,6 +3078,7 @@ AI 建议标题：{(target or {}).get('chartTitle') or (target or {}).get('title
                     'sourceNote': f'AI 返回数据质量不合格，已改用本地抽取到的数值。原问题：{quality_issue} 请核验来源、口径和年份后再生成图表。',
                     'needsManualData': False,
                 }
+                updated_analysis_parameters = self._merge_analysis_parameters(analysis_parameters, payload, rows)
                 quality_issue = ''
         if quality_issue and not bool((payload or {}).get('needsManualData')):
             retry_payload = self._request_search_payload(
@@ -2396,6 +3091,8 @@ AI 建议标题：{(target or {}).get('chartTitle') or (target or {}).get('title
                 evidence_note=evidence_note,
                 uploaded_data_note=uploaded_data_note,
                 quality_feedback=quality_issue,
+                analysis_plan=normalized_analysis_plan,
+                analysis_parameters=analysis_parameters,
             )
             retry_raw_rows = retry_payload.get('rows', []) if isinstance(retry_payload, dict) else []
             retry_rows = (
@@ -2403,11 +3100,14 @@ AI 建议标题：{(target or {}).get('chartTitle') or (target or {}).get('title
                 if artifact_type != 'table'
                 else self._coerce_ai_table_rows(retry_raw_rows)
             )
+            if artifact_type == 'table':
+                retry_rows = self._apply_article_variable_symbols(retry_rows, target, full_text)
             retry_issue = '' if artifact_type == 'table' else self._data_quality_issue(retry_rows, target=target, payload=retry_payload)
             min_retry_rows = 1 if artifact_type == 'table' else 2
             if not retry_issue and (len(retry_rows) >= min_retry_rows or len(retry_rows) >= len(rows)):
                 payload = retry_payload
                 rows = retry_rows
+                updated_analysis_parameters = self._merge_analysis_parameters(analysis_parameters, payload, rows)
                 quality_issue = ''
             elif len(locally_extracted_rows) >= min_numeric_rows:
                 local_issue = self._data_quality_issue(locally_extracted_rows, target=target, payload=retry_payload)
@@ -2418,8 +3118,11 @@ AI 建议标题：{(target or {}).get('chartTitle') or (target or {}).get('title
                         'needsManualData': False,
                     }
                     rows = locally_extracted_rows
+                    updated_analysis_parameters = self._merge_analysis_parameters(analysis_parameters, payload, rows)
                     quality_issue = ''
         source_warning = bool(rows) and not self._rows_have_verifiable_sources(rows)
+        if artifact_type == 'table' and table_role == 'impact_factors':
+            source_warning = False
         model_needs_manual = bool((payload or {}).get('needsManualData'))
         needs_manual = (
             bool(quality_issue)
@@ -2428,6 +3131,26 @@ AI 建议标题：{(target or {}).get('chartTitle') or (target or {}).get('title
         )
         evidence_sources = self._collect_evidence_sources(evidence)
         if needs_manual:
+            if artifact_type == 'table' and table_role == 'impact_factors':
+                fallback_rows = rows or self._fallback_impact_factor_rows(target, search_query)
+                result_title = self._normalize_table_title((payload or {}).get('title') or chart_title_hint, fallback_rows, target)
+                return {
+                    'artifactType': artifact_type,
+                    'tableRole': table_role,
+                    'tableKind': 'impact_factors',
+                    'tableText': self._format_table(fallback_rows) if fallback_rows else '',
+                    'sourceNote': str((payload or {}).get('sourceNote') or '已根据论文内容提取影响因素；该表不新增数据来源和参考文献。'),
+                    'foundRows': len(fallback_rows),
+                    'sourceCandidateRows': 0,
+                    'dataRows': self._public_rows(fallback_rows),
+                    'dataSources': [],
+                    'sourceItems': [],
+                    'needsManualData': False,
+                    'sourceRisk': False,
+                    'chartType': 'bar',
+                    'title': result_title,
+                    'unit': '',
+                }
             source_note = str((payload or {}).get('manualHint') or (payload or {}).get('sourceNote') or '').strip()
             if quality_issue:
                 source_note = f'{quality_issue} 请重新检索真实统计数据，或在下方手动录入已核验的数值、来源名称、发布机构、链接/页码。'
@@ -2450,6 +3173,7 @@ AI 建议标题：{(target or {}).get('chartTitle') or (target or {}).get('title
             )
             return {
                 'artifactType': artifact_type,
+                'tableRole': table_role if artifact_type == 'table' else '',
                 'tableKind': self._preferred_table_kind(result_rows, result_title, target) if artifact_type == 'table' else 'source',
                 'tableText': '' if quality_issue else (self._format_table(rows or fallback_rows) if (rows or fallback_rows) else ''),
                 'sourceNote': source_note,
@@ -2458,13 +3182,18 @@ AI 建议标题：{(target or {}).get('chartTitle') or (target or {}).get('title
                 'dataRows': public_rows,
                 'dataSources': evidence_sources,
                 'sourceItems': self._build_source_items([] if quality_issue else (rows or fallback_rows), evidence),
+                'analysisParameters': updated_analysis_parameters,
                 'needsManualData': True,
                 'sourceRisk': bool(fallback_rows),
                 'chartType': self._choose_chart_type((payload or {}).get('chartType') or target.get('chartType'), rows, target),
                 'title': result_title,
                 'unit': str((payload or {}).get('unit') or '').strip(),
             }
-        source_note = str((payload or {}).get('sourceNote') or 'AI 已整理数据来源；请用户核验来源、口径和年份后再生成图表。')
+        source_note = str((payload or {}).get('sourceNote') or (
+            '已根据论文内容提取影响因素；该表不新增数据来源和参考文献。'
+            if artifact_type == 'table' and table_role == 'impact_factors'
+            else 'AI 已整理数据来源；请用户核验来源、口径和年份后再生成图表。'
+        ))
         if model_needs_manual:
             source_note = source_note or str((payload or {}).get('manualHint') or '').strip()
             if '审核' not in source_note and '核验' not in source_note:
@@ -2479,13 +3208,15 @@ AI 建议标题：{(target or {}).get('chartTitle') or (target or {}).get('title
         )
         return {
             'artifactType': artifact_type,
+            'tableRole': table_role if artifact_type == 'table' else '',
             'tableKind': self._preferred_table_kind(rows, result_title, target) if artifact_type == 'table' else 'numeric',
             'tableText': self._format_table(rows),
             'sourceNote': source_note,
             'foundRows': len(rows),
             'dataRows': self._public_rows(rows),
-            'dataSources': self._merge_sources(self._collect_row_sources(rows), evidence_sources),
-            'sourceItems': self._build_source_items(rows, evidence),
+            'dataSources': [] if artifact_type == 'table' and table_role == 'impact_factors' else self._merge_sources(self._collect_row_sources(rows), evidence_sources),
+            'sourceItems': [] if artifact_type == 'table' and table_role == 'impact_factors' else self._build_source_items(rows, evidence),
+            'analysisParameters': updated_analysis_parameters,
             'needsManualData': False,
             'sourceRisk': source_warning or model_needs_manual,
             'chartType': self._choose_chart_type((payload or {}).get('chartType') or target.get('chartType'), rows, target),
@@ -2656,6 +3387,8 @@ AI 建议标题：{(target or {}).get('chartTitle') or (target or {}).get('title
         unit = str(unit or '').strip()
         artifact_type = self._normalize_artifact_type(target.get('artifactType') or target.get('insertType'))
         rows = self.parse_data_table(table_text, require_numeric=artifact_type != 'table')
+        if artifact_type == 'table':
+            rows = self._apply_article_variable_symbols(rows, target, table_text)
         title, chart_type = self._resolve_chart_metadata(rows, target, title, unit, chart_type)
         if artifact_type == 'table':
             return self._generate_table_result(rows, target=target, title=title, unit=unit, chart_type=chart_type)
@@ -2685,17 +3418,81 @@ AI 建议标题：{(target or {}).get('chartTitle') or (target or {}).get('title
             'referenceEntries': reference_entries,
         }
 
+    def preview_chart(self, *, table_text='', chart_type='bar', title='', unit='', target=None):
+        target = target or {}
+        unit = str(unit or '').strip()
+        artifact_type = self._normalize_artifact_type(target.get('artifactType') or target.get('insertType'))
+        rows = self.parse_data_table(table_text, require_numeric=artifact_type != 'table')
+        title_seed = title or target.get('tableTitle') or target.get('chartTitle') or target.get('title') or target.get('dataNeed') or ''
+        if artifact_type == 'table':
+            rows = self._apply_article_variable_symbols(rows, target, table_text)
+            caption = self._build_table_caption(self._normalize_table_title(title_seed, rows, target))
+            table_label = self._target_artifact_label(target, 'table')
+            rows = self._sanitize_variable_table_rows(rows, caption, target)
+            table_role = self._normalize_table_role(target.get('tableRole') or target.get('role'), self._table_context_text(caption, target))
+            table_kind = self._public_table_kind(rows, caption, target)
+            table_markdown = self._build_table_markdown(rows, caption, unit, table_label=table_label, target=target)
+            return {
+                'previewOnly': True,
+                'artifactType': 'table',
+                'tableRole': table_role,
+                'tableKind': table_kind,
+                'artifactLabel': table_label,
+                'table': {
+                    'title': caption,
+                    'caption': caption,
+                    'unit': unit,
+                    'rows': rows,
+                    'tableKind': table_kind,
+                },
+                'chart': None,
+                'replacementText': '',
+                'tableMarkdown': table_markdown,
+                'sectionTitle': target.get('sectionTitle', '') if isinstance(target, dict) else '',
+                'originalText': target.get('originalText', '') if isinstance(target, dict) else '',
+                'summary': self._chart_summary(rows, unit),
+                'referenceEntries': [],
+            }
+        title = self._normalize_chart_title(title_seed, rows, target)
+        chart_type = self._choose_chart_type(chart_type, rows, target)
+        image = self._render_chart(rows, chart_type=chart_type, title=title, unit=unit)
+        data_url = self._image_to_data_url(image)
+        caption = self._build_caption(rows, chart_type, title, unit)
+        figure_label = self._target_artifact_label(target, 'figure')
+        figure_markdown = f'![{title}]({data_url})\n\n{figure_label} {caption}'
+        return {
+            'previewOnly': True,
+            'chart': {
+                'dataUrl': data_url,
+                'title': title,
+                'caption': caption,
+                'chartType': chart_type,
+                'unit': unit,
+                'rows': rows,
+            },
+            'replacementText': '',
+            'figureMarkdown': figure_markdown,
+            'artifactType': 'figure',
+            'artifactLabel': figure_label,
+            'sectionTitle': target.get('sectionTitle', '') if isinstance(target, dict) else '',
+            'originalText': target.get('originalText', '') if isinstance(target, dict) else '',
+            'summary': self._chart_summary(rows, unit),
+            'referenceEntries': [],
+        }
+
     def _generate_table_result(self, rows, *, target=None, title='', unit='', chart_type='bar'):
         target = target or {}
         caption = self._build_table_caption(title)
         table_label = self._target_artifact_label(target, 'table')
         rows = self._sanitize_variable_table_rows(rows, caption, target)
+        table_role = self._normalize_table_role(target.get('tableRole') or target.get('role'), self._table_context_text(caption, target))
         table_markdown = self._build_table_markdown(rows, caption, unit, table_label=table_label, target=target)
         replacement = self._build_table_replacement_text(target, caption, table_markdown, rows=rows, unit=unit, table_label=table_label)
-        reference_entries = self._reference_entries_from_rows(rows)
+        reference_entries = [] if table_role == 'impact_factors' else self._reference_entries_from_rows(rows)
         table_kind = self._public_table_kind(rows, caption, target)
         return {
             'artifactType': 'table',
+            'tableRole': table_role,
             'tableKind': table_kind,
             'artifactLabel': table_label,
             'table': {
@@ -2995,6 +3792,18 @@ AI 建议标题：{(target or {}).get('chartTitle') or (target or {}).get('title
     @classmethod
     def _build_table_analysis_paragraph(cls, rows, unit='', title='', table_label='表1'):
         kind = cls._table_kind(rows, title, {})
+        if kind == 'impact_factors' or '影响因素' in str(title or ''):
+            factors = [
+                cls._compact_table_cell(cls._label_without_variable_symbol(row.get('label', '')), 28)
+                for row in rows or []
+                if cls._compact_table_cell(cls._label_without_variable_symbol(row.get('label', '')), 28)
+            ]
+            factor_text = '、'.join(dict.fromkeys(factors[:6]))
+            label = table_label or '表1'
+            title_part = f'{label}所列的“{title}”' if title else f'{label}所列内容'
+            if factor_text:
+                return f'根据{title_part}，相关影响因素主要包括{factor_text}等方面，这些因素共同构成该问题的分析框架。'
+            return f'根据{title_part}，该表对相关影响因素进行了结构化归纳，为后续论证提供分析框架。'
         analysis = cls._table_stat_summary(rows, kind) if kind in {'correlation', 'regression', 'descriptive', 'test_result'} else cls._chart_analysis(rows, unit)
         label = table_label or '表1'
         title_part = f'{label}所列的“{title}”' if title else f'{label}所列数据'
@@ -3218,6 +4027,12 @@ AI 建议标题：{(target or {}).get('chartTitle') or (target or {}).get('title
             '数据': 'numeric',
             '原始数据': 'numeric',
             '年度数据': 'numeric',
+            'impact': 'impact_factors',
+            'impactfactors': 'impact_factors',
+            'impactfactor': 'impact_factors',
+            'influencefactors': 'impact_factors',
+            '影响因素': 'impact_factors',
+            '影响因素表': 'impact_factors',
             'definition': 'definition',
             'variabledefinition': 'definition',
             '变量定义': 'definition',
@@ -3301,6 +4116,19 @@ AI 建议标题：{(target or {}).get('chartTitle') or (target or {}).get('title
             'corr': 'correlation',
             '相关系数': 'correlation',
             '相关性': 'correlation',
+            'eigenvalue': 'eigenvalue',
+            'eigen': 'eigenvalue',
+            '特征根': 'eigenvalue',
+            'variancecontribution': 'contributionRate',
+            'contributionrate': 'contributionRate',
+            'variancerate': 'contributionRate',
+            '因子贡献率': 'contributionRate',
+            '贡献率': 'contributionRate',
+            'cumulativecontribution': 'cumulativeRate',
+            'cumulativerate': 'cumulativeRate',
+            'cumcontribution': 'cumulativeRate',
+            '累计贡献率': 'cumulativeRate',
+            '累计方差贡献率': 'cumulativeRate',
         }
         return aliases.get(text, '')
 
@@ -3325,6 +4153,11 @@ AI 建议标题：{(target or {}).get('chartTitle') or (target or {}).get('title
             ('平均值', 'mean'),
             ('最小值', 'min'),
             ('最大值', 'max'),
+            ('累计方差贡献率', 'cumulativeRate'),
+            ('累计贡献率', 'cumulativeRate'),
+            ('因子贡献率', 'contributionRate'),
+            ('贡献率', 'contributionRate'),
+            ('特征根', 'eigenvalue'),
             ('系数', 'coefficient'),
         )
         for suffix, stat in suffixes:
@@ -3351,6 +4184,7 @@ AI 建议标题：{(target or {}).get('chartTitle') or (target or {}).get('title
             '相关系数', '回归系数', '估计系数', '标准误差', '标准误', '标准差',
             't统计量', 't值', 'P值', 'p值', '显著性', '样本量', '观测数',
             '均值', '平均值', '最小值', '最大值', '系数',
+            '累计方差贡献率', '累计贡献率', '因子贡献率', '贡献率', '特征根',
         ):
             if text.endswith(suffix):
                 return text[:-len(suffix)]
@@ -3396,9 +4230,162 @@ AI 建议标题：{(target or {}).get('chartTitle') or (target or {}).get('title
             return cls._compact_table_cell(parts[1], 24)
         return ''
 
+    @staticmethod
+    def _clean_variable_symbol(value):
+        text = re.sub(r'\s+', '', str(value or '').strip())
+        text = text.replace('-', '_').replace('－', '_')
+        if re.fullmatch(r'[A-Za-z][A-Za-z0-9_]{0,18}', text):
+            return text
+        if re.fullmatch(r'[A-Za-z][A-Za-z0-9_]{0,8}[\u4e00-\u9fff]{1,4}', text):
+            return text
+        return ''
+
+    @staticmethod
+    def _normalize_variable_meaning(value):
+        text = re.sub(r'\s+', '', str(value or '').strip())
+        text = re.sub(r'^(?:变量|指标|被解释变量|解释变量|核心解释变量|控制变量)', '', text)
+        text = text.strip('：:，,。.;；（）()[]【】')
+        return text[:40]
+
+    @classmethod
+    def _variable_definitions_from_text(cls, text, limit=80):
+        normalized = cls._normalize_text(text)
+        if not normalized:
+            return []
+        records = []
+        seen = set()
+
+        def add(symbol, meaning):
+            symbol = cls._clean_variable_symbol(symbol)
+            meaning = cls._normalize_variable_meaning(meaning)
+            if not symbol or not meaning:
+                return
+            if re.fullmatch(r'\d+(?:\.\d+)?', meaning):
+                return
+            if len(meaning) < 2 or not re.search(r'[\u4e00-\u9fffA-Za-z]', meaning):
+                return
+            key = (symbol, meaning)
+            if key in seen:
+                return
+            seen.add(key)
+            records.append({'symbol': symbol, 'meaning': meaning})
+
+        symbol = r'([A-Za-z][A-Za-z0-9_\u4e00-\u9fff]{0,18})'
+        meaning = r'([\u4e00-\u9fffA-Za-z0-9（）()、]{2,42})'
+        patterns = [
+            rf'{meaning}[（(]\s*{symbol}\s*[）)]',
+            rf'{meaning}(?:记为|表示为|定义为|用|以)\s*{symbol}',
+            rf'{symbol}\s*(?:表示|代表|反映|衡量|为)\s*{meaning}',
+        ]
+        for pattern in patterns:
+            for match in re.finditer(pattern, normalized):
+                groups = match.groups()
+                if len(groups) != 2:
+                    continue
+                if cls._clean_variable_symbol(groups[0]):
+                    add(groups[0], groups[1])
+                else:
+                    add(groups[1], groups[0])
+                if len(records) >= limit:
+                    return records
+        return records
+
+    @classmethod
+    def _variable_definition_context(cls, target=None, extra_text=''):
+        target = target or {}
+        parts = [
+            extra_text,
+            target.get('variableDefinitionContext', '') if isinstance(target, dict) else '',
+            target.get('fullText', '') if isinstance(target, dict) else '',
+            target.get('originalText', '') if isinstance(target, dict) else '',
+            target.get('excerpt', '') if isinstance(target, dict) else '',
+            target.get('dataNeed', '') if isinstance(target, dict) else '',
+            target.get('intent', '') if isinstance(target, dict) else '',
+            target.get('reason', '') if isinstance(target, dict) else '',
+        ]
+        return '\n'.join(str(part or '') for part in parts if str(part or '').strip())
+
+    @classmethod
+    def _apply_article_variable_symbols(cls, rows, target=None, extra_text=''):
+        role = cls._normalize_table_role((target or {}).get('tableRole', '') if isinstance(target, dict) else '', cls._table_context_text('', target))
+        if role == 'impact_factors':
+            return rows or []
+        definitions = cls._variable_definitions_from_text(cls._variable_definition_context(target, extra_text))
+        if not definitions:
+            return rows or []
+        result = []
+        for row in rows or []:
+            item = dict(row)
+            haystack = cls._normalize_variable_meaning(' '.join(str(item.get(field, '') or '') for field in ('label', 'variable', 'measure', 'note')))
+            current_symbol = cls._clean_variable_symbol(item.get('symbol') or item.get('variable'))
+            current_is_defined = any(current_symbol and current_symbol == definition['symbol'] for definition in definitions)
+            if not current_is_defined:
+                matched = None
+                for definition in definitions:
+                    meaning = definition['meaning']
+                    if meaning and (meaning in haystack or haystack in meaning):
+                        matched = definition
+                        break
+                if matched:
+                    item['symbol'] = matched['symbol']
+                    item['variable'] = matched['symbol']
+                    item['variableMeaning'] = matched['meaning']
+            result.append(item)
+        return result
+
+    @classmethod
+    def _symbol_from_row(cls, row):
+        for field in ('symbol', 'variable', 'relatedVariable', 'relatedLabel'):
+            symbol = cls._clean_variable_symbol(row.get(field, ''))
+            if symbol:
+                return symbol
+        label_symbol = cls._variable_symbol_from_label(row.get('label', ''))
+        return cls._clean_variable_symbol(label_symbol)
+
+    @classmethod
+    def _symbolic_variable_map(cls, rows, role='evidence_data'):
+        mapping = {}
+        used = set()
+        counter = 1
+        prefix = 'F' if role == 'variable_analysis' else 'X'
+        for row in rows or []:
+            for name in (cls._row_variable_name(row), cls._row_related_variable(row)):
+                key = re.sub(r'\s+', '', str(name or '').strip())
+                if not key or key in mapping:
+                    continue
+                symbol = cls._clean_variable_symbol(name)
+                if not symbol and key == re.sub(r'\s+', '', str(row.get('variable', '') or '').strip()):
+                    symbol = cls._clean_variable_symbol(row.get('symbol', ''))
+                if not symbol or symbol in used:
+                    symbol = f'{prefix}{counter}'
+                    counter += 1
+                    while symbol in used:
+                        symbol = f'{prefix}{counter}'
+                        counter += 1
+                mapping[key] = symbol
+                used.add(symbol)
+        return mapping
+
+    @classmethod
+    def _symbolic_name(cls, value, symbol_map, fallback_prefix='X'):
+        key = re.sub(r'\s+', '', str(value or '').strip())
+        if not key:
+            return ''
+        direct = cls._clean_variable_symbol(key)
+        if direct:
+            return direct
+        if key in symbol_map:
+            return symbol_map[key]
+        return f'{fallback_prefix}{len(symbol_map) + 1}'
+
     @classmethod
     def _table_kind_hint(cls, rows, title='', target=None):
         explicit = cls._normalize_table_kind((target or {}).get('tableKind', '') if isinstance(target, dict) else '')
+        role = cls._normalize_table_role((target or {}).get('tableRole', '') if isinstance(target, dict) else '', cls._table_context_text(title, target))
+        if role == 'impact_factors':
+            return 'impact_factors'
+        if role == 'model_index':
+            return 'numeric'
         if explicit:
             if explicit in {'definition', 'source'}:
                 context = cls._table_context_text(title, target)
@@ -3413,6 +4400,8 @@ AI 建议标题：{(target or {}).get('chartTitle') or (target or {}).get('title
         if re.search(r'描述性统计|描述统计|描述性分析|样本统计|均值|标准差|最大值|最小值|方差', context, flags=re.IGNORECASE):
             return 'descriptive'
         if re.search(r'KMO|Bartlett|因子载荷|检验结果|贡献率|主成分', context, flags=re.IGNORECASE):
+            return 'test_result'
+        if role == 'variable_analysis':
             return 'test_result'
         if cls._context_requests_numeric_table(context):
             return 'numeric'
@@ -3443,7 +4432,7 @@ AI 建议标题：{(target or {}).get('chartTitle') or (target or {}).get('title
     @classmethod
     def _public_table_kind(cls, rows, title='', target=None):
         kind = cls._table_kind(rows, title, target)
-        return kind if kind in {'definition', 'numeric', 'source', 'descriptive', 'correlation', 'regression', 'test_result'} else 'numeric'
+        return kind if kind in {'impact_factors', 'definition', 'numeric', 'source', 'descriptive', 'correlation', 'regression', 'test_result'} else 'numeric'
 
     @classmethod
     def _preferred_table_kind(cls, rows=None, title='', target=None):
@@ -3487,7 +4476,8 @@ AI 建议标题：{(target or {}).get('chartTitle') or (target or {}).get('title
         return cls._row_field_text(row, *aliases.get(field, (field,)))
 
     @classmethod
-    def _build_descriptive_rows(cls, rows):
+    def _build_descriptive_rows(cls, rows, symbol_only=True, role='variable_analysis'):
+        symbol_map = cls._symbolic_variable_map(rows, role) if symbol_only else {}
         grouped = {}
         order = []
         for row in rows or []:
@@ -3495,7 +4485,7 @@ AI 建议标题：{(target or {}).get('chartTitle') or (target or {}).get('title
             if not variable:
                 continue
             if variable not in grouped:
-                grouped[variable] = {'变量': variable}
+                grouped[variable] = {'变量': cls._symbolic_name(variable, symbol_map) if symbol_only else variable}
                 order.append(variable)
             stat_type = cls._row_stat_type(row)
             value = cls._value_text(row)
@@ -3520,10 +4510,11 @@ AI 建议标题：{(target or {}).get('chartTitle') or (target or {}).get('title
                 for name in order
             ]
             if any(any(cell for cell in row[1:]) for row in body):
-                return ['变量', '样本量', '均值', '标准差', '最小值', '最大值'], body
+                return ['Var', 'N', 'Mean', 'SD', 'Min', 'Max'], body
         body = []
         for row in rows or []:
-            variable = cls._compact_table_cell(cls._label_without_variable_symbol(row.get('label', '')), 28)
+            variable = cls._row_variable_name(row) or cls._compact_table_cell(cls._label_without_variable_symbol(row.get('label', '')), 28)
+            variable = cls._symbolic_name(variable, symbol_map) if symbol_only else variable
             sample_size = cls._descriptive_value(row, 'sampleSize')
             mean = cls._descriptive_value(row, 'mean')
             std_dev = cls._descriptive_value(row, 'stdDev')
@@ -3532,10 +4523,11 @@ AI 建议标题：{(target or {}).get('chartTitle') or (target or {}).get('title
             if not any((variable, sample_size, mean, std_dev, min_value, max_value)):
                 continue
             body.append([variable, sample_size, mean, std_dev, min_value, max_value])
-        return ['变量', '样本量', '均值', '标准差', '最小值', '最大值'], body
+        return ['Var', 'N', 'Mean', 'SD', 'Min', 'Max'], body
 
     @classmethod
-    def _build_regression_rows(cls, rows):
+    def _build_regression_rows(cls, rows, symbol_only=True, role='variable_analysis'):
+        symbol_map = cls._symbolic_variable_map(rows, role) if symbol_only else {}
         grouped = {}
         order = []
         for row in rows or []:
@@ -3543,7 +4535,7 @@ AI 建议标题：{(target or {}).get('chartTitle') or (target or {}).get('title
             if not variable:
                 continue
             if variable not in grouped:
-                grouped[variable] = {'变量': variable}
+                grouped[variable] = {'变量': cls._symbolic_name(variable, symbol_map) if symbol_only else variable}
                 order.append(variable)
             stat_type = cls._row_stat_type(row)
             value = cls._value_text(row)
@@ -3571,10 +4563,11 @@ AI 建议标题：{(target or {}).get('chartTitle') or (target or {}).get('title
                     item.get('pValue', ''),
                 ])
             if any(any(cell for cell in row[1:]) for row in body):
-                return ['变量', '系数', '标准误', 't统计量', 'P值'], body
+                return ['Var', 'Coef', 'SE', 't', 'p'], body
         body = []
         for row in rows or []:
-            variable = cls._compact_table_cell(cls._label_without_variable_symbol(row.get('label', '')), 28)
+            variable = cls._row_variable_name(row) or cls._compact_table_cell(cls._label_without_variable_symbol(row.get('label', '')), 28)
+            variable = cls._symbolic_name(variable, symbol_map) if symbol_only else variable
             coefficient = cls._row_field_text(row, 'coefficient') or cls._value_text(row)
             significance = cls._row_field_text(row, 'significance')
             if significance and coefficient and not coefficient.endswith(significance):
@@ -3585,15 +4578,18 @@ AI 建议标题：{(target or {}).get('chartTitle') or (target or {}).get('title
             if not any((variable, coefficient, std_error, t_statistic, p_value)):
                 continue
             body.append([variable, coefficient, std_error, t_statistic, p_value])
-        return ['变量', '系数', '标准误', 't统计量', 'P值'], body
+        return ['Var', 'Coef', 'SE', 't', 'p'], body
 
     @classmethod
-    def _build_correlation_rows(cls, rows):
+    def _build_correlation_rows(cls, rows, symbol_only=True, role='variable_analysis'):
+        symbol_map = cls._symbolic_variable_map(rows, role) if symbol_only else {}
         variables = []
         pairs = {}
         for row in rows or []:
-            left = cls._compact_table_cell(cls._row_variable_name(row), 22)
-            right = cls._compact_table_cell(cls._row_related_variable(row), 22)
+            left_name = cls._compact_table_cell(cls._row_variable_name(row), 22)
+            right_name = cls._compact_table_cell(cls._row_related_variable(row), 22)
+            left = cls._symbolic_name(left_name, symbol_map) if symbol_only else left_name
+            right = cls._symbolic_name(right_name, symbol_map) if symbol_only and right_name else right_name
             value = cls._row_field_text(row, 'correlation') or cls._value_text(row)
             if not left:
                 continue
@@ -3611,7 +4607,7 @@ AI 建议标题：{(target or {}).get('chartTitle') or (target or {}).get('title
                 for right in variables:
                     row.append('1.000' if left == right else pairs.get((left, right), ''))
                 body.append(row)
-            return ['变量'] + variables, body
+            return ['Var'] + variables, body
         numeric_rows = cls._numeric_rows(rows)
         if len(numeric_rows) >= 2:
             body = []
@@ -3621,32 +4617,65 @@ AI 建议标题：{(target or {}).get('chartTitle') or (target or {}).get('title
                     cls._compact_table_cell(row.get('relatedLabel', '') or '相关变量', 22),
                     cls._value_text(row),
                 ])
-            return ['变量', '相关变量', '相关系数'], body
+            return ['Var', 'Var2', 'r'], body
         headers, body = cls._numeric_pivot_table(rows)
         return headers, body
 
     @classmethod
-    def _build_test_result_rows(cls, rows):
+    def _build_test_result_rows(cls, rows, symbol_only=True, role='variable_analysis'):
+        symbol_map = cls._symbolic_variable_map(rows, role) if symbol_only else {}
+        grouped = {}
+        order = []
+        for row in rows or []:
+            item_name = cls._row_variable_name(row) or cls._compact_table_cell(cls._label_without_variable_symbol(row.get('label', '')), 28)
+            item = cls._symbolic_name(item_name, symbol_map, fallback_prefix='F') if symbol_only else item_name
+            if not item:
+                continue
+            if item not in grouped:
+                grouped[item] = {'F': item}
+                order.append(item)
+            stat_type = cls._row_stat_type(row)
+            value = cls._value_text(row)
+            if stat_type in {'eigenvalue', 'contributionRate', 'cumulativeRate'} and value:
+                grouped[item][stat_type] = value
+            for field in ('eigenvalue', 'contributionRate', 'cumulativeRate'):
+                field_value = cls._row_field_text(row, field)
+                if field_value:
+                    grouped[item][field] = field_value
+        if grouped:
+            body = [
+                [
+                    grouped[item].get('F', item),
+                    grouped[item].get('eigenvalue', ''),
+                    grouped[item].get('contributionRate', ''),
+                    grouped[item].get('cumulativeRate', ''),
+                ]
+                for item in order
+            ]
+            if any(any(cell for cell in row[1:]) for row in body):
+                return ['F', 'Eigen', 'Var%', 'Cum%'], body
         body = []
         for row in rows or []:
-            item = cls._compact_table_cell(cls._label_without_variable_symbol(row.get('label', '')), 28)
+            item_name = cls._row_variable_name(row) or cls._compact_table_cell(cls._label_without_variable_symbol(row.get('label', '')), 28)
+            item = cls._symbolic_name(item_name, symbol_map, fallback_prefix='F') if symbol_only else item_name
             statistic = cls._row_field_text(row, 'coefficient', 'tStatistic', 'correlation') or cls._value_text(row)
             p_value = cls._row_field_text(row, 'pValue')
-            note = cls._compact_measure_note(row, 42) or cls._compact_table_cell(row.get('note', ''), 42)
-            if not any((item, statistic, p_value, note)):
+            if not any((item, statistic, p_value)):
                 continue
-            body.append([item, statistic, p_value, note])
-        return ['项目', '统计量', 'P值', '说明'], body
+            body.append([item, statistic, p_value])
+        return ['Var', 'Stat', 'p'], body
 
     @classmethod
-    def _numeric_pivot_table(cls, rows):
+    def _numeric_pivot_table(cls, rows, symbol_only=False, role='evidence_data'):
         numeric_rows = cls._numeric_rows(rows)
+        symbol_map = cls._symbolic_variable_map(numeric_rows, role) if symbol_only else {}
         years = []
         series = []
         points = {}
         for row in numeric_rows:
             year = cls._row_year(row)
             name = cls._row_variable_name(row)
+            display_name = cls._symbolic_name(name, symbol_map) if symbol_only else name
             value = cls._value_text(row)
             if not year or not name:
                 continue
@@ -3654,23 +4683,25 @@ AI 建议标题：{(target or {}).get('chartTitle') or (target or {}).get('title
                 continue
             if year not in years:
                 years.append(year)
-            if name not in series:
-                series.append(name)
-            points[(year, name)] = value
+            if display_name not in series:
+                series.append(display_name)
+            points[(year, display_name)] = value
         if years and series and (len(years) >= 2 or len(series) >= 2):
             years.sort(key=lambda item: int(re.search(r'\d{4}', item).group(0)) if re.search(r'\d{4}', item) else 0)
-            headers = ['年份'] + series
+            headers = ['t'] + series if symbol_only else ['年份'] + series
             body = [[year.replace('年', '')] + [points.get((year, name), '') for name in series] for year in years]
             return headers, body
         structure = cls._series_structure(numeric_rows)
         if structure:
-            headers = ['年份'] + list(structure.get('series') or [])
+            raw_series = list(structure.get('series') or [])
+            mapped_series = [cls._symbolic_name(name, symbol_map) if symbol_only else name for name in raw_series]
+            headers = (['t'] if symbol_only else ['年份']) + mapped_series
             body = []
             values = structure.get('values') or {}
             for year in structure.get('years') or []:
                 body.append([year.replace('年', '')] + [
                     f'{values.get(series, {}).get(year):g}' if year in values.get(series, {}) else ''
-                    for series in headers[1:]
+                    for series in raw_series
                 ])
             return headers, body
         labels = [str(row.get('label', '') or '') for row in numeric_rows]
@@ -3688,13 +4719,14 @@ AI 建议标题：{(target or {}).get('chartTitle') or (target or {}).get('title
             points[(year, name)] = cls._value_text(row)
         if len(years) >= 2 and series:
             years.sort(key=lambda item: int(re.search(r'\d{4}', item).group(0)) if re.search(r'\d{4}', item) else 0)
-            headers = ['年份'] + series
+            mapped_series = [cls._symbolic_name(name, symbol_map) if symbol_only else name for name in series]
+            headers = (['t'] if symbol_only else ['年份']) + mapped_series
             body = [[year.replace('年', '')] + [points.get((year, name), '') for name in series] for year in years]
             return headers, body
         source_rows = rows or numeric_rows
-        return ['指标/数据项', '数值'], [
+        return (['Var', 'Value'] if symbol_only else ['指标/数据项', '数值']), [
             [
-                row.get('label', ''),
+                (cls._symbolic_name(cls._row_variable_name(row) or row.get('label', ''), symbol_map) if symbol_only else row.get('label', '')),
                 cls._value_text(row) if row.get('value') is not None or str(row.get('rawValue', '') or '').strip() else '',
             ]
             for row in source_rows
@@ -3714,6 +4746,21 @@ AI 建议标题：{(target or {}).get('chartTitle') or (target or {}).get('title
         return ['指标/变量', '变量符号', '测度方法'], body
 
     @classmethod
+    def _build_impact_factor_rows(cls, rows):
+        factors = []
+        seen = set()
+        for row in rows or []:
+            label = cls._compact_table_cell(cls._label_without_variable_symbol(row.get('label', '')), 32)
+            if not label:
+                continue
+            for part in re.split(r'[、,，；;]\s*', label):
+                item = cls._compact_table_cell(part, 28)
+                if item and item not in seen:
+                    factors.append(item)
+                    seen.add(item)
+        return ['影响因素'], [[factor] for factor in factors]
+
+    @classmethod
     def _build_source_rows_for_paper(cls, rows):
         body = []
         for row in rows or []:
@@ -3727,25 +4774,29 @@ AI 建议标题：{(target or {}).get('chartTitle') or (target or {}).get('title
     @classmethod
     def _paper_table_headers_and_rows(cls, rows, title='', target=None):
         kind = cls._table_kind(rows, title, target)
-        if kind == 'definition':
+        role = cls._normalize_table_role((target or {}).get('tableRole', '') if isinstance(target, dict) else '', cls._table_context_text(title, target))
+        symbol_only = role != 'impact_factors'
+        if kind == 'impact_factors':
+            headers, body = cls._build_impact_factor_rows(rows)
+        elif kind == 'definition':
             headers, body = cls._build_variable_definition_rows(rows)
         elif kind == 'descriptive':
-            headers, body = cls._build_descriptive_rows(rows)
+            headers, body = cls._build_descriptive_rows(rows, symbol_only=symbol_only, role=role)
         elif kind == 'correlation':
-            headers, body = cls._build_correlation_rows(rows)
+            headers, body = cls._build_correlation_rows(rows, symbol_only=symbol_only, role=role)
         elif kind == 'regression':
-            headers, body = cls._build_regression_rows(rows)
+            headers, body = cls._build_regression_rows(rows, symbol_only=symbol_only, role=role)
         elif kind == 'test_result':
-            headers, body = cls._build_test_result_rows(rows)
+            headers, body = cls._build_test_result_rows(rows, symbol_only=symbol_only, role=role)
         elif kind == 'numeric':
-            headers, body = cls._numeric_pivot_table(rows)
+            headers, body = cls._numeric_pivot_table(rows, symbol_only=symbol_only, role=role)
         else:
             headers, body = cls._build_source_rows_for_paper(rows)
         return kind, headers, body
 
     @classmethod
     def _sanitize_variable_table_rows(cls, rows, title='', target=None):
-        if cls._table_kind(rows, title, target) != 'definition':
+        if cls._table_kind(rows, title, target) not in {'definition', 'impact_factors'}:
             return rows
         sanitized = []
         for row in rows or []:
@@ -3778,7 +4829,8 @@ AI 建议标题：{(target or {}).get('chartTitle') or (target or {}).get('title
         lines = [f'{table_label or "表1.1"} {title}']
         table_kind, headers, body = cls._paper_table_headers_and_rows(rows, title, target)
         if not headers:
-            headers = ['指标/变量', '口径说明']
+            role = cls._normalize_table_role((target or {}).get('tableRole', '') if isinstance(target, dict) else '', cls._table_context_text(title, target))
+            headers = ['影响因素'] if role == 'impact_factors' else ['Var', 'Value']
         if unit and table_kind in {'numeric', 'descriptive', 'correlation', 'regression', 'test_result'}:
             lines.append(f'（单位：{unit}）')
         align = ['---'] * len(headers)
@@ -3790,7 +4842,6 @@ AI 建议标题：{(target or {}).get('chartTitle') or (target or {}).get('title
             body = [[''] * len(headers)]
         for row in body:
             lines.append('| ' + ' | '.join(cls._markdown_table_escape(cell) for cell in row) + ' |')
-        lines.append(f'资料来源：{cls._source_note_text(rows)}')
         if table_kind == 'regression':
             note = next((str(row.get('note', '') or '').strip() for row in rows or [] if str(row.get('note', '') or '').strip()), '')
             lines.append(f'注：{note or "*、**、***分别表示在10%、5%、1%的水平上显著。"}')
@@ -3871,34 +4922,88 @@ AI 建议标题：{(target or {}).get('chartTitle') or (target or {}).get('title
     def _build_table_replacement_text(self, target, caption, table_markdown, *, rows=None, unit='', table_label='表1'):
         original = DataChartAssistant._normalize_text(target.get('originalText', '') if isinstance(target, dict) else '')
         rows = rows or []
+        table_role = self._normalize_table_role(target.get('tableRole') or target.get('role'), self._table_context_text(caption, target))
+        analysis_plan = target.get('analysisPlan') if isinstance(target, dict) and isinstance(target.get('analysisPlan'), dict) else None
+        analysis_parameters = target.get('analysisParameters') if isinstance(target, dict) and isinstance(target.get('analysisParameters'), list) else []
+        analysis_note = ''
+        if analysis_plan or analysis_parameters:
+            analysis_note = json.dumps({
+                'analysisPlan': analysis_plan or {},
+                'analysisParameters': analysis_parameters,
+            }, ensure_ascii=False, indent=2)
         has_numeric = bool(self._numeric_rows(rows))
         analysis_text = self._chart_analysis(rows, unit)
         data_points_text = self._data_points_text(rows)
         if self.api and hasattr(self.api, 'call_sync') and original:
-            system = (
-                f'你是严谨的论文写作助手。请根据已确认的数据表改写原段落，必须自然引入{table_label}。'
-                '数据来源由系统写入表下注释和参考文献，正文不要写来源名称、URL或“数据来源为”。'
-            )
+            if table_role == 'impact_factors':
+                system = (
+                    f'你是严谨的论文写作助手。请根据论文已有观点和影响因素归纳表改写原段落，必须自然引入{table_label}。'
+                    '该表是对正文内容的结构化整理，不是外部统计数据，不要写数据来源、URL、参考文献或引用编号。'
+                )
+            else:
+                system = (
+                    f'你是严谨的论文写作助手。请根据已确认的数据表改写原段落，必须自然引入{table_label}。'
+                    '数据来源由系统写入参考文献并用引用编号标注，正文不要写来源名称、URL或“数据来源为”。'
+                )
             rows_payload = [
                 {
                     'label': row.get('label'),
+                    'year': row.get('year', ''),
+                    'variable': row.get('variable', ''),
+                    'symbol': row.get('symbol', ''),
+                    'statType': row.get('statType', ''),
+                    'relatedVariable': row.get('relatedVariable', ''),
                     'value': row.get('value'),
                     'rawValue': row.get('rawValue', row.get('value')),
+                    'coefficient': row.get('coefficient', ''),
+                    'stdError': row.get('stdError', ''),
+                    'tStatistic': row.get('tStatistic', ''),
+                    'pValue': row.get('pValue', ''),
+                    'correlation': row.get('correlation', ''),
                     'sourceName': row.get('sourceName', ''),
                     'publisher': row.get('publisher', ''),
                 }
                 for row in rows
             ]
-            if has_numeric:
+            if table_role == 'impact_factors':
+                factor_text = '、'.join(
+                    dict.fromkeys(
+                        self._compact_table_cell(self._label_without_variable_symbol(row.get('label', '')), 28)
+                        for row in rows
+                        if self._compact_table_cell(self._label_without_variable_symbol(row.get('label', '')), 28)
+                    )
+                )
+                prompt = f'''请改写下面论文段落，使其自然引入{table_label}，并围绕表中的影响因素完善论述。
+
+要求：
+1. 保留原段落核心观点，但把空泛表述改成围绕关键影响因素的论文式分析。
+2. 正文使用“如{table_label}所示”“见{table_label}”等表述，不要输出 Markdown 表格。
+3. 这是正文内容归纳表，不要写来源名称、报告名、发布机构、URL、“数据来源为/来源来自”或参考文献编号。
+4. 不要编造统计数值；应说明这些因素如何影响该段讨论对象、约束条件或风险表现。
+5. 可以写成 1-2 个自然段，不要输出标题。
+6. 正文提到表时使用“{table_label}”，不要自行改成其他编号。
+
+原段落：
+{original}
+
+表题：{caption}
+影响因素：
+{factor_text or '请根据数据行 JSON 归纳。'}
+数据行 JSON：
+{json.dumps(rows_payload, ensure_ascii=False)}
+
+请直接输出改写后的段落。'''
+            elif has_numeric:
                 prompt = f'''请改写下面论文段落，使其自然引入{table_label}，并分析表中数据。
 
 要求：
 1. 保留原段落核心观点，但将空泛判断改为基于真实数据的分析。
 2. 正文使用“如{table_label}所示”“见{table_label}”等论文表述，不要输出 Markdown 表格。
-3. 正文不要写来源名称、报告名、发布机构、URL或“数据来源为/来源来自”；来源会出现在表下“资料来源”和参考文献中。
+3. 正文不要写来源名称、报告名、发布机构、URL或“数据来源为/来源来自”；来源由系统写入参考文献并用引用编号标注。
 4. 必须直接引用关键数值，并解释最高值、最低值、趋势、差距变化或结构占比中至少两类信息。
-5. 可以写成 1-2 个自然段，不要输出标题。
-6. 正文提到表时使用“{table_label}”，不要自行改成其他编号。
+5. 如果提供了 AI 数据分析计划或用户填写的 β/参数值，应结合这些信息说明表格如何服务于模型测算、方程代入或变量分析。
+6. 可以写成 1-2 个自然段，不要输出标题。
+7. 正文提到表时使用“{table_label}”，不要自行改成其他编号。
 
 原段落：
 {original}
@@ -3909,6 +5014,8 @@ AI 建议标题：{(target or {}).get('chartTitle') or (target or {}).get('title
 {data_points_text or '无'}
 真实数据分析：
 {analysis_text or '请根据数据行 JSON 自行归纳。'}
+AI 数据分析计划与用户填写参数：
+{analysis_note or '未提供'}
 数据行 JSON：
 {json.dumps(rows_payload, ensure_ascii=False)}
 
@@ -3920,7 +5027,7 @@ AI 建议标题：{(target or {}).get('chartTitle') or (target or {}).get('title
 要求：
 1. 保留原段落核心观点，但把空泛表述改成“为什么需要这些指标/变量/来源口径”的论文式说明。
 2. 正文使用“如{table_label}所示”“见{table_label}”等表述，不要输出 Markdown 表格。
-3. 正文不要写来源名称、报告名、发布机构、URL或“数据来源为/来源来自”；来源会出现在表下“资料来源”和参考文献中。
+3. 正文不要写来源名称、报告名、发布机构、URL或“数据来源为/来源来自”；来源由系统写入参考文献并用引用编号标注。
 4. 不要编造数值，不要写最高值、最低值、趋势、差距变化；应说明指标体系、变量口径、核验路径、可重复性或后续测度逻辑。
 5. 可以写成 1-2 个自然段，不要输出标题。
 6. 正文提到表时使用“{table_label}”，不要自行改成其他编号。
@@ -3931,6 +5038,8 @@ AI 建议标题：{(target or {}).get('chartTitle') or (target or {}).get('title
 表题：{caption}
 表格作用概括：
 {source_summary}
+AI 数据分析计划与用户填写参数：
+{analysis_note or '未提供'}
 数据行 JSON：
 {json.dumps(rows_payload, ensure_ascii=False)}
 
@@ -3954,6 +5063,8 @@ AI 建议标题：{(target or {}).get('chartTitle') or (target or {}).get('title
             return intro
         if table_label in original or '如表' in original or '见表' in original:
             return f'{original}\n\n{intro}'
+        if table_role == 'impact_factors':
+            return f'{original}\n\n为使上述论证的影响因素更加清晰，本文补充{table_label}。{intro}'
         return f'{original}\n\n为增强上述论证的数据支撑，本文补充{table_label}。{intro}'
 
     @classmethod

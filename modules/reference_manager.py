@@ -1714,7 +1714,7 @@ def reorder_references_for_full_paper(all_sections, reference_style='GB/T 7714',
     if reference_shortfall:
         reference_warning = (
             f'核验后仅保留 {entry_count} 条真实带链接参考文献，'
-            f'低于目标 {target_reference_count} 条，还差 {reference_shortfall} 条。'
+            f'低于按全文目标字数计算的目标 {target_reference_count} 条，还差 {reference_shortfall} 条。'
             '系统不会用无法核验的条目凑数，请继续补写相关章节或补充真实中文带链接文献。'
         )
 

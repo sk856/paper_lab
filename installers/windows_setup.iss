@@ -1,12 +1,12 @@
 ; 论文工坊 Inno Setup 安装脚本
 ; 需要 Inno Setup 6.0+
 
-#define MyAppName "论文工坊"
+#define MyAppName "论文工坊 Web 工作台"
 #ifndef MyAppVersion
 #define MyAppVersion "1.2.3"
 #endif
-#define MyAppPublisher "ThesisWorkshop"
-#define MyAppURL "https://github.com/Abnerla/AI_paper"
+#define MyAppPublisher "PaperLab"
+#define MyAppURL "https://github.com/sk856/paper_lab"
 #define MyAppExeName "AI_Paper.exe"
 
 [Setup]
@@ -21,7 +21,6 @@ DefaultGroupName={#MyAppName}
 DisableProgramGroupPage=yes
 OutputDir=..\dist
 OutputBaseFilename=AI_Paper-v{#MyAppVersion}-windows-setup
-SetupIconFile=..\logo.ico
 Compression=lzma2/max
 SolidCompression=yes
 WizardStyle=modern
